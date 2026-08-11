@@ -1,0 +1,1 @@
+# An Integrated AI-Driven Smart Finance Platform for Portfolio Optimization, Fraud Detection, Blockchain Auditability and Explainable Agentic Assistance for Stock Markets
