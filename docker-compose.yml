@@ -1,0 +1,126 @@
+# Full platform stack for J26-SE-325.
+#
+#   docker compose up --build      then open http://localhost:3000
+#
+# Components 2-4 are reserved below as commented blocks so a teammate uncomments rather than
+# redesigns. Ports are assigned by convention: 8000 + component number, with the shared
+# platform service on 8100.
+
+services:
+  # --- shared services ------------------------------------------------------------------
+  platform:
+    build:
+      context: ./backend/Platform
+    ports:
+      - "8100:8100"
+    environment:
+      # Shared with every component so each can VERIFY tokens this service ISSUES, without
+      # calling back here on each request. The service refuses to start if it is unset,
+      # short, or still the placeholder from .env.example.
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in a repo-root .env — see .env.example}
+      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      DATABASE_URL: sqlite:////app/artifacts/platform.sqlite
+    volumes:
+      # Users and portfolios must outlive the container, or every restart wipes the accounts.
+      - platform_data:/app/artifacts
+    restart: unless-stopped
+
+  component1:
+    build:
+      context: ./backend/Portfolio-Optimization
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in a repo-root .env}
+      AUTH_REQUIRED: "true"
+      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_ENABLED: "true"
+      MLFLOW_TRACKING_URI: sqlite:///artifacts/mlflow.db
+    volumes:
+      # The model registry lives here; Component 3 anchors model_version on-chain, so a
+      # version that vanished on restart would break its provenance chain.
+      - ./backend/Portfolio-Optimization/artifacts:/app/artifacts
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked in at build time: NEXT_PUBLIC_* is inlined into the client bundle, never read
+        # at runtime. These are the URLs the BROWSER uses, so they are localhost — not the
+        # compose service names, which only resolve inside the network.
+        NEXT_PUBLIC_PLATFORM_URL: http://localhost:8100
+        NEXT_PUBLIC_PORTFOLIO_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - platform
+      - component1
+    restart: unless-stopped
+
+  # --- supporting infrastructure ---------------------------------------------------------
+  kafka:
+    # KRaft mode, no ZooKeeper. One broker is enough: the TAF calls for a local event bus,
+    # not a production cluster.
+    image: bitnami/kafka:3.7
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_CFG_NODE_ID: "0"
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - kafka_data:/bitnami/kafka
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlruns/mlflow.db
+      --default-artifact-root /mlruns/artifacts
+    volumes:
+      - ./backend/Portfolio-Optimization/artifacts/mlruns:/mlruns
+    restart: unless-stopped
+
+  # --- reserved for teammates -------------------------------------------------------------
+  # Each needs three things to join: copy service/cors.py and service/auth.py from
+  # Component 1, share the same JWT_SECRET, and add its URL to SERVICES in
+  # frontend/lib/api/client.ts. See any placeholder page in the running app.
+  #
+  # component2:                    # Fraud Detection
+  #   build:
+  #     context: ./backend/Fraud-Detection
+  #   ports: ["8001:8001"]
+  #   environment:
+  #     JWT_SECRET: ${JWT_SECRET:?}
+  #     AUTH_REQUIRED: "true"
+  #     ALLOWED_ORIGINS: http://localhost:3000
+  #     KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  #   depends_on:
+  #     kafka: {condition: service_healthy}
+  #
+  # component3:                    # Blockchain Auditability  -> ports ["8002:8002"]
+  # component4:                    # Agentic Assistance       -> ports ["8003:8003"]
+
+volumes:
+  platform_data:
+  kafka_data:

@@ -1,0 +1,18 @@
+# Runtime data: the SQLite database holds real user rows including password hashes.
+# Never commit it.
+artifacts/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# Environment
+.venv/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
