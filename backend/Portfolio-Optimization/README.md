@@ -486,16 +486,50 @@ proposal-named method and is preferred whenever its weights are present.
 
 ## Status
 
+All eight phases are complete. **362 tests passing**, zero unimplemented functions.
+
 | Phase | Scope | State |
 |-------|-------|-------|
-| 0 | Scaffold + dependency gate | in progress |
-| 1 | Ingestion + per-symbol window selection | not started |
-| 2 | Technical + sentiment features | not started |
-| 3 | Baseline LSTM | not started |
-| 4 | Foundation models + hybrid + registry | not started |
-| 5a | MOEA/D allocation | not started |
-| 5b | Fuzzy GA withdrawal | not started |
-| 5c | Agent tools + trajectories | not started |
-| 6 | FastAPI + Kafka | not started |
-| 7 | Evaluation (RQ1–RQ4) | not started |
-| 8 | Containerize + monitor | not started |
+| 0 | Scaffold + dependency gate | complete |
+| 1 | Ingestion + per-symbol window selection | complete — run on real data, 26/26 symbols |
+| 2 | Technical + sentiment features | complete — sentiment runs on the local model |
+| 3 | Baseline LSTM | complete — RQ1 baseline row measured |
+| 4 | Foundation adapters + hybrid + registry | code complete; fusion validated locally, foundation weights pending Colab |
+| 5a | MOEA/D + Markowitz + 3 Pareto rules | complete — RQ2 measured |
+| 5b | Fuzzy GA withdrawal | complete — RQ3/RQ4 measured |
+| 5c | Agent tools + grounding + trajectories | complete — 767 grounded trajectories |
+| 6 | FastAPI + Kafka + frozen contract | complete — wired to the frontend |
+| 7 | Evaluation harness + notebooks | complete — both notebooks execute |
+| 8 | Docker + Kafka + MLflow + Prometheus | complete |
+
+Remaining work is compute on other hardware, not code: LoRA fine-tuning in Colab, then
+re-running RQ1 with the foundation and hybrid rows populated. See
+`experiments/colab_finetune.ipynb`.
+
+## Frontend integration
+
+This service is consumed by the Next.js frontend in `frontend/`. Two additions support that,
+both written to be copied verbatim into Components 2-4:
+
+| File | Purpose |
+|---|---|
+| `service/cors.py` | The browser calls this service directly rather than through a proxy, so without CORS headers it discards the response before any handler runs. Origins come from `ALLOWED_ORIGINS`. |
+| `service/auth.py` | Verifies the JWT issued by the shared platform service (`backend/Platform`) using the same `JWT_SECRET`. Verification only — this service never calls the platform on the request path, so platform downtime cannot become Component 1's. |
+
+`require_user` is gated by `AUTH_REQUIRED`, which defaults to **off**. That keeps the
+existing test suite running unauthenticated; docker-compose turns it on. A flag defaulting to
+"secure" would have meant editing every one of those tests, which is how a security control
+ends up disabled wholesale rather than scoped.
+
+Ports: this service on **8000**, the platform service on **8100**, the frontend on **3000**.
+Full wiring instructions for the other components are in the repository-root
+[`INTEGRATION.md`](../../INTEGRATION.md).
+
+### Interactive latency
+
+`/portfolio/optimize` runs MOEA/D with `n_partitions=8, n_generations=100` — the same
+configuration RQ2 was measured with — rather than the `MOEADConfig()` research defaults of
+12 x 200. That is ~7s instead of ~30s, which matters because the TAF's claim for this
+component is a *"real-time, user-facing service"*. Profiling showed the cost is pymoo's own
+genetic operators, not the objective functions: objective evaluation accounts for under a
+second of it. Offline analysis should pass its own `MOEADConfig` for a denser front.
