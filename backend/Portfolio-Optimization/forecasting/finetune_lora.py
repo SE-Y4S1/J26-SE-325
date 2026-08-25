@@ -140,25 +140,51 @@ def _resolve_inner_model(forecaster) -> torch.nn.Module:
 
 
 def _discover_target_modules(model: torch.nn.Module) -> tuple[str, ...]:
-    """Pick attention projection names that actually exist in this architecture.
+    """Pick Linear modules for LoRA to adapt, without needing to know the architecture.
 
     Guessing wrong is a silent failure mode: PEFT raises only if NOTHING matches, so a
-    partially-matching guess would attach adapters to the wrong layers and train something
-    subtly useless.
+    partially-matching guess attaches adapters to the wrong layers and trains something
+    subtly useless. But a fixed candidate list is brittle in the other direction -- it fails
+    outright on any architecture that names its projections differently, which is how
+    fine-tuning dies on an unfamiliar foundation model.
+
+    Three tiers, most specific first:
+      1. A known attention-projection pair (q_proj/v_proj, q/v, query/value).
+      2. Anything whose name looks like an attention projection.
+      3. Every Linear layer. Adapting all linears is a standard, well-behaved LoRA strategy
+         -- more trainable parameters than necessary, but correct.
     """
-    names = {name.rsplit(".", 1)[-1] for name, _ in model.named_modules()}
+    linear_names = {
+        name.rsplit(".", 1)[-1]
+        for name, module in model.named_modules()
+        if isinstance(module, torch.nn.Linear)
+    }
+    if not linear_names:
+        raise ValueError(
+            f"{type(model).__name__} exposes no torch.nn.Linear modules, so there is nothing "
+            "for LoRA to adapt. Pass LoRAConfig(target_modules=(...)) explicitly."
+        )
+
     for candidate in CANDIDATE_TARGET_MODULES:
-        if all(part in names for part in candidate):
-            logger.info("LoRA target modules: %s", candidate)
+        if all(part in linear_names for part in candidate):
+            logger.info("LoRA targets (known attention pair): %s", candidate)
             return candidate
 
-    linear = sorted(
-        {n.rsplit(".", 1)[-1] for n, m in model.named_modules() if isinstance(m, torch.nn.Linear)}
+    attention_like = tuple(sorted(
+        n for n in linear_names
+        if any(tok in n.lower() for tok in ("q_", "k_", "v_", "query", "key", "value", "attn", "attention"))
+    ))
+    if attention_like:
+        logger.info("LoRA targets (attention-like names): %s", attention_like)
+        return attention_like
+
+    all_linear = tuple(sorted(linear_names))
+    logger.warning(
+        "no attention-projection names recognised in %s; adapting ALL %d Linear module "
+        "name(s): %s. This trains more parameters than necessary but is correct.",
+        type(model).__name__, len(all_linear), all_linear,
     )
-    raise ValueError(
-        "could not auto-discover attention projections for LoRA. Linear layers present: "
-        f"{linear}. Pass LoRAConfig(target_modules=(...)) explicitly."
-    )
+    return all_linear
 
 
 def _quantile_loss(
