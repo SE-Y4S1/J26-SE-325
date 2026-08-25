@@ -591,16 +591,48 @@ def test_lora_target_module_discovery_handles_t5_naming() -> None:
     assert _discover_target_modules(FakeT5Attention()) == ("q", "v")
 
 
-def test_lora_target_discovery_reports_what_it_found_when_it_fails() -> None:
+def test_lora_target_discovery_falls_back_to_all_linears() -> None:
+    """An unrecognised architecture must still be adaptable. Raising here is what killed
+    fine-tuning on an unfamiliar foundation model; adapting every Linear is more parameters
+    than necessary but correct, and PEFT handles it fine."""
     from forecasting.finetune_lora import _discover_target_modules
 
     class Unrecognised(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.weird_layer = torch.nn.Linear(4, 4)
+            self.other = torch.nn.Linear(4, 4)
 
-    with pytest.raises(ValueError, match="weird_layer"):
-        _discover_target_modules(Unrecognised())
+    targets = _discover_target_modules(Unrecognised())
+    assert set(targets) == {"weird_layer", "other"}
+
+
+def test_lora_target_discovery_prefers_attention_like_names() -> None:
+    """Between the known-pair tier and the all-linears tier, anything that looks like an
+    attention projection should win -- that is where LoRA is most effective."""
+    from forecasting.finetune_lora import _discover_target_modules
+
+    class OddNaming(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn_qkv = torch.nn.Linear(4, 4)
+            self.feed_forward = torch.nn.Linear(4, 4)
+
+    targets = _discover_target_modules(OddNaming())
+    assert targets == ("attn_qkv",)
+
+
+def test_lora_target_discovery_raises_only_when_there_are_no_linears() -> None:
+    """The one genuinely unadaptable case."""
+    from forecasting.finetune_lora import _discover_target_modules
+
+    class NoLinears(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.norm = torch.nn.LayerNorm(4)
+
+    with pytest.raises(ValueError, match="no torch.nn.Linear"):
+        _discover_target_modules(NoLinears())
 
 
 def test_resolve_inner_model_finds_a_nested_module() -> None:

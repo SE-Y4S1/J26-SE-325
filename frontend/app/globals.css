@@ -22,5 +22,8 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Was `Arial, Helvetica, sans-serif` from the starter, which overrode the Geist font that
+     layout.tsx goes to the trouble of loading. The starter page only looked right because it
+     re-applied `font-sans` on its own wrapper. */
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }

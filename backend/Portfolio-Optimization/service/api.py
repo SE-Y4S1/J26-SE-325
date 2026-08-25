@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 
 from service.contracts import (
     AssetSale,
@@ -27,6 +27,7 @@ from service.contracts import (
     WithdrawalRequest,
     WithdrawalResponse,
 )
+from service.auth import CallerIdentity, require_user
 from service.events import publish_decision
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,24 @@ app = FastAPI(
         "instant, loss-minimized withdrawal planning (J26-SE-325, Component 1)."
     ),
 )
+
+
+def _install_cors(application: FastAPI) -> None:
+    """Enable CORS so the browser may call this service directly.
+
+    The frontend talks to each backend from the browser rather than proxying through
+    Next.js, so without these headers the browser rejects every response before any handler
+    runs. Origins come from ALLOWED_ORIGINS; see service/cors.py.
+    """
+    try:
+        from service.cors import install_cors
+
+        install_cors(application)
+    except ImportError:  # pragma: no cover - cors.py is part of the package
+        logger.warning("service/cors.py missing; browser calls will be blocked")
+
+
+_install_cors(app)
 
 
 def _install_metrics(application: FastAPI) -> None:
@@ -118,7 +137,10 @@ def health() -> HealthResponse:
 
 
 @app.post("/forecast", response_model=ForecastResponse)
-def forecast(request: ForecastRequest) -> ForecastResponse:
+def forecast(
+    request: ForecastRequest,
+    caller: CallerIdentity | None = Depends(require_user),
+) -> ForecastResponse:
     """Per-symbol quantile forecast from the active hybrid model."""
     from service.deps import get_active_forecaster
 
@@ -149,7 +171,10 @@ def forecast(request: ForecastRequest) -> ForecastResponse:
 
 
 @app.post("/portfolio/optimize", response_model=PortfolioResponse)
-def optimize_portfolio(request: PortfolioRequest) -> PortfolioResponse:
+def optimize_portfolio(
+    request: PortfolioRequest,
+    caller: CallerIdentity | None = Depends(require_user),
+) -> PortfolioResponse:
     """Long-term allocation via MOEA/D. Publishes a decision event."""
     from agent.tools import run_moead_rebalance
 
@@ -182,7 +207,10 @@ def optimize_portfolio(request: PortfolioRequest) -> PortfolioResponse:
 
 
 @app.post("/portfolio/withdraw", response_model=WithdrawalResponse)
-def withdraw(request: WithdrawalRequest) -> WithdrawalResponse:
+def withdraw(
+    request: WithdrawalRequest,
+    caller: CallerIdentity | None = Depends(require_user),
+) -> WithdrawalResponse:
     """Instant, loss-minimized withdrawal plan via the fuzzy GA. Publishes a decision event.
 
     With use_agent=True the Phase 5c agent chooses the optimizer inputs; the numbers still

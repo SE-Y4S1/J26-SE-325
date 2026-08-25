@@ -154,7 +154,7 @@ def run_moead_rebalance(
     """Long-term allocation. Wraps optimization.moead_rebalance + pareto_selection."""
     import numpy as np
 
-    from optimization.moead_rebalance import optimize_allocation
+    from optimization.moead_rebalance import MOEADConfig, optimize_allocation
     from optimization.pareto_selection import SelectionRule, select
 
     symbols = tuple(portfolio_state)
@@ -174,9 +174,17 @@ def run_moead_rebalance(
     rng = np.random.default_rng(42)
     scenarios = rng.normal(expected_returns, volatility, size=(200, len(symbols)))
 
+    # Lighter than MOEADConfig()'s research defaults (12 partitions x 200 generations,
+    # ~18k evaluations, ~30s). This is an INTERACTIVE endpoint and the TAF's claim for it is
+    # a "real-time, user-facing service" -- 30 seconds of a spinner is not that. 8 x 100
+    # matches what experiments/run_rq_analysis.py actually used to produce the RQ2 result, so
+    # this is the measured configuration rather than a degraded one.
+    #
+    # Offline analysis should pass its own MOEADConfig if it wants a denser front.
     front = optimize_allocation(
         expected_returns, scenarios, adv, current_weights, float(total), symbols,
         volatility=volatility,
+        config=MOEADConfig(n_partitions=8, n_generations=100),
     )
     chosen = select(
         front.objectives, front.weights,

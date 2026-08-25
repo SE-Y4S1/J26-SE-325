@@ -1,1 +1,6 @@
+# Claude Code local settings
 .claude/
+
+# Repo-root secrets read by docker-compose.yml. JWT_SECRET lives here and must never be
+# committed; .env.example carries the template.
+.env
