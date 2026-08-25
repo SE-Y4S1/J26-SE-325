@@ -1,0 +1,99 @@
+[project]
+name = "portfolio-optimization"
+version = "0.1.0"
+description = "Component 1 (J26-SE-325): liquidity-aware forecasting and multi-objective portfolio optimization engine with instant, loss-minimized withdrawal planning."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+# Python 3.12 is the ONLY version satisfying the full stack:
+#   - pandas-ta (current PyPI releases) requires >=3.12
+#   - jax 0.11.x requires >=3.12
+#   - numba win_amd64 wheels stop at cp313
+# The build brief's "Python 3.10 required for timesfm" was inverted: timesfm is >=3.10,
+# so 3.12 satisfies it. See README "Deviations from the build brief".
+dependencies = [
+    # --- core ---
+    "numpy>=2.1",   # no upper cap: pandas-ta-openbb has no numba pin
+    "pandas>=2.2.0,<3",   # pandas-ta-openbb is not yet pandas-3 compatible
+    "pyarrow>=17.0.0",
+    "scipy>=1.15.3",
+    "statsmodels>=0.14",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+    # --- data ingestion ---
+    "yfinance>=0.2.40",
+    "requests>=2.32",
+    # --- features ---
+    # pandas-ta-openbb, NOT pandas-ta: the upstream 0.3.14b0 was pulled from PyPI and the
+    # current release hard-pins numba==0.61.2, boxing numpy into [2.2.6, 2.3).
+    "pandas-ta-openbb>=0.4.24",
+    "transformers>=4.44,<6",
+    "torch>=2.4",
+    # --- forecasting ---
+    "peft>=0.13",
+    "accelerate>=0.34",
+    # --- optimization ---
+    "pymoo>=0.6.1",
+    "scikit-fuzzy>=0.5.0",
+    "networkx>=3.0",
+    "deap>=1.4.1",
+    # --- experiment tracking ---
+    "mlflow>=2.16",
+    # --- service ---
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "confluent-kafka>=2.5",
+    "prometheus-fastapi-instrumentator>=7.0",
+    # --- agent (Ollama via its OpenAI-compatible endpoint) ---
+    "openai>=1.50",
+]
+
+[project.optional-dependencies]
+# Foundation forecasters are optional extras so a failure in one never blocks the pipeline.
+# Phase 0's dependency gate records which of these actually import; RQ1 reports on whichever
+# succeed. See forecasting/base.py.
+timesfm = ["timesfm[torch]==2.0.2"]
+chronos = ["chronos-forecasting>=1.5.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+    "httpx>=0.27",
+    "ipykernel>=6.29",
+    "nbclient>=0.10",      # so experiments/rq_analysis.ipynb can be executed headlessly
+    "nbformat>=5.10",
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+]
+
+# This machine has an AMD Radeon 610M iGPU and no CUDA. The default PyPI torch wheel for
+# Windows bundles cuDNN/cuBLAS and is ~2.5GB unpacked -- multiple GB of CUDA libraries that
+# can never execute here, and they dominated install time. The CPU index ships the same
+# torch API at ~200MB.
+#
+# Consequence for Phase 4: LoRA fine-tuning runs in Colab (free T4), and inference runs
+# locally on CPU. That was already the plan; this makes it explicit in the dependency set.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[tool.uv]
+# Virtual project: the module tree lives flat at the repo root (data/, features/, ...) and is
+# imported via rootdir rather than installed as a wheel. Avoids a build backend entirely.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "slow: needs network, a model download, or heavy compute (deselect with '-m \"not slow\"')",
+    "integration: needs a live external service (Ollama, Kafka broker)",
+]
+filterwarnings = ["ignore::DeprecationWarning"]

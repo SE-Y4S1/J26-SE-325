@@ -1,0 +1,74 @@
+# Investable universe for Component 1 (J26-SE-325).
+#
+# Deliberately small: the TAF constrains this component to "a limited universe of liquid
+# equities and/or ETFs to keep computation tractable". Compute budget matters more than
+# breadth -- every symbol here multiplies fine-tuning time, FinBERT scoring, and backtest
+# folds.
+#
+# History windows and forecast horizons are NOT set here. They are resolved per-symbol by
+# data/window_selector.py from instrument-specific criteria (listing date, data
+# completeness, structural breaks, volatility-regime coverage, ACF decay, days-to-liquidate)
+# and written to configs/resolved_universe.yaml alongside the criterion values that produced
+# them, so each choice is auditable rather than a magic constant.
+
+equities:
+  # Large-cap US, spread across sectors so the covariance matrix is not degenerate.
+  - {symbol: AAPL, name: Apple,              sector: technology}
+  - {symbol: MSFT, name: Microsoft,          sector: technology}
+  - {symbol: NVDA, name: NVIDIA,             sector: technology}
+  - {symbol: GOOGL, name: Alphabet,          sector: communication}
+  - {symbol: AMZN, name: Amazon,             sector: consumer_discretionary}
+  - {symbol: META, name: Meta Platforms,     sector: communication}
+  - {symbol: JPM,  name: JPMorgan Chase,     sector: financials}
+  - {symbol: BAC,  name: Bank of America,    sector: financials}
+  - {symbol: JNJ,  name: Johnson & Johnson,  sector: healthcare}
+  - {symbol: UNH,  name: UnitedHealth,       sector: healthcare}
+  - {symbol: XOM,  name: Exxon Mobil,        sector: energy}
+  - {symbol: CVX,  name: Chevron,            sector: energy}
+  - {symbol: PG,   name: Procter & Gamble,   sector: consumer_staples}
+  - {symbol: KO,   name: Coca-Cola,          sector: consumer_staples}
+  - {symbol: CAT,  name: Caterpillar,        sector: industrials}
+  - {symbol: BA,   name: Boeing,             sector: industrials}
+
+etfs:
+  # Broad-market, size, and cross-asset sleeves. GLD/TLT matter for RQ4: they behave
+  # differently in a flight-to-quality stress scenario than the equity sleeve does.
+  - {symbol: SPY, name: SPDR S&P 500,             exposure: us_large_cap}
+  - {symbol: QQQ, name: Invesco QQQ,              exposure: us_tech}
+  - {symbol: IWM, name: iShares Russell 2000,     exposure: us_small_cap}
+  - {symbol: GLD, name: SPDR Gold Shares,         exposure: commodity_gold}
+  - {symbol: TLT, name: iShares 20+ Yr Treasury,  exposure: us_long_bond}
+  - {symbol: XLE, name: Energy Select Sector,     exposure: us_energy}
+
+forex:
+  # NOTE: exponents need an explicit sign. YAML 1.1 parses `1.0e12` as a STRING and only
+  # `1.0e+12` as a float, so dropping the `+` silently turns every liquidity figure into
+  # text -- which the cost model would then read as untradeable. Caught by
+  # tests/test_scaffold.py::test_forex_entries_carry_notional_adv.
+  # yfinance FX tickers -- no API key, no rate limit, and they reuse the exact same
+  # fetch_ohlcv() code path as equities/ETFs. Note yfinance reports FX "volume" as 0, so
+  # liquidity must come from `notional_adv_usd` below rather than from the bars. See
+  # data/ingestion.py::fetch_ohlcv.
+  - {symbol: "EURUSD=X", pair: EUR/USD, notional_adv_usd: 1.0e+12}
+  - {symbol: "GBPUSD=X", pair: GBP/USD, notional_adv_usd: 4.0e+11}
+  - {symbol: "JPY=X",    pair: USD/JPY, notional_adv_usd: 6.0e+11}
+  - {symbol: "AUDUSD=X", pair: AUD/USD, notional_adv_usd: 2.0e+11}
+
+# Bounds applied by data/window_selector.py when resolving per-symbol windows.
+window_selection:
+  min_history_years: 3
+  max_history_years: 15
+  max_gap_days: 10          # truncate history at any gap longer than this
+  min_regimes: 2            # window must span >= 2 volatility regimes
+  min_adv_usd: 5.0e+7        # liquidity floor; symbols below are flagged, not dropped
+  horizon_menu: [1, 5, 21]  # trading days
+  participation_cap: 0.10   # max fraction of ADV tradable per day
+
+# Reddit/praw is implemented against the NewsItem schema but disabled: it adds a credential
+# dependency and a noisy feature that news sentiment already covers for RQ1.
+sources:
+  news:
+    gdelt: {enabled: true}         # historical backfill, no key
+    newsapi: {enabled: true}       # recent/live window, needs NEWSAPI_KEY
+  social:
+    reddit: {enabled: false, subreddits: [wallstreetbets, stocks, investing]}

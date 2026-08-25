@@ -1,0 +1,40 @@
+# Generated artifacts: parquet caches, model checkpoints, MLflow runs, SFT trajectories.
+# Everything the pipeline produces lives here so the `data/` *package* never collides with
+# cached *data files*.
+artifacts/
+
+# Environments
+.venv/
+
+# uv.lock IS committed, deliberately. This is an application, not a library, and the
+# dissertation claims reproducible results -- an exact dependency resolution is part of
+# that claim. requirements.txt is the same snapshot for readers without uv.
+
+# Secrets
+.env
+
+# MLflow (if ever run outside artifacts/)
+mlruns/
+mlartifacts/
+
+# Data files
+*.parquet
+*.feather
+*.db
+*.sqlite
+*.sqlite3
+
+# Model weights
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
