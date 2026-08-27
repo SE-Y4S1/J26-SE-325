@@ -207,18 +207,35 @@ failure if followed as written.
 | NewsAPI for sentiment | Free tier caps at ~30 days — cannot support a walk-forward backtest | GDELT for history + NewsAPI for the live window |
 | Hosted API for the reference agent | — | Local Ollama `gemma4-e4b` (verified `tools` capable) — free, offline, reproducible |
 | One global data window | — | Per-symbol windows from explicit criteria (`data/window_selector.py`) |
-| LoRA fine-tune both foundation models | TimesFM 2.5's trainable `forward` takes pre-patched, pre-normalised tensors, and `decode()` runs under `torch.no_grad()` | **LoRA on Chronos-Bolt only.** TimesFM contributes its zero-shot row; see `forecasting/finetune_lora.py::UNSUPPORTED_LORA` |
 
 **Added from the TAF, missing from the brief:** *"containerize and monitor the services"* —
 Phase 8.
 
-**On the TimesFM LoRA row.** RQ1 was specified to compare a plain LSTM, zero-shot foundation
-models, LoRA-tuned foundation models and the hybrid. Three of those four are unaffected. The
-missing cell is *LoRA-tuned TimesFM*, and the reason is architectural rather than a resource
-limit: there is no gradient path through the published inference API. Chronos-Bolt supplies
-the LoRA arm of the comparison, which is what the brief's fallback already anticipated.
-Reporting the cell as unavailable, with the reason, is more defensible than substituting a
-different method under the same label.
+### Fine-tuning the two foundation models
+
+Neither exposes a HuggingFace-style training interface, and they do not share one with each
+other, so `forecasting/finetune_lora.py` gives each its own step (`STEP_FUNCTIONS`).
+
+**Chronos-Bolt** computes its own pinball loss: `forward(context, target=...)` normalises the
+target with the same loc/scale as the context and pads a short target with a zero mask, so a
+5-step horizon against its fixed `prediction_length` needs nothing from us. Scoring its
+quantile predictions externally would have applied the wrong normalisation.
+
+**TimesFM 2.5** has no training entry point at all. `decode()` runs under `torch.no_grad()`,
+but it is not the only path: `forward()` is an ordinary differentiable module, and for a
+horizon within one `output_patch_len` (128) `decode()`'s autoregressive loop never runs, so
+its prefill — patch, running-stats normalise, forward, denormalise — *is* the whole
+computation. `_timesfm_step` mirrors that prefill line for line, because any divergence is a
+train/serve mismatch nothing downstream would catch.
+
+Two traps worth knowing if you touch this:
+
+- The output head emits `len(quantiles) + 1` columns and **column 0 is the mean**. Reading it
+  as the 0.1 quantile trains against the wrong target and still converges.
+- Every transformer norm `scale` initialises to exactly **zero**, so a randomly-initialised
+  TimesFM is an identity function and gradients reach only the tokenizer and output head.
+  That looks identical to a broken training step. The slow test fills the scales before
+  asserting that gradient reaches the attention projections.
 
 ---
 

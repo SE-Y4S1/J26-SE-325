@@ -885,18 +885,22 @@ def test_walk_forward_never_stamps_a_forecast_on_an_unrealised_target() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_timesfm_lora_refuses_before_loading_anything() -> None:
-    """TimesFM must fail in a second with its own reason, not after a model download and a
-    TypeError raised three frames inside peft. The message has to say why, because "it
-    didn't work" would send someone hunting for a config knob that does not exist."""
-    from forecasting.finetune_lora import finetune
+def test_unsupported_lora_is_checked_before_anything_loads() -> None:
+    """The refusal mechanism, not a claim about any particular model. TimesFM was listed
+    unsupported on the grounds that decode() runs under torch.no_grad(); that was wrong --
+    forward() is differentiable and prefill alone covers a horizon within one output patch.
+    The mechanism stays because a genuinely untrainable architecture must fail in a second
+    rather than after a model download."""
+    import forecasting.finetune_lora as fl
 
-    with pytest.raises(RuntimeError) as excinfo:
-        finetune("timesfm", pd.DataFrame({"close": [1.0]}), horizon=5)
-
-    message = str(excinfo.value)
-    assert "torch.no_grad" in message, "the message must say why it cannot be trained"
-    assert "Chronos-Bolt" in message, "the message must name the supported alternative"
+    monkey = dict(fl.UNSUPPORTED_LORA)
+    monkey["pretend_model"] = "cannot be trained, for a stated reason"
+    original, fl.UNSUPPORTED_LORA = fl.UNSUPPORTED_LORA, monkey
+    try:
+        with pytest.raises(RuntimeError, match="for a stated reason"):
+            fl.finetune("pretend_model", pd.DataFrame({"close": [1.0]}), horizon=5)
+    finally:
+        fl.UNSUPPORTED_LORA = original
 
 
 def test_chronos_step_asks_the_model_for_its_own_loss() -> None:
@@ -981,3 +985,133 @@ def test_run_epoch_delegates_to_the_step_function() -> None:
 
     assert calls == [3, 2], "every batch must go through the step function"
     assert loss == pytest.approx(0.5)
+
+
+# --------------------------------------------------------------------------------------
+# TimesFM LoRA step
+# --------------------------------------------------------------------------------------
+
+
+class _StubTimesFMConfig:
+    quantiles = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+
+class _StubTimesFM(torch.nn.Module):
+    """The interface _timesfm_step relies on, at a size a test can afford.
+
+    p / o / q and the four-tuple return mirror TimesFM_2p5_200M_torch_module exactly; the
+    real thing is exercised by the slow test below.
+    """
+
+    config = _StubTimesFMConfig()
+
+    def __init__(self, patch_len: int = 32, out_len: int = 128) -> None:
+        super().__init__()
+        self.p, self.o = patch_len, out_len
+        self.q = len(self.config.quantiles) + 1
+        self.proj = torch.nn.Linear(patch_len, self.o * self.q)
+        self.seen: dict[str, object] = {}
+
+    def forward(self, inputs, masks, decode_caches=None):  # noqa: ANN001
+        self.seen["inputs"] = inputs
+        self.seen["masks"] = masks
+        out = self.proj(inputs)
+        return (inputs, inputs, out, out), None
+
+
+def test_timesfm_step_produces_a_differentiable_loss() -> None:
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_step
+
+    model = _StubTimesFM()
+    loss = _timesfm_step(model, torch.randn(3, 128) * 0.01, torch.randn(3, 5) * 0.01, LoRAConfig())
+
+    assert torch.isfinite(loss)
+    assert loss.requires_grad
+    loss.backward()
+    assert model.proj.weight.grad is not None
+    assert model.proj.weight.grad.abs().sum() > 0
+
+
+def test_timesfm_step_reads_the_quantile_columns_not_the_mean() -> None:
+    """TimesFM's head emits len(quantiles) + 1 columns, and column 0 is the MEAN. Reading
+    it as the 0.1 quantile would train against the wrong target and still converge, which a
+    loss curve cannot reveal -- so the mapping is asserted rather than assumed."""
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_quantile_indices
+
+    model = _StubTimesFM()
+    indices = _timesfm_quantile_indices(model, LoRAConfig(quantiles=(0.1, 0.5, 0.9)))
+
+    assert indices == [1, 5, 9], "0.1/0.5/0.9 must map past the leading mean column"
+
+
+def test_timesfm_step_rejects_a_quantile_the_model_does_not_emit() -> None:
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_quantile_indices
+
+    with pytest.raises(RuntimeError, match="not among them"):
+        _timesfm_quantile_indices(_StubTimesFM(), LoRAConfig(quantiles=(0.05,)))
+
+
+def test_timesfm_step_refuses_a_horizon_beyond_one_output_patch() -> None:
+    """Past output_patch_len, decode() feeds its own output back autoregressively. This
+    step reproduces prefill only, so it must refuse rather than silently train on a horizon
+    it cannot represent."""
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_step
+
+    model = _StubTimesFM(out_len=16)
+    with pytest.raises(RuntimeError, match="exceeds TimesFM's output patch length"):
+        _timesfm_step(model, torch.randn(2, 64), torch.randn(2, 20), LoRAConfig())
+
+
+def test_timesfm_step_truncates_context_to_whole_patches() -> None:
+    """forward() patches by reshape, which needs an exact multiple of the patch length. The
+    most RECENT whole patches are the ones to keep -- dropping from the tail would forecast
+    from a window that stops short of the present."""
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_step
+
+    model = _StubTimesFM()
+    context = torch.randn(2, 140) * 0.01           # 4 patches of 32, plus 12 spare
+    _timesfm_step(model, context, torch.randn(2, 5) * 0.01, LoRAConfig())
+
+    used = model.seen["inputs"]
+    assert used.shape == (2, 4, 32), f"expected 4 whole patches, got {tuple(used.shape)}"
+    assert model.seen["masks"].dtype == torch.bool
+
+
+def test_timesfm_step_rejects_a_context_shorter_than_one_patch() -> None:
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_step
+
+    with pytest.raises(RuntimeError, match="shorter than one"):
+        _timesfm_step(_StubTimesFM(), torch.randn(2, 8), torch.randn(2, 5), LoRAConfig())
+
+
+@pytest.mark.slow
+def test_timesfm_step_trains_the_real_architecture() -> None:
+    """The stub proves the wiring; this proves the wiring matches the real model.
+
+    Instantiated with random weights -- no checkpoint, so no download. One catch makes this
+    test subtler than it looks: every transformer norm `scale` initialises to exactly ZERO,
+    which zeroes both residual branches and makes the whole 20-layer stack an identity. A
+    naive run therefore shows gradients reaching only the tokenizer and the output head, and
+    looks exactly like a broken step function. The scales are filled with a trained-like
+    value first so the test measures the step rather than the initialisation.
+    """
+    timesfm_torch = pytest.importorskip("timesfm.timesfm_2p5.timesfm_2p5_torch")
+
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_step
+
+    torch.manual_seed(0)
+    model = timesfm_torch.TimesFM_2p5_200M_torch_module()
+    with torch.no_grad():
+        for layer in model.stacked_xf:
+            for norm in ("pre_attn_ln", "post_attn_ln", "pre_ff_ln", "post_ff_ln"):
+                getattr(layer, norm).scale.fill_(0.5)
+
+    loss = _timesfm_step(model, torch.randn(2, 128) * 0.01, torch.randn(2, 5) * 0.01, LoRAConfig())
+    assert torch.isfinite(loss)
+    loss.backward()
+
+    # The point of LoRA here is to adapt the attention projections, so gradient MUST reach
+    # them. Only the tokenizer and output head receiving gradient is the failure mode.
+    qkv_grad = model.stacked_xf[0].attn.qkv_proj.weight.grad
+    assert qkv_grad is not None, "no gradient reached the first transformer layer"
+    assert qkv_grad.abs().max() > 0, "gradient reached the transformer layer but was zero"

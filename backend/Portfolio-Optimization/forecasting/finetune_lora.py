@@ -278,26 +278,118 @@ def _generic_step(model, context, future, config: LoRAConfig) -> torch.Tensor:
     return _quantile_loss(prediction, future, config.quantiles)
 
 
+def _timesfm_step(model, context, future, config: LoRAConfig) -> torch.Tensor:
+    """Loss for TimesFM 2.5, mirroring the prefill half of its own decode().
+
+    decode() runs under torch.no_grad() and so cannot be trained through, but forward() is
+    an ordinary differentiable module. For a horizon within one output patch,
+    num_decode_steps = (horizon - 1) // output_patch_len is zero, so decode()'s
+    autoregressive loop never runs and prefill IS the whole computation. Replicating prefill
+    here -- patch, normalise, forward, denormalise -- gives the same numbers with gradients
+    attached.
+
+    The steps below deliberately mirror decode() line for line, because any divergence is a
+    train/serve mismatch that nothing downstream would catch.
+    """
+    from timesfm.torch import util as timesfm_util
+
+    inner = model.get_base_model() if hasattr(model, "get_base_model") else model
+    patch_len, out_len, n_out = inner.p, inner.o, inner.q
+
+    horizon = future.shape[-1]
+    if horizon > out_len:
+        raise RuntimeError(
+            f"horizon {horizon} exceeds TimesFM's output patch length {out_len}. Beyond that "
+            "decode() feeds its own output back autoregressively, which this step does not "
+            "reproduce; fine-tune at a horizon of {out_len} or fewer steps."
+        )
+
+    batch = context.shape[0]
+    # forward() patches by reshape, which needs an exact multiple of the patch length.
+    # Keep the most RECENT whole patches: the tail is what the forecast depends on.
+    usable = (context.shape[1] // patch_len) * patch_len
+    if usable == 0:
+        raise RuntimeError(
+            f"context of {context.shape[1]} steps is shorter than one {patch_len}-step patch"
+        )
+    inputs = context[:, context.shape[1] - usable :]
+
+    # Nothing is padded, so nothing is masked. decode() carries masks because a serving
+    # batch may hold series of different lengths; a training batch never does.
+    patched_inputs = inputs.reshape(batch, -1, patch_len)
+    patched_masks = torch.zeros_like(patched_inputs, dtype=torch.bool)
+
+    # Per-patch running statistics. These describe the input window rather than the model,
+    # exactly like an instance-norm statistic, so they are computed without gradients --
+    # what is being learned is the LoRA weights, not the normalisation of the data.
+    with torch.no_grad():
+        n = torch.zeros(batch, device=inputs.device)
+        mu = torch.zeros(batch, device=inputs.device)
+        sigma = torch.zeros(batch, device=inputs.device)
+        mus, sigmas = [], []
+        for i in range(patched_inputs.shape[1]):
+            (n, mu, sigma), _ = timesfm_util.update_running_stats(
+                n, mu, sigma, patched_inputs[:, i], patched_masks[:, i]
+            )
+            mus.append(mu)
+            sigmas.append(sigma)
+        context_mu = torch.stack(mus, dim=1)
+        context_sigma = torch.stack(sigmas, dim=1)
+
+    normed = timesfm_util.revin(patched_inputs, context_mu, context_sigma, reverse=False)
+    normed = torch.where(patched_masks, torch.zeros_like(normed), normed)
+
+    # decode_caches=None: forward expands it to one None per layer, which is the
+    # no-cache path. Caching only matters for autoregressive decoding.
+    (_, _, normed_outputs, _), _ = model(normed, patched_masks)
+
+    renormed = timesfm_util.revin(normed_outputs, context_mu, context_sigma, reverse=True)
+    renormed = renormed.reshape(batch, -1, out_len, n_out)
+
+    # The LAST patch carries the forecast for the steps after the context.
+    prediction = renormed[:, -1, :horizon, :]           # (batch, horizon, n_out)
+
+    return _quantile_loss(prediction[..., _timesfm_quantile_indices(inner, config)],
+                          future, config.quantiles)
+
+
+def _timesfm_quantile_indices(inner, config: LoRAConfig) -> list[int]:
+    """Column indices of the requested quantiles in TimesFM's output head.
+
+    The head emits `len(model_quantiles) + 1` columns: index 0 is the MEAN, and the declared
+    quantiles start at 1. Reading index 0 as the 0.1 quantile would train the model against
+    the wrong column and still converge, which is the kind of error a loss curve hides.
+    """
+    model_quantiles = list(inner.config.quantiles)
+    indices = []
+    for q in config.quantiles:
+        matches = [i for i, mq in enumerate(model_quantiles) if abs(mq - q) < 1e-9]
+        if not matches:
+            raise RuntimeError(
+                f"TimesFM emits quantiles {model_quantiles}; {q} is not among them. Fine-tune "
+                f"on a subset of the model's own quantiles, or add interpolation here."
+            )
+        indices.append(matches[0] + 1)   # +1 for the leading mean column
+    return indices
+
+
 STEP_FUNCTIONS = {
     "chronos_bolt": _chronos_step,
+    "timesfm": _timesfm_step,
 }
 
 # Architectures that cannot be LoRA fine-tuned by this module, with the reason. Checked
 # before anything is loaded, so the failure costs a second rather than a model download
 # followed by a traceback from inside the training loop.
-UNSUPPORTED_LORA = {
-    "timesfm": (
-        "TimesFM 2.5 cannot be LoRA fine-tuned by this module. Its "
-        "forward(inputs, masks) takes tensors that are already patched into "
-        "input_patch_len blocks and already normalised by a running-statistics pass, and "
-        "it returns raw embeddings and projections rather than a prediction. The path that "
-        "assembles a usable forecast, decode(), runs entirely under torch.no_grad(), so "
-        "there is nothing to backpropagate through. Supporting it means reimplementing "
-        "TimesFM's patching, running-stats normalisation, output-head selection and "
-        "denormalisation against an undocumented internal contract -- a piece of work in "
-        "its own right, not a configuration change. Chronos-Bolt supports LoRA and is the "
-        "documented fallback for RQ1; TimesFM still contributes its zero-shot row."
-    ),
+UNSUPPORTED_LORA: dict[str, str] = {
+    # Architectures that cannot be LoRA fine-tuned by this module, with the reason. Checked
+    # before anything loads, so an unsupported model costs a second rather than a download
+    # followed by a traceback from inside the training loop.
+    #
+    # TimesFM was listed here on the grounds that decode() runs under torch.no_grad(). That
+    # was wrong: decode() is not the only path. forward() is an ordinary differentiable
+    # module, and for a horizon within one output patch decode()'s autoregressive loop never
+    # runs, so prefill alone reproduces it -- see _timesfm_step.
 }
 
 
