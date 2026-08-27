@@ -101,6 +101,26 @@ class Forecaster(Protocol):
         ...
 
 
+def resolve_device(preference: str | None = None) -> "torch.device":  # noqa: F821
+    """The device to use: an explicit preference, else the GPU when there is one.
+
+    Shared by the adapters and the fine-tuner so a run picks a device ONCE. Letting each
+    side decide for itself is what produced "mat1 is on cpu, different from other tensors on
+    cuda:0": TimesFM's load_checkpoint() moves itself to cuda:0 whenever CUDA exists, while
+    the DataLoader went on yielding CPU tensors. The quieter half of the same bug was
+    Chronos defaulting to "cpu" and training there on a GPU runtime -- no error, just twenty
+    epochs at the wrong speed.
+
+    torch is imported lazily: this module is imported by the registry, which must stay
+    usable on a machine where the optional forecasting stack is not installed.
+    """
+    import torch
+
+    if preference is not None:
+        return torch.device(preference)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 def available_foundation_models() -> dict[str, bool]:
     """Which optional foundation forecasters survived the Phase 0 gate.
 

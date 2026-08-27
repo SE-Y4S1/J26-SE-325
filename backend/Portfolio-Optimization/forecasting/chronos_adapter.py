@@ -22,7 +22,12 @@ import numpy as np
 import pandas as pd
 import torch
 
-from forecasting.base import DEFAULT_QUANTILES, ForecastResult, enforce_non_crossing
+from forecasting.base import (
+    DEFAULT_QUANTILES,
+    ForecastResult,
+    enforce_non_crossing,
+    resolve_device,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +38,12 @@ DEFAULT_MODEL_ID = "amazon/chronos-bolt-base"
 class ChronosConfig:
     model_id: str = DEFAULT_MODEL_ID
     context_length: int = 512
-    device: str = "cpu"          # this machine has no CUDA; see README "Known risks"
+    # None = use the GPU when there is one. This was pinned to "cpu" because the development
+    # machine has no CUDA, which silently sent Colab's fine-tune to the CPU as well: not an
+    # error, so nothing reported it, just twenty epochs at CPU speed on a GPU runtime.
+    device: str | None = None
+    # float32 deliberately: build_finetune_dataset produces float32, and a half-precision
+    # model against float32 batches is the same class of mismatch as a device mismatch.
     torch_dtype: str = "float32"
 
 
@@ -55,10 +65,11 @@ class ChronosBoltForecaster:
 
         from chronos import BaseChronosPipeline
 
-        logger.info("loading %s on %s", self.config.model_id, self.config.device)
+        device = str(resolve_device(self.config.device))
+        logger.info("loading %s on %s", self.config.model_id, device)
         self._pipeline = BaseChronosPipeline.from_pretrained(
             self.config.model_id,
-            device_map=self.config.device,
+            device_map=device,
             torch_dtype=getattr(torch, self.config.torch_dtype),
         )
 

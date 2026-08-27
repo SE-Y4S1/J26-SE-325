@@ -500,6 +500,16 @@ proposal-named method and is preferred whenever its weights are present.
 - **This machine has an AMD Radeon 610M and no CUDA.** torch is pinned to the CPU-only index
   (see `pyproject.toml`); the default Windows PyPI wheel bundles ~2.5GB of unusable CUDA
   libraries. LoRA fine-tuning therefore belongs in Colab, with inference local on CPU.
+
+  This is a *hazard for the code*, not only an inconvenience. Anything written to suit a
+  CPU-only machine follows the repository onto a GPU one. Two bugs of exactly that shape
+  have already been fixed: the fine-tuning loop had no device handling at all and blew up on
+  Colab with `mat1 is on cpu, different from other tensors on cuda:0`, and `ChronosConfig`
+  pinned `device="cpu"` with the comment *"this machine has no CUDA"*, which made Colab train
+  on the CPU with no error at all — just twenty epochs at the wrong speed. Device is now
+  resolved once per run by `forecasting/base.py::resolve_device`, and the training loop moves
+  every batch to wherever the model is. Prefer auto-detection over a pin, and be suspicious
+  of any default justified by this laptop.
 - **Small models fail the tool-calling contract in two distinct ways**, both observed with
   gemma4-e4b and both handled in `agent/reference_agent.py`:
   1. *Looping.* It cycles the three context tools indefinitely and never calls the optimizer,

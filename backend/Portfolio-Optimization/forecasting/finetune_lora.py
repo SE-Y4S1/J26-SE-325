@@ -59,6 +59,9 @@ class LoRAConfig:
     quantiles: tuple[float, ...] = (0.1, 0.5, 0.9)
     max_grad_norm: float = 1.0
     patience: int = 5
+    # None = use the GPU when there is one. An explicit "cpu" forces a CPU run, which is
+    # useful for reproducing a GPU-only failure or for a machine whose GPU is busy.
+    device: str | None = None
 
 
 class WindowedSeriesDataset(Dataset):
@@ -121,6 +124,18 @@ def build_finetune_dataset(
     logger.info("built %d fine-tuning windows (context=%d, horizon=%d)",
                 len(contexts), context_length, horizon)
     return WindowedSeriesDataset(np.stack(contexts), np.stack(futures))
+
+
+def _model_device(model: torch.nn.Module) -> torch.device:
+    """Where a model's parameters live.
+
+    Read from the model rather than passed in, so the training loop is right however the
+    model got there -- including when an adapter placed it somewhere before we were called.
+    """
+    try:
+        return next(model.parameters()).device
+    except StopIteration:            # a model with no parameters at all
+        return torch.device("cpu")
 
 
 def _resolve_inner_model(forecaster) -> torch.nn.Module:
@@ -427,6 +442,16 @@ def finetune(
     forecaster._load()                       # noqa: SLF001 - adapters expose loading here
     inner = _resolve_inner_model(forecaster)
 
+    # Pin the device before wrapping. Each adapter loads its model wherever it likes --
+    # TimesFM moves itself to cuda:0, Chronos honours its own config -- so without this the
+    # training device is whatever the adapter happened to choose, and the two models can end
+    # up on different ones in the same run.
+    from forecasting.base import resolve_device
+
+    device = resolve_device(config.device)
+    inner = inner.to(device)
+    logger.info("training %s on %s", base_model_name, device)
+
     targets = config.target_modules or _discover_target_modules(inner)
     _shim_embedding_introspection(inner)
     peft_model = get_peft_model(
@@ -439,6 +464,7 @@ def finetune(
             bias="none",
         ),
     )
+    peft_model = peft_model.to(device)      # LoRA layers are created during wrapping
     trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in peft_model.parameters())
     logger.info("LoRA: %d trainable of %d parameters (%.3f%%)",
@@ -505,8 +531,13 @@ def _run_epoch(model, loader, config: LoRAConfig, optimizer, step_fn) -> float:
     STEP_FUNCTIONS.
     """
     total, seen = 0.0, 0
+    # The loader always yields CPU tensors; the model may be anywhere.
+    device = _model_device(model)
 
     for context, future in loader:
+        context = context.to(device)
+        future = future.to(device)
+
         if optimizer is not None:
             optimizer.zero_grad()
 

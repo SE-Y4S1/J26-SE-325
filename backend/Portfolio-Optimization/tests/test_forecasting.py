@@ -1115,3 +1115,77 @@ def test_timesfm_step_trains_the_real_architecture() -> None:
     qkv_grad = model.stacked_xf[0].attn.qkv_proj.weight.grad
     assert qkv_grad is not None, "no gradient reached the first transformer layer"
     assert qkv_grad.abs().max() > 0, "gradient reached the transformer layer but was zero"
+
+
+# --------------------------------------------------------------------------------------
+# Device handling
+#
+# Colab failed with "mat1 is on cpu, different from other tensors on cuda:0": TimesFM's
+# load_checkpoint() moves itself to cuda:0 whenever CUDA exists, while the DataLoader went
+# on yielding CPU tensors. It could not surface locally, where everything is CPU, so these
+# tests use the `meta` device to create a real device boundary on a CPU-only machine.
+# --------------------------------------------------------------------------------------
+
+
+def test_resolve_device_honours_an_explicit_preference() -> None:
+    from forecasting.base import resolve_device
+
+    assert resolve_device("cpu").type == "cpu"
+    assert resolve_device("meta").type == "meta"
+
+
+def test_resolve_device_picks_the_gpu_when_there_is_one(monkeypatch) -> None:
+    """Auto-detection both ways. The CPU branch is what this machine exercises; the CUDA
+    branch is the one that matters on Colab and can only be reached by patching."""
+    from forecasting.base import resolve_device
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert resolve_device(None).type == "cpu"
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert resolve_device(None).type == "cuda"
+
+
+def test_chronos_config_no_longer_pins_the_cpu(monkeypatch) -> None:
+    """ChronosConfig.device was hardcoded "cpu" for this laptop, which silently sent Colab's
+    fine-tune to the CPU too -- no error, just twenty epochs at the wrong speed."""
+    from forecasting.base import resolve_device
+    from forecasting.chronos_adapter import ChronosConfig
+
+    assert ChronosConfig().device is None, "a pinned device would follow the code to Colab"
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert resolve_device(ChronosConfig().device).type == "cuda"
+
+
+def test_model_device_reads_the_parameters() -> None:
+    from forecasting.finetune_lora import _model_device
+
+    assert _model_device(torch.nn.Linear(2, 2)).type == "cpu"
+    assert _model_device(torch.nn.Linear(2, 2).to("meta")).type == "meta"
+    assert _model_device(torch.nn.Module()).type == "cpu", "a parameterless model must not raise"
+
+
+def test_run_epoch_moves_batches_to_the_model_device() -> None:
+    """THE regression guard for the Colab failure.
+
+    The model's parameters sit on `meta` while the loader yields CPU tensors -- the same
+    split as a CUDA model fed by a CPU DataLoader, reproducible without a GPU. Before the
+    fix the step function received CPU tensors and the matmul blew up inside the model.
+    """
+    from forecasting.finetune_lora import LoRAConfig, _run_epoch
+
+    seen = []
+
+    def _step(model, context, future, config):  # noqa: ANN001, ARG001
+        seen.append((context.device.type, future.device.type))
+        return torch.tensor(0.5)
+
+    model = torch.nn.Linear(8, 2).to("meta")
+    loader = [(torch.randn(3, 8), torch.randn(3, 2)), (torch.randn(2, 8), torch.randn(2, 2))]
+
+    _run_epoch(model, loader, LoRAConfig(), None, _step)
+
+    assert seen == [("meta", "meta"), ("meta", "meta")], (
+        f"batches reached the step function on {seen}, not on the model's device"
+    )
