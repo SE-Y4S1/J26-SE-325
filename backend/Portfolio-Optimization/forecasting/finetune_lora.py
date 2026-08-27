@@ -200,6 +200,31 @@ def _quantile_loss(
     return torch.maximum(q * errors, (q - 1.0) * errors).mean()
 
 
+def _shim_embedding_introspection(model: torch.nn.Module) -> None:
+    """Give peft the embedding accessor it assumes every model has.
+
+    peft's `_check_tied_modules` calls `model.get_input_embeddings()` to find weights tied to
+    the input embeddings, then does `set(... .parameters())` on the result. That assumption
+    holds for language models and not for time-series ones: transformers raises
+    NotImplementedError for ChronosBoltModelForForecasting, which has no token embeddings to
+    tie anything to, and LoRA fine-tuning dies before it starts.
+
+    An empty module answers the question correctly -- there are no tied embedding parameters
+    -- and lets the tied-weight scan return an empty set instead of raising. It is only
+    installed when the real accessor is missing or raises, so a model that implements it
+    properly is left alone.
+    """
+    try:
+        model.get_input_embeddings()
+    except (NotImplementedError, AttributeError):
+        model.get_input_embeddings = lambda: torch.nn.Module()  # type: ignore[method-assign]
+        logger.info(
+            "installed an empty get_input_embeddings() for %s: it has no token embeddings, "
+            "and peft's tied-weight scan requires the accessor to exist",
+            type(model).__name__,
+        )
+
+
 def finetune(
     base_model_name: str,
     features: pd.DataFrame,
@@ -232,6 +257,7 @@ def finetune(
     inner = _resolve_inner_model(forecaster)
 
     targets = config.target_modules or _discover_target_modules(inner)
+    _shim_embedding_introspection(inner)
     peft_model = get_peft_model(
         inner,
         LoraConfig(

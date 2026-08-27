@@ -69,6 +69,26 @@ its error as a function of those features. The base stays frozen (or LoRA-adapte
 head is zero-initialized, so the hybrid starts exactly at the base model's accuracy — which
 gives RQ1 a clean answer to "did the covariates help".
 
+**How the head's training data is generated.** The head learns from base forecasts produced
+by walking a cut point forward: the base predicts from `group[:t+1]`, and that forecast is
+stamped at `t`, where it lines up with the `target_return` it is actually predicting. The
+base never sees its own target.
+
+This matters more than it sounds. Both foundation adapters return a *single* row per call,
+stamped at the last input timestamp — and under `add_targets(horizon=h)` that row's target
+is always NaN, because the final `h` rows of every symbol have no realised future yet. One
+call per symbol therefore produced exactly the rows that cannot be trained on, and the
+hybrid failed with `no overlap between base forecasts and targets` on **every** foundation
+base. It passed with the LSTM only because that adapter returns many in-sample rows, which
+is why no test caught it until Colab did. `tests/test_forecasting.py` now carries a
+single-row stub base with the foundation adapters' shape.
+
+Each cut costs one forward pass, so `HybridConfig.walk_forward_points` caps how many a
+symbol is worth; `min_context` sets the shortest prefix worth forecasting from. Early cuts
+give the base less context than it would have in production, which is inherent to
+walk-forward generation rather than a defect — but it is worth stating when reporting RQ1.
+
+
 ### The grounding constraint
 
 The agent may reason over signals and decide *how* to invoke the optimizer. It may **never**

@@ -49,6 +49,11 @@ class HybridConfig:
     quantiles: tuple[float, ...] = DEFAULT_QUANTILES
     window: int = 60
     log_to_mlflow: bool = True
+    # Walk-forward controls, used only for single-row (foundation) bases -- see
+    # _walk_forward_base. min_context is the shortest prefix worth forecasting from;
+    # walk_forward_points caps how many model calls each symbol costs.
+    min_context: int = 64
+    walk_forward_points: int = 200
 
 
 class HybridForecaster:
@@ -111,7 +116,14 @@ class HybridForecaster:
         merged = features.merge(base_forecasts, on=["symbol", "timestamp"], how="inner")
         merged = merged.dropna(subset=[target_col])
         if merged.empty:
-            raise RuntimeError("no overlap between base forecasts and targets")
+            joined = features.merge(base_forecasts, on=["symbol", "timestamp"], how="inner")
+            raise RuntimeError(
+                f"no overlap between base forecasts and targets: "
+                f"{len(base_forecasts)} base forecast row(s) joined to {len(joined)} feature "
+                f"row(s), of which 0 had a non-null {target_col}. A base that returns one row "
+                f"stamped at the last input timestamp always lands on a NaN target, because "
+                f"the final {horizon} rows of each symbol have no realised future yet."
+            )
 
         quantile_cols = [f"base_p{int(q * 100)}" for q in self.config.quantiles]
 
@@ -158,18 +170,84 @@ class HybridForecaster:
         return int(np.argmin(np.abs(np.asarray(self.config.quantiles) - 0.5)))
 
     def _walk_forward_base(self, features: pd.DataFrame, *, horizon: int) -> pd.DataFrame:
-        """Base-model forecasts generated without seeing their own targets."""
+        """Base-model forecasts generated without seeing their own targets.
+
+        The foundation adapters return a SINGLE row per call, stamped at the last input
+        timestamp. Under add_targets(horizon=h) that row's target is always NaN -- the last
+        h rows of every symbol have no realised future yet -- so calling predict_quantiles
+        once per symbol produced exactly the rows that cannot be trained on. That is why the
+        hybrid died with "no overlap between base forecasts and targets" on every foundation
+        base while passing with the LSTM, which returns many in-sample rows instead.
+
+        So walk the cut point forward: forecast from group[:t+1] and stamp the result at t.
+        That forecast predicts the return realised over the following `horizon` steps, which
+        is exactly target_return at t, and the base still never sees its own target.
+
+        A multi-row adapter needs none of this -- one call already yields a forecast per
+        timestamp -- and re-calling it per cut point would be quadratic for no gain, so it
+        keeps the single call.
+        """
+        qcols = [f"base_p{int(q * 100)}" for q in self.config.quantiles]
+        rename = {f"p{int(q * 100)}": f"base_p{int(q * 100)}" for q in self.config.quantiles}
         frames = []
+
         for symbol, group in features.groupby("symbol", sort=False):
+            group = group.sort_values("timestamp").reset_index(drop=True)
+
             try:
-                result = self.base.predict_quantiles(group, horizon=horizon)
+                probe = self.base.predict_quantiles(group, horizon=horizon)
             except Exception as exc:  # noqa: BLE001 - one symbol must not kill training
                 logger.warning("base forecast failed for %s: %s", symbol, exc)
                 continue
-            frame = result.to_frame().rename(
-                columns={f"p{int(q * 100)}": f"base_p{int(q * 100)}" for q in self.config.quantiles}
-            )
-            frames.append(frame[["symbol", "timestamp", *[f"base_p{int(q*100)}" for q in self.config.quantiles]]])
+
+            probe_frame = probe.to_frame().rename(columns=rename)
+
+            if len(probe_frame) > 1:
+                frames.append(probe_frame[["symbol", "timestamp", *qcols]])
+                continue
+
+            # Single-row adapter: walk the cut point forward.
+            # Stop `horizon` rows short of the end -- beyond that the target does not exist.
+            last_cut = len(group) - horizon
+            cuts = list(range(self.config.min_context, last_cut))
+            if not cuts:
+                logger.warning(
+                    "%s: %d rows is too short for a %d-step horizon after a %d-row minimum "
+                    "context; no walk-forward points",
+                    symbol, len(group), horizon, self.config.min_context,
+                )
+                continue
+
+            # Cap the number of model calls. A foundation model costs one forward pass per
+            # cut, so an uncapped walk over a multi-year series is hours of GPU time for a
+            # head that converges on far fewer points.
+            if len(cuts) > self.config.walk_forward_points:
+                stride = len(cuts) // self.config.walk_forward_points
+                cuts = cuts[::stride][: self.config.walk_forward_points]
+
+            rows = []
+            for cut in cuts:
+                try:
+                    result = self.base.predict_quantiles(group.iloc[: cut + 1], horizon=horizon)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("base forecast failed for %s at cut %d: %s", symbol, cut, exc)
+                    continue
+                row = result.to_frame().rename(columns=rename).iloc[-1]
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        # Stamp at the CUT, not at whatever the adapter labelled its own
+                        # last input row, so the join lands on the row whose target this
+                        # forecast is actually predicting.
+                        "timestamp": group.loc[cut, "timestamp"],
+                        **{c: float(row[c]) for c in qcols},
+                    }
+                )
+
+            if rows:
+                frames.append(pd.DataFrame(rows))
+            else:
+                logger.warning("%s: every walk-forward forecast failed", symbol)
 
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 

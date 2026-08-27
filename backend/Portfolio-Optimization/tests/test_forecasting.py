@@ -784,3 +784,89 @@ def test_hybrid_preserves_non_crossing_quantiles() -> None:
 def test_hybrid_refuses_to_predict_before_fit() -> None:
     with pytest.raises(RuntimeError, match="call fit"):
         _hybrid().predict_quantiles(_feature_table(n=100), horizon=5)
+
+
+class _SingleRowBase:
+    """A base with the shape of the real foundation adapters.
+
+    TimesFM and Chronos-Bolt both return ONE row per call, stamped at the last input
+    timestamp. That shape is what broke the hybrid on Colab, and no stub in this file had
+    it -- the LSTM returns many in-sample rows, so every hybrid test passed while the two
+    bases the component actually ships with could not train at all.
+    """
+
+    name = "single_row_stub"
+    version = "stub"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def fit(self, features, *, horizon, **kwargs) -> None:  # noqa: ANN001, ARG002
+        return None
+
+    def predict_quantiles(self, features, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+        import numpy as np
+        import pandas as pd
+
+        from forecasting.base import ForecastResult
+
+        self.calls += 1
+        frame = features.sort_values("timestamp")
+        # A weak signal so the residual head has something real to correct.
+        level = float(frame["close"].pct_change().tail(5).mean() or 0.0)
+        return ForecastResult(
+            symbol=str(frame["symbol"].iloc[0]),
+            horizon=horizon,
+            quantiles=(0.1, 0.5, 0.9),
+            values=np.array([[level - 0.01, level, level + 0.01]], dtype=float),
+            timestamps=pd.DatetimeIndex([pd.to_datetime(frame["timestamp"].iloc[-1])]),
+            model_name=self.name,
+            model_version=self.version,
+        )
+
+
+def test_hybrid_trains_on_a_single_row_foundation_base() -> None:
+    """Regression guard for the Colab failure: RuntimeError('no overlap between base
+    forecasts and targets') on every foundation base.
+
+    One call per symbol stamps the forecast at the last input timestamp -- which is exactly
+    the row add_targets leaves NaN, since the final `horizon` rows have no realised future.
+    The join then dropped everything. The fix walks the cut point forward and stamps each
+    forecast at its cut, so it lines up with the target it is actually predicting.
+    """
+    from forecasting.hybrid_model import HybridConfig, HybridForecaster
+
+    base = _SingleRowBase()
+    hybrid = HybridForecaster(
+        base,
+        HybridConfig(window=20, log_to_mlflow=False),
+    )
+    hybrid.fit(_feature_table(n=300), horizon=5, log_to_mlflow=False)
+
+    assert hybrid.head is not None
+    assert hybrid.version != "untrained"
+    # It must actually have walked, not made a single call.
+    assert base.calls > 1, f"base was called {base.calls} time(s); the walk did not happen"
+
+
+def test_walk_forward_never_stamps_a_forecast_on_an_unrealised_target() -> None:
+    """The property behind the fix: every base forecast must land on a row whose target
+    exists. If any cut fell in the final `horizon` rows the join would silently shrink,
+    and the head would train on fewer points than intended without anything saying so.
+    """
+    from features.feature_store import add_targets
+    from forecasting.hybrid_model import HybridConfig, HybridForecaster
+
+    horizon = 5
+    features = add_targets(_feature_table(n=300), horizon=horizon)
+    hybrid = HybridForecaster(
+        _SingleRowBase(),
+        HybridConfig(window=20, log_to_mlflow=False),
+    )
+
+    forecasts = hybrid._walk_forward_base(features, horizon=horizon)
+    assert not forecasts.empty
+
+    merged = features.merge(forecasts, on=["symbol", "timestamp"], how="inner")
+    assert len(merged) == len(forecasts), "a forecast was stamped on a timestamp not in the data"
+    assert merged["target_return"].notna().all(), "a forecast landed on an unrealised target"
