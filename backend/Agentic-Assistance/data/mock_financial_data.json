@@ -1,0 +1,50 @@
+{
+    "user": {
+        "user_id": "USER001",
+        "name": "Chamara",
+        "risk_tolerance": "Moderate",
+        "investment_horizon": "3 years"
+    },
+    "portfolio": {
+        "total_value_lkr": 1000000,
+        "expected_annual_return": 11.8,
+        "risk_score": 38,
+        "risk_level": "Moderate",
+        "diversification_score": 74,
+        "liquidity": "High",
+        "allocation": {
+            "Technology": 35,
+            "Banking": 25,
+            "Healthcare": 15,
+            "Government Bonds": 15,
+            "Cash": 10
+        }
+    },
+    "transactions": {
+        "TX1001": {
+            "amount_lkr": 250000,
+            "fraud_score": 0.92,
+            "status": "BLOCKED",
+            "risk_level": "HIGH",
+            "reasons": [
+                "New device",
+                "Unusual location",
+                "High transfer amount"
+            ]
+        }
+    },
+    "audit": {
+        "TX1001": {
+            "audit_id": "AUDIT-2026-001",
+            "decision": "TRANSACTION_BLOCKED",
+            "timestamp": "2026-08-27 09:42:18",
+            "block_number": 1847291,
+            "status": "VERIFIED"
+        }
+    },
+    "market": {
+        "trend": "Moderately Volatile",
+        "volatility": 18.4,
+        "sentiment": "Neutral"
+    }
+}
