@@ -225,6 +225,82 @@ def _shim_embedding_introspection(model: torch.nn.Module) -> None:
         )
 
 
+# --------------------------------------------------------------------------------------
+# Per-architecture training steps
+#
+# There is no common fine-tuning interface across these models, and guessing at one was the
+# bug: the loop tried a HuggingFace-style model(past_values=, future_values=), fell back to
+# model(context), and reported "neither a loss nor a tensor" when both were wrong. Each
+# architecture states how it computes a loss instead, so an unsupported one fails with its
+# own reason rather than a generic message from three layers down.
+# --------------------------------------------------------------------------------------
+
+
+def _chronos_step(model, context, future, config: LoRAConfig) -> torch.Tensor:
+    """ChronosBoltModelForForecasting computes its own quantile loss.
+
+    Signature is forward(context, mask=None, target=None, target_mask=None). Given a target
+    it normalises it with the same loc/scale as the context, pads it up to the model's fixed
+    prediction_length with a zero mask so the padding does not contribute, and returns the
+    pinball loss over its own quantile levels. Passing horizon < prediction_length is
+    therefore fine and needs no padding from us.
+    """
+    output = model(context=context, target=future)
+    if output.loss is None:
+        raise RuntimeError(
+            "Chronos returned no loss despite being given a target; the installed "
+            "chronos-forecasting may have changed its forward() contract"
+        )
+    return output.loss
+
+
+def _generic_step(model, context, future, config: LoRAConfig) -> torch.Tensor:
+    """HuggingFace-style: the model computes its loss from future_values, or returns a
+    tensor we score with an explicit pinball loss."""
+    try:
+        output = model(past_values=context, future_values=future)
+    except TypeError as exc:
+        raise RuntimeError(
+            f"{type(model).__name__} does not accept past_values/future_values "
+            f"({exc}). Add a step function for this architecture to STEP_FUNCTIONS."
+        ) from exc
+
+    loss = getattr(output, "loss", None)
+    if loss is not None:
+        return loss
+
+    prediction = output if torch.is_tensor(output) else getattr(output, "logits", None)
+    if prediction is None:
+        raise RuntimeError(
+            f"{type(model).__name__} returned neither a loss nor a tensor. Add a step "
+            f"function for this architecture to STEP_FUNCTIONS."
+        )
+    return _quantile_loss(prediction, future, config.quantiles)
+
+
+STEP_FUNCTIONS = {
+    "chronos_bolt": _chronos_step,
+}
+
+# Architectures that cannot be LoRA fine-tuned by this module, with the reason. Checked
+# before anything is loaded, so the failure costs a second rather than a model download
+# followed by a traceback from inside the training loop.
+UNSUPPORTED_LORA = {
+    "timesfm": (
+        "TimesFM 2.5 cannot be LoRA fine-tuned by this module. Its "
+        "forward(inputs, masks) takes tensors that are already patched into "
+        "input_patch_len blocks and already normalised by a running-statistics pass, and "
+        "it returns raw embeddings and projections rather than a prediction. The path that "
+        "assembles a usable forecast, decode(), runs entirely under torch.no_grad(), so "
+        "there is nothing to backpropagate through. Supporting it means reimplementing "
+        "TimesFM's patching, running-stats normalisation, output-head selection and "
+        "denormalisation against an undocumented internal contract -- a piece of work in "
+        "its own right, not a configuration change. Chronos-Bolt supports LoRA and is the "
+        "documented fallback for RQ1; TimesFM still contributes its zero-shot row."
+    ),
+}
+
+
 def finetune(
     base_model_name: str,
     features: pd.DataFrame,
@@ -244,6 +320,9 @@ def finetune(
     from peft import LoraConfig, get_peft_model
 
     from forecasting.base import get_forecaster
+
+    if base_model_name in UNSUPPORTED_LORA:
+        raise RuntimeError(UNSUPPORTED_LORA[base_model_name])
 
     config = config or LoRAConfig()
     torch.manual_seed(config.seed)
@@ -289,16 +368,18 @@ def finetune(
         [p for p in peft_model.parameters() if p.requires_grad], lr=config.lr
     )
 
+    step_fn = STEP_FUNCTIONS.get(base_model_name, _generic_step)
+
     best_val, stagnant = float("inf"), 0
     history: list[dict[str, float]] = []
 
     for epoch in range(config.epochs):
         peft_model.train()
-        train_loss = _run_epoch(peft_model, train_loader, config, optimizer)
+        train_loss = _run_epoch(peft_model, train_loader, config, optimizer, step_fn)
 
         peft_model.eval()
         with torch.no_grad():
-            val_loss = _run_epoch(peft_model, val_loader, config, optimizer=None)
+            val_loss = _run_epoch(peft_model, val_loader, config, None, step_fn)
 
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
         logger.info("epoch %d: train %.6f  val %.6f", epoch, train_loss, val_loss)
@@ -325,34 +406,19 @@ def finetune(
     return output_dir
 
 
-def _run_epoch(model, loader, config: LoRAConfig, optimizer) -> float:
-    """One pass. `optimizer=None` means evaluation."""
+def _run_epoch(model, loader, config: LoRAConfig, optimizer, step_fn) -> float:
+    """One pass.  means evaluation.
+
+    How the loss is computed is the architecture's business, not this loop's -- see
+    STEP_FUNCTIONS.
+    """
     total, seen = 0.0, 0
 
     for context, future in loader:
         if optimizer is not None:
             optimizer.zero_grad()
 
-        # Preferred path: the model computes its own loss when future_values is supplied
-        # (the pattern the TimesFM example relies on). Falls back to an explicit pinball
-        # loss on whatever the forward pass returns.
-        try:
-            output = model(past_values=context, future_values=future)
-            loss = output.loss if hasattr(output, "loss") and output.loss is not None else None
-        except TypeError:
-            loss = None
-            output = None
-
-        if loss is None:
-            prediction = output if torch.is_tensor(output) else model(context)
-            if not torch.is_tensor(prediction):
-                prediction = getattr(prediction, "logits", None)
-            if prediction is None:
-                raise RuntimeError(
-                    "model returned neither a loss nor a tensor; pass an explicit loss for "
-                    "this architecture"
-                )
-            loss = _quantile_loss(prediction, future, config.quantiles)
+        loss = step_fn(model, context, future, config)
 
         if optimizer is not None:
             loss.backward()

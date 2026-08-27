@@ -16,7 +16,10 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+import inspect
+
 import pytest
+from types import SimpleNamespace
 import torch
 
 from forecasting.base import (
@@ -870,3 +873,111 @@ def test_walk_forward_never_stamps_a_forecast_on_an_unrealised_target() -> None:
     merged = features.merge(forecasts, on=["symbol", "timestamp"], how="inner")
     assert len(merged) == len(forecasts), "a forecast was stamped on a timestamp not in the data"
     assert merged["target_return"].notna().all(), "a forecast landed on an unrealised target"
+
+
+# --------------------------------------------------------------------------------------
+# Per-architecture LoRA training steps
+#
+# The Colab run died inside the training loop, twice, with two different errors: TimesFM
+# with "forward() missing 1 required positional argument: 'masks'", Chronos with our own
+# "model returned neither a loss nor a tensor". The loop had guessed at a common interface
+# neither model has. These tests pin down what each architecture is actually asked to do.
+# --------------------------------------------------------------------------------------
+
+
+def test_timesfm_lora_refuses_before_loading_anything() -> None:
+    """TimesFM must fail in a second with its own reason, not after a model download and a
+    TypeError raised three frames inside peft. The message has to say why, because "it
+    didn't work" would send someone hunting for a config knob that does not exist."""
+    from forecasting.finetune_lora import finetune
+
+    with pytest.raises(RuntimeError) as excinfo:
+        finetune("timesfm", pd.DataFrame({"close": [1.0]}), horizon=5)
+
+    message = str(excinfo.value)
+    assert "torch.no_grad" in message, "the message must say why it cannot be trained"
+    assert "Chronos-Bolt" in message, "the message must name the supported alternative"
+
+
+def test_chronos_step_asks_the_model_for_its_own_loss() -> None:
+    """Chronos-Bolt computes a pinball loss internally when given a target. The step must
+    use that rather than scoring the quantile predictions itself -- the model normalises the
+    target with the same loc/scale as the context, which an external loss would not."""
+    import torch
+
+    from forecasting.finetune_lora import LoRAConfig, _chronos_step
+
+    seen = {}
+
+    class _StubChronos:
+        def __call__(self, *, context, target=None, mask=None, target_mask=None):
+            seen["context"] = context
+            seen["target"] = target
+            return SimpleNamespace(loss=torch.tensor(0.25), quantile_preds=None)
+
+    ctx = torch.randn(4, 64)
+    fut = torch.randn(4, 5)
+    loss = _chronos_step(_StubChronos(), ctx, fut, LoRAConfig())
+
+    assert float(loss) == pytest.approx(0.25)
+    assert seen["target"] is fut, "the future must be passed as `target`, not scored outside"
+    assert seen["context"] is ctx
+
+
+def test_chronos_step_matches_the_installed_library_signature() -> None:
+    """Guard against contract drift. _chronos_step calls forward(context=..., target=...) by
+    keyword; if chronos-forecasting renames either, the fine-tune breaks on Colab where it
+    cannot be debugged cheaply. This catches it here, and needs no model weights."""
+    bolt = pytest.importorskip("chronos.chronos_bolt")
+
+    parameters = inspect.signature(bolt.ChronosBoltModelForForecasting.forward).parameters
+    assert "context" in parameters, "Chronos forward() no longer takes `context`"
+    assert "target" in parameters, "Chronos forward() no longer takes `target`"
+
+
+def test_chronos_step_reports_a_missing_loss_clearly() -> None:
+    """If the model returns no loss despite a target, say that, rather than letting a None
+    reach loss.backward() and surface as an AttributeError."""
+    from forecasting.finetune_lora import LoRAConfig, _chronos_step
+
+    class _NoLoss:
+        def __call__(self, **kwargs):
+            return SimpleNamespace(loss=None)
+
+    with pytest.raises(RuntimeError, match="no loss"):
+        _chronos_step(_NoLoss(), None, None, LoRAConfig())
+
+
+def test_unsupported_architecture_names_itself_in_the_error() -> None:
+    """The generic step is the last resort. When it cannot work, the error must name the
+    model class and point at the registry, so the next person knows where to add a step."""
+    import torch
+
+    from forecasting.finetune_lora import LoRAConfig, _generic_step
+
+    class _WrongInterface(torch.nn.Module):
+        def forward(self, inputs, masks):  # noqa: ARG002 - mirrors TimesFM's signature
+            return None
+
+    with pytest.raises(RuntimeError, match="STEP_FUNCTIONS"):
+        _generic_step(_WrongInterface(), torch.randn(2, 8), torch.randn(2, 5), LoRAConfig())
+
+
+def test_run_epoch_delegates_to_the_step_function() -> None:
+    """_run_epoch must not compute a loss itself any more -- that was the guessing that
+    broke both models. It runs whatever the architecture supplied."""
+    import torch
+
+    from forecasting.finetune_lora import LoRAConfig, _run_epoch
+
+    calls = []
+
+    def _step(model, context, future, config):  # noqa: ANN001, ARG001
+        calls.append(len(context))
+        return torch.tensor(0.5, requires_grad=True)
+
+    loader = [(torch.randn(3, 8), torch.randn(3, 2)), (torch.randn(2, 8), torch.randn(2, 2))]
+    loss = _run_epoch(torch.nn.Linear(8, 2), loader, LoRAConfig(), None, _step)
+
+    assert calls == [3, 2], "every batch must go through the step function"
+    assert loss == pytest.approx(0.5)
