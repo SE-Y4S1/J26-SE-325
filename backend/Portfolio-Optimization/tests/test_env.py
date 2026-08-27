@@ -216,38 +216,25 @@ def test_write_capability_report() -> None:
     """Record which optional forecasters are usable. Not an assertion about them -- the
     report is the deliverable. forecasting/base.py reads this to decide which adapters to
     register, and Phase 7 reads it to decide which RQ1 rows it can populate.
+
+    The generator lives in forecasting/env_report.py, not here. A fresh checkout gitignores
+    artifacts/, so anything that has not run this test has no report and sees every
+    foundation model as missing -- which is what happened on Colab. Keeping the generator
+    importable means the notebook bootstrap can produce the report without running pytest.
     """
-    import numpy as np
-    import pandas as pd
-    import torch
+    from forecasting.env_report import ENV_REPORT_PATH, OPTIONAL_FORECASTERS, write_env_report
 
-    forecasters: dict[str, dict[str, object]] = {}
-    for module, dist in OPTIONAL_FORECASTERS.items():
-        entry: dict[str, object] = {"distribution": dist}
-        try:
-            mod = importlib.import_module(module)
-            entry["available"] = True
-            entry["version"] = getattr(mod, "__version__", "unknown")
-            if module == "timesfm":
-                # PyPI tops out at 2.0.2; "2.5" is the MODEL generation, exposed as this class.
-                entry["has_timesfm_2p5_torch"] = hasattr(mod, "TimesFM_2p5_200M_torch")
-        except Exception as exc:  # noqa: BLE001 - any failure means "unavailable"
-            entry["available"] = False
-            entry["error"] = f"{type(exc).__name__}: {exc}"
-        forecasters[module] = entry
+    report = write_env_report()
 
-    report = {
-        "python": sys.version.split()[0],
-        "platform": sys.platform,
-        "numpy": np.__version__,
-        "pandas": pd.__version__,
-        "torch": torch.__version__,
-        "torch_cuda_available": torch.cuda.is_available(),
-        "optional_forecasters": forecasters,
-    }
-
-    ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    (ARTIFACTS / "env_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    assert ENV_REPORT_PATH.exists()
+    forecasters = report["optional_forecasters"]
+    assert set(forecasters) == set(OPTIONAL_FORECASTERS)
+    for name, meta in forecasters.items():
+        assert isinstance(meta.get("available"), bool), f"{name} has no availability verdict"
+        if not meta["available"]:
+            # An unavailable forecaster must say why, or the Colab failure mode returns:
+            # a generic "not installed" that hides a numpy ABI mismatch or a broken wheel.
+            assert meta.get("error"), f"{name} unavailable with no error recorded"
 
     available = [name for name, meta in forecasters.items() if meta.get("available")]
     print(f"\n[gate] foundation forecasters available: {available or 'NONE'}")

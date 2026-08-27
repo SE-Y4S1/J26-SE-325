@@ -143,6 +143,28 @@ huggingface-cli download google/timesfm-2.5-200m-pytorch
 Without those weights the pipeline still runs end to end: `baseline_lstm` covers forecasting
 and the local Ollama model covers sentiment.
 
+### The capability report is a required step, not a test artefact
+
+`forecasting/base.py` decides which foundation adapters to register by reading
+`artifacts/env_report.json`. It does not import the packages to find out — one broken
+optional dependency would otherwise take down the whole registry at import time, making the
+LSTM baseline and the entire optimization path unreachable over something neither needs.
+
+`artifacts/` is gitignored, so **a fresh checkout has no report and sees no foundation
+models at all**, however the install went. Regenerate it after installing or changing either
+optional package:
+
+```bash
+uv run python -m forecasting.env_report
+```
+
+Skipping this produces the most misleading error in the component — `get_forecaster` raising
+*"Chronos-Bolt is not installed"* about a package that is installed and importable. The
+message now distinguishes a missing report from a missing package from a package that fails
+to import, and prints the underlying error in the last case. The notebook bootstrap runs
+this automatically; a fresh clone driven from a shell has to run it.
+
+
 Copy `.env.example` to `.env` for API keys (all optional — GDELT and yfinance need none).
 
 The reference agent needs [Ollama](https://ollama.com) with `gemma4-e4b` pulled. It is a
