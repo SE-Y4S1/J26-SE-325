@@ -72,17 +72,48 @@ class LoRAConfig:
 
 
 class WindowedSeriesDataset(Dataset):
-    """(context, future) pairs drawn from the return series of each symbol."""
+    """(context, future) pairs sliced from each symbol's return series ON DEMAND.
 
-    def __init__(self, contexts: np.ndarray, futures: np.ndarray) -> None:
-        self.contexts = torch.tensor(contexts, dtype=torch.float32)
-        self.futures = torch.tensor(futures, dtype=torch.float32)
+    Materialising every window is what the obvious implementation does, and it stores
+    `context_length` floats per window when consecutive windows share all but one step. On
+    the resolved universe that is 88,244 windows x 512 floats = 181MB of almost entirely
+    duplicated data, built from 400KB of underlying returns -- a 450x blow-up, and it is
+    held for the whole run rather than a batch at a time.
+
+    Storing the series plus an index of (series, start) offsets instead costs about a
+    megabyte, and __getitem__ slices the window when the DataLoader asks for it. The slices
+    are views into contiguous 1-D arrays, so this trades no measurable time for the space.
+    """
+
+    def __init__(
+        self,
+        series: list[np.ndarray],
+        index: np.ndarray,
+        *,
+        context_length: int,
+        horizon: int,
+    ) -> None:
+        self.series = series
+        self.index = index                      # (n, 2) int64: series id, window start
+        self.context_length = context_length
+        self.horizon = horizon
 
     def __len__(self) -> int:
-        return len(self.contexts)
+        return len(self.index)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.contexts[index], self.futures[index]
+    def __getitem__(self, item: int) -> tuple[torch.Tensor, torch.Tensor]:
+        series_id, start = self.index[item]
+        returns = self.series[series_id]
+        split = start + self.context_length
+        return (
+            torch.from_numpy(returns[start:split]),
+            torch.from_numpy(returns[split : split + self.horizon]),
+        )
+
+    @property
+    def nbytes(self) -> int:
+        """What the dataset actually holds -- used by the memory report."""
+        return sum(s.nbytes for s in self.series) + self.index.nbytes
 
 
 def smoke_subset(
@@ -144,8 +175,8 @@ def build_finetune_dataset(
     if "close" not in features.columns:
         raise ValueError("features must carry a 'close' column")
 
-    contexts: list[np.ndarray] = []
-    futures: list[np.ndarray] = []
+    series: list[np.ndarray] = []
+    index: list[tuple[int, int]] = []
 
     grouped = (
         features.groupby("symbol", sort=False)
@@ -160,20 +191,73 @@ def build_finetune_dataset(
                          symbol, len(closes), context_length + horizon + 1)
             continue
 
-        returns = np.log(closes[1:] / closes[:-1]).astype(np.float32)
-        for end in range(context_length, len(returns) - horizon + 1):
-            contexts.append(returns[end - context_length : end])
-            futures.append(returns[end : end + horizon])
+        # np.ascontiguousarray so every later slice is a contiguous view that
+        # torch.from_numpy can wrap without copying.
+        returns = np.ascontiguousarray(np.log(closes[1:] / closes[:-1]), dtype=np.float32)
+        series_id = len(series)
+        series.append(returns)
+        # A window starting at `start` uses [start, start+context) and predicts the
+        # `horizon` steps after it, so the last valid start is len - context - horizon.
+        for start in range(0, len(returns) - context_length - horizon + 1):
+            index.append((series_id, start))
 
-    if not contexts:
+    if not index:
         raise ValueError(
             f"no windows could be built: need at least {context_length + horizon + 1} bars "
             "for a single symbol"
         )
 
-    logger.info("built %d fine-tuning windows (context=%d, horizon=%d)",
-                len(contexts), context_length, horizon)
-    return WindowedSeriesDataset(np.stack(contexts), np.stack(futures))
+    dataset = WindowedSeriesDataset(
+        series, np.asarray(index, dtype=np.int64),
+        context_length=context_length, horizon=horizon,
+    )
+    logger.info(
+        "built %d fine-tuning windows (context=%d, horizon=%d) holding %.1f MB; "
+        "materialising them would have taken %.0f MB",
+        len(dataset), context_length, horizon, dataset.nbytes / 1e6,
+        len(dataset) * context_length * 4 / 1e6,
+    )
+    return dataset
+
+
+def memory_note() -> str:
+    """Process RSS and, on CUDA, allocated / reserved / peak GPU memory.
+
+    Included in the plan line and every epoch summary because a Colab OOM otherwise leaves
+    nothing to diagnose from: the session dies and takes its output with it. Knowing which
+    of the two limits was approached, and when, is the difference between fixing the cause
+    and guessing at it.
+    """
+    parts = []
+    try:
+        import psutil
+
+        parts.append(f"rss {psutil.Process().memory_info().rss / 1e9:.1f}G")
+    except Exception:  # noqa: BLE001 - psutil is optional; never fail a run over a log line
+        pass
+    if torch.cuda.is_available():
+        parts.append(
+            f"gpu {torch.cuda.memory_allocated() / 1e9:.1f}"
+            f"/{torch.cuda.memory_reserved() / 1e9:.1f}"
+            f"/peak {torch.cuda.max_memory_allocated() / 1e9:.1f}G"
+        )
+    return "  ".join(parts) or "memory unknown"
+
+
+def _release(*objects) -> None:
+    """Drop references and hand the memory back before the next model loads.
+
+    finetune() is called once per architecture, and a 231M-parameter model plus its
+    optimizer state stays resident until the allocator is told otherwise. Without this the
+    second model starts with the first still occupying the device.
+    """
+    import gc
+
+    for obj in objects:
+        del obj
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _model_device(model: torch.nn.Module) -> torch.device:
@@ -548,6 +632,10 @@ def finetune(
         config.epochs, steps_per_epoch * config.epochs, config.patience,
     )
 
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    logger.info("memory at start: %s", memory_note())
+
     best_val, stagnant = float("inf"), 0
     run_started = time.perf_counter()
     history: list[dict[str, float]] = []
@@ -567,9 +655,10 @@ def finetune(
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
         done = time.perf_counter() - run_started
         logger.info(
-            "epoch %d/%d: train %.6f  val %.6f  (%s elapsed, ~%s left at this rate)",
+            "epoch %d/%d: train %.6f  val %.6f  (%s elapsed, ~%s left)  %s",
             epoch, config.epochs - 1, train_loss, val_loss,
             _duration(done), _duration(done / (epoch + 1) * (config.epochs - epoch - 1)),
+            memory_note(),
         )
 
         if val_loss < best_val - 1e-9:
@@ -590,7 +679,9 @@ def finetune(
     if register:
         _register_checkpoint(base_model_name, output_dir, features, horizon, metrics, run_id)
 
-    logger.info("saved LoRA adapter to %s", output_dir)
+    logger.info("saved LoRA adapter to %s  (%s)", output_dir, memory_note())
+    _release(peft_model, inner, forecaster, optimizer, dataset, train_loader, val_loader)
+    logger.info("released %s; %s", base_model_name, memory_note())
     return output_dir
 
 

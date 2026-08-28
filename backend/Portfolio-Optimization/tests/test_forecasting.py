@@ -1274,3 +1274,58 @@ def test_run_epoch_survives_a_loader_with_no_length(caplog) -> None:
         loss = _run_epoch(torch.nn.Linear(8, 2), _gen(), LoRAConfig(), None, _step)
 
     assert loss == pytest.approx(0.5)
+
+
+# --------------------------------------------------------------------------------------
+# Memory
+#
+# Colab was dying at its 12GB system / 15GB GPU limits. Measured at the real universe
+# scale, the data pipeline is not the cause -- features 119MB, dataset 187MB before this
+# change -- but materialising every window stored 181MB of near-duplicate data built from
+# 400KB of returns, and that is worth not doing regardless.
+# --------------------------------------------------------------------------------------
+
+
+def test_dataset_does_not_materialise_every_window() -> None:
+    """Consecutive windows share all but one step, so storing each one in full is a large
+    multiple of the underlying series. The dataset must hold the series, not the windows."""
+    from forecasting.finetune_lora import build_finetune_dataset
+
+    frame = pd.concat(
+        [_price_frame(n=2000, seed=i).assign(symbol=f"S{i}") for i in range(3)],
+        ignore_index=True,
+    )
+    dataset = build_finetune_dataset(frame, context_length=512, horizon=5)
+
+    materialised = len(dataset) * 512 * 4
+    assert len(dataset) > 4000, "expected a window count worth caring about"
+    assert dataset.nbytes < materialised / 50, (
+        f"holds {dataset.nbytes:,} bytes; materialising would be {materialised:,} -- "
+        "the dataset is still storing windows rather than series"
+    )
+
+
+def test_dataset_windows_are_identical_to_materialised_ones() -> None:
+    """Slicing on demand must return exactly what building them up front did, or the space
+    saving comes at the cost of training on something subtly different."""
+    from forecasting.finetune_lora import build_finetune_dataset
+
+    frame = _price_frame(n=300, seed=7).assign(symbol="AAA")
+    dataset = build_finetune_dataset(frame, context_length=64, horizon=5)
+
+    closes = frame.sort_values("timestamp")["close"].to_numpy(dtype=np.float64)
+    returns = np.log(closes[1:] / closes[:-1]).astype(np.float32)
+
+    for i in (0, 1, len(dataset) // 2, len(dataset) - 1):
+        context, future = dataset[i]
+        assert np.allclose(context.numpy(), returns[i : i + 64])
+        assert np.allclose(future.numpy(), returns[i + 64 : i + 69])
+
+
+def test_memory_note_never_breaks_a_run() -> None:
+    """It is a log line. It must degrade to something printable rather than raise, whatever
+    is or is not installed."""
+    from forecasting.finetune_lora import memory_note
+
+    note = memory_note()
+    assert isinstance(note, str) and note
