@@ -1189,3 +1189,35 @@ def test_run_epoch_moves_batches_to_the_model_device() -> None:
     assert seen == [("meta", "meta"), ("meta", "meta")], (
         f"batches reached the step function on {seen}, not on the model's device"
     )
+
+
+def test_smoke_subset_always_yields_usable_windows() -> None:
+    """The smoke check's own regression guard.
+
+    Its first version sliced to 400 rows per symbol while leaving context_length at 512, so
+    build_finetune_dataset skipped every symbol and raised "no windows could be built: need
+    at least 518 bars". The slice and the context length have to be chosen together.
+    """
+    from forecasting.finetune_lora import build_finetune_dataset, smoke_subset
+
+    for bars in (2000, 400, 200):
+        features = pd.concat(
+            [_price_frame(n=bars, seed=i).assign(symbol=s) for i, s in enumerate(("AAA", "BBB"))],
+            ignore_index=True,
+        )
+        subset, context = smoke_subset(features, horizon=5)
+
+        assert subset["symbol"].nunique() == 1, "a smoke slice is one symbol by design"
+        assert context % 32 == 0, f"context {context} is not a whole number of TimesFM patches"
+
+        dataset = build_finetune_dataset(subset, context_length=context, horizon=5)
+        assert len(dataset) > 0, f"{bars} bars produced no windows at context {context}"
+
+
+def test_smoke_subset_refuses_a_series_it_cannot_use() -> None:
+    """Too short to form even one patch of context must say so, rather than returning a
+    slice that fails later inside build_finetune_dataset."""
+    from forecasting.finetune_lora import smoke_subset
+
+    with pytest.raises(ValueError, match="too short"):
+        smoke_subset(_price_frame(n=20).assign(symbol="TINY"), horizon=5)

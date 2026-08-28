@@ -45,6 +45,11 @@ CANDIDATE_TARGET_MODULES: tuple[tuple[str, ...], ...] = (
 )
 
 
+# TimesFM 2.5 patches its context into blocks of this size; a context that is not a
+# whole number of them is truncated inside forward().
+TIMESFM_PATCH_LEN = 32
+
+
 @dataclass
 class LoRAConfig:
     r: int = 8
@@ -76,6 +81,49 @@ class WindowedSeriesDataset(Dataset):
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.contexts[index], self.futures[index]
+
+
+def smoke_subset(
+    features: pd.DataFrame,
+    *,
+    horizon: int,
+    context_length: int = 512,
+    windows: int = 80,
+) -> tuple[pd.DataFrame, int]:
+    """A slice small enough for a fast smoke run, plus a context length that fits it.
+
+    Returns `(subset, context_length)`; pass both to `finetune`.
+
+    `build_finetune_dataset` needs `context_length + horizon + 1` bars from a SINGLE symbol,
+    and quietly skips any symbol with fewer. A naive `head(n)` across every symbol therefore
+    produces nothing at all -- which is exactly how the first smoke check died on Colab with
+    "no windows could be built: need at least 518 bars", having sliced to 400 rows per symbol
+    while leaving context_length at its 512 default.
+
+    One symbol is deliberate: the smoke check is testing the model's forward/backward path,
+    and the cross-symbol boundary logic is already covered by unit tests. Taking the longest
+    series makes the choice independent of universe order.
+    """
+    if "symbol" not in features.columns:
+        raise ValueError("features must carry a 'symbol' column")
+
+    counts = features.groupby("symbol", sort=False).size()
+    symbol = counts.idxmax()
+    available = int(counts.max())
+
+    if available < context_length + horizon + 1:
+        # Round DOWN to whole TimesFM patches: its forward() reshapes the context into
+        # 32-step blocks, so anything ragged is truncated there regardless.
+        context_length = ((available - horizon - 1) // TIMESFM_PATCH_LEN) * TIMESFM_PATCH_LEN
+
+    if context_length < TIMESFM_PATCH_LEN:
+        raise ValueError(
+            f"longest series ({symbol}, {available} bars) is too short for a {horizon}-step "
+            f"horizon plus one {TIMESFM_PATCH_LEN}-step patch of context"
+        )
+
+    subset = features[features["symbol"] == symbol].head(context_length + horizon + windows)
+    return subset, context_length
 
 
 def build_finetune_dataset(
