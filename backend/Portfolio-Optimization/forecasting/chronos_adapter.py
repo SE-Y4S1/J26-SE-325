@@ -110,8 +110,12 @@ class ChronosBoltForecaster:
         returns = np.diff(np.log(closes))
         context = torch.tensor(returns[-self.config.context_length :], dtype=torch.float32)
 
+        # Positional, deliberately: chronos-forecasting renamed this parameter from
+        # `context` to `inputs`, and passing it by keyword broke every fold of the backtest
+        # with "missing 1 required positional argument: 'inputs'". Position is the part of
+        # the signature the library has kept stable.
         quantile_preds, _mean = pipeline.predict_quantiles(
-            context=context,
+            context,
             prediction_length=horizon,
             quantile_levels=list(quantiles),
         )

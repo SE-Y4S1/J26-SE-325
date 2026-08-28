@@ -199,10 +199,20 @@ def run_walk_forward(
 
     predictions: list[pd.DataFrame] = []
 
+    # Built ONCE, outside the loop. A foundation model's weights are 200-900MB and do not
+    # change between folds, so constructing a forecaster per fold re-downloaded and
+    # re-loaded them every time -- twenty-plus loads across a backtest, which is what
+    # exhausted Colab's RAM.
+    #
+    # This does not weaken the walk-forward: fit() is still called per fold, and
+    # BaselineLSTMForecaster.fit rebuilds its network and reseeds on every call, so a fold
+    # never inherits weights from the one before it. For the zero-shot adapters fit() is a
+    # documented no-op, and there was never anything per-fold to construct.
+    forecaster = get_forecaster(forecaster_name, **(forecaster_kwargs or {}))
+
     for fold, train, test in iter_fold_data(frame, folds, warmup=warmup_periods()):
         assert_fold_is_clean(train, test, embargo_days=config.embargo_days)
 
-        forecaster = get_forecaster(forecaster_name, **(forecaster_kwargs or {}))
         try:
             forecaster.fit(train, horizon=horizon, log_to_mlflow=False)
             result = forecaster.predict_quantiles(test, horizon=horizon)

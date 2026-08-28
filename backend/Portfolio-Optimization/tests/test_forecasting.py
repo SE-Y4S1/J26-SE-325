@@ -1431,3 +1431,22 @@ def test_fit_batch_size_gives_up_with_a_useful_message(monkeypatch) -> None:
             fl.LoRAConfig(batch_size=64),
             _always_oom,
         )
+
+
+def test_chronos_predict_quantiles_matches_the_installed_signature() -> None:
+    """chronos-forecasting renamed this parameter from `context` to `inputs`, and because
+    the adapter passed it by keyword every backtest fold failed with "missing 1 required
+    positional argument: 'inputs'". The adapter test that would have caught it is marked
+    slow and needs ~200MB of weights, so it never runs here -- this one needs none.
+    """
+    chronos = pytest.importorskip("chronos")
+
+    parameters = list(
+        inspect.signature(chronos.ChronosBoltPipeline.predict_quantiles).parameters
+    )
+    assert parameters[1] not in {"prediction_length", "quantile_levels"}, (
+        "the first argument is no longer the context series; the adapter passes it "
+        "positionally and would now be sending it as something else"
+    )
+    for name in ("prediction_length", "quantile_levels"):
+        assert name in parameters, f"predict_quantiles no longer accepts {name}"
