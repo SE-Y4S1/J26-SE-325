@@ -1221,3 +1221,56 @@ def test_smoke_subset_refuses_a_series_it_cannot_use() -> None:
 
     with pytest.raises(ValueError, match="too short"):
         smoke_subset(_price_frame(n=20).assign(symbol="TINY"), horizon=5)
+
+
+# --------------------------------------------------------------------------------------
+# Training progress
+#
+# On the full universe an epoch is ~1,100 optimizer steps on a 231M-parameter model, so
+# logging only at epoch boundaries left the Colab cell silent for many minutes -- which
+# looks exactly like a hang. These pin the progress output that fixes that.
+# --------------------------------------------------------------------------------------
+
+
+def test_duration_reads_at_a_glance() -> None:
+    from forecasting.finetune_lora import _duration
+
+    assert _duration(45) == "45s"
+    assert _duration(605) == "10m05s"
+    assert _duration(7500) == "2h05m"
+
+
+def test_run_epoch_logs_progress_during_the_epoch(caplog) -> None:
+    """The point is DURING, not after. A 40-batch epoch must report while it runs."""
+    from forecasting.finetune_lora import LoRAConfig, _run_epoch
+
+    loader = [(torch.randn(2, 8), torch.randn(2, 2)) for _ in range(40)]
+
+    def _step(model, context, future, config):  # noqa: ANN001, ARG001
+        return torch.tensor(0.25)
+
+    with caplog.at_level("INFO", logger="forecasting.finetune_lora"):
+        _run_epoch(torch.nn.Linear(8, 2), loader, LoRAConfig(), None, _step, epoch=3)
+
+    progress = [r.getMessage() for r in caplog.records if "batch" in r.getMessage()]
+    assert progress, "no intra-epoch progress was logged"
+    assert len(progress) > 1, "progress must appear repeatedly, not once at the end"
+    assert "epoch 3" in progress[0], "the epoch number must be identifiable"
+    assert "left" in progress[0], "an ETA is the point -- it tells a slow run from a hung one"
+
+
+def test_run_epoch_survives_a_loader_with_no_length(caplog) -> None:
+    """A generator loader has no len(); progress must degrade rather than raise."""
+    from forecasting.finetune_lora import LoRAConfig, _run_epoch
+
+    def _gen():
+        for _ in range(4):
+            yield torch.randn(2, 8), torch.randn(2, 2)
+
+    def _step(model, context, future, config):  # noqa: ANN001, ARG001
+        return torch.tensor(0.5)
+
+    with caplog.at_level("INFO", logger="forecasting.finetune_lora"):
+        loss = _run_epoch(torch.nn.Linear(8, 2), _gen(), LoRAConfig(), None, _step)
+
+    assert loss == pytest.approx(0.5)

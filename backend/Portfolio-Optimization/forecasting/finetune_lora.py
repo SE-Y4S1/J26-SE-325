@@ -22,6 +22,8 @@ self-contained adapter directory, and `TimesFMForecaster(adapter_path=...)` /
 from __future__ import annotations
 
 import logging
+import math
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -536,19 +538,39 @@ def finetune(
 
     step_fn = STEP_FUNCTIONS.get(base_model_name, _generic_step)
 
+    # State the size of the job before starting it. Without this the first sign of life is
+    # the end of epoch 0, which on the full universe is many minutes of silence.
+    steps_per_epoch = math.ceil(len(train_set) / config.batch_size)
+    logger.info(
+        "plan: %s on %s | %d train / %d val windows | %d steps/epoch | up to %d epochs "
+        "(%d steps, patience %d)",
+        base_model_name, device, len(train_set), len(val_set), steps_per_epoch,
+        config.epochs, steps_per_epoch * config.epochs, config.patience,
+    )
+
     best_val, stagnant = float("inf"), 0
+    run_started = time.perf_counter()
     history: list[dict[str, float]] = []
 
     for epoch in range(config.epochs):
         peft_model.train()
-        train_loss = _run_epoch(peft_model, train_loader, config, optimizer, step_fn)
+        train_loss = _run_epoch(
+            peft_model, train_loader, config, optimizer, step_fn, epoch=epoch, phase="train"
+        )
 
         peft_model.eval()
         with torch.no_grad():
-            val_loss = _run_epoch(peft_model, val_loader, config, None, step_fn)
+            val_loss = _run_epoch(
+                peft_model, val_loader, config, None, step_fn, epoch=epoch, phase="val"
+            )
 
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
-        logger.info("epoch %d: train %.6f  val %.6f", epoch, train_loss, val_loss)
+        done = time.perf_counter() - run_started
+        logger.info(
+            "epoch %d/%d: train %.6f  val %.6f  (%s elapsed, ~%s left at this rate)",
+            epoch, config.epochs - 1, train_loss, val_loss,
+            _duration(done), _duration(done / (epoch + 1) * (config.epochs - epoch - 1)),
+        )
 
         if val_loss < best_val - 1e-9:
             best_val, stagnant = val_loss, 0
@@ -572,17 +594,40 @@ def finetune(
     return output_dir
 
 
-def _run_epoch(model, loader, config: LoRAConfig, optimizer, step_fn) -> float:
-    """One pass.  means evaluation.
+def _run_epoch(
+    model,
+    loader,
+    config: LoRAConfig,
+    optimizer,
+    step_fn,
+    *,
+    epoch: int | None = None,
+    phase: str = "train",
+) -> float:
+    """One pass. `optimizer=None` means evaluation.
 
     How the loss is computed is the architecture's business, not this loop's -- see
     STEP_FUNCTIONS.
+
+    Progress is logged DURING the epoch, not only at the end of it. On the full universe an
+    epoch is over a thousand optimizer steps on a 231M-parameter model, so epoch-boundary
+    logging alone leaves the cell silent for many minutes at a time -- indistinguishable
+    from a hang, which is exactly how this looked on Colab.
     """
     total, seen = 0.0, 0
     # The loader always yields CPU tensors; the model may be anywhere.
     device = _model_device(model)
 
-    for context, future in loader:
+    try:
+        n_batches = len(loader)
+    except TypeError:                       # an iterable without a length
+        n_batches = None
+    # Around twenty updates per epoch: frequent enough to show movement, sparse enough not
+    # to bury the epoch summaries.
+    log_every = max(1, n_batches // 20) if n_batches else 0
+    started = time.perf_counter()
+
+    for index, (context, future) in enumerate(loader, start=1):
         context = context.to(device)
         future = future.to(device)
 
@@ -601,7 +646,31 @@ def _run_epoch(model, loader, config: LoRAConfig, optimizer, step_fn) -> float:
         total += loss.detach().item() * len(context)
         seen += len(context)
 
+        if log_every and index % log_every == 0:
+            elapsed = time.perf_counter() - started
+            remaining = elapsed / index * (n_batches - index)
+            logger.info(
+                "  %s epoch %s: batch %d/%d  loss %.6f  %s elapsed, ~%s left",
+                phase,
+                "?" if epoch is None else epoch,
+                index,
+                n_batches,
+                total / max(seen, 1),
+                _duration(elapsed),
+                _duration(remaining),
+            )
+
     return total / max(seen, 1)
+
+
+def _duration(seconds: float) -> str:
+    """Compact h/m/s, so an ETA reads at a glance rather than as four-digit seconds."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
 
 
 def _log_run(
