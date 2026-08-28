@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 
@@ -69,6 +69,12 @@ class LoRAConfig:
     # None = use the GPU when there is one. An explicit "cpu" forces a CPU run, which is
     # useful for reproducing a GPU-only failure or for a machine whose GPU is busy.
     device: str | None = None
+    # Optimizer steps are taken every `grad_accum_steps` batches, so halving batch_size and
+    # doubling this leaves the effective batch -- and the optimisation -- unchanged while
+    # holding a fraction of the activations. Raised automatically when a batch will not fit.
+    grad_accum_steps: int = 1
+    # A batch smaller than this is not worth retrying; the run is failing for another reason.
+    min_batch_size: int = 4
 
 
 class WindowedSeriesDataset(Dataset):
@@ -218,6 +224,62 @@ def build_finetune_dataset(
         len(dataset) * context_length * 4 / 1e6,
     )
     return dataset
+
+
+def fit_batch_size(model, dataset, config: LoRAConfig, step_fn) -> tuple[int, int]:
+    """Largest batch that survives one training step, and the accumulation to match it.
+
+    A Colab OOM kills the session and takes the traceback with it, so discovering the limit
+    on epoch 3 of 5 costs the whole run. One forward/backward up front costs seconds and
+    turns a fatal crash into a smaller batch.
+
+    Halving the batch while doubling accumulation keeps the effective batch -- and therefore
+    the optimisation -- unchanged, so this is a memory decision rather than a training one.
+    """
+    if not torch.cuda.is_available():
+        return config.batch_size, max(1, config.grad_accum_steps)
+
+    batch_size = config.batch_size
+    accum = max(1, config.grad_accum_steps)
+
+    while batch_size >= config.min_batch_size:
+        loader = DataLoader(dataset, batch_size=batch_size)
+        context, future = next(iter(loader))
+        device = _model_device(model)
+        try:
+            loss = step_fn(model, context.to(device), future.to(device), config)
+            loss.backward()
+            model.zero_grad(set_to_none=True)
+            del loss
+            _release_cuda()
+            if batch_size != config.batch_size:
+                logger.warning(
+                    "batch %d did not fit; using %d with %d accumulation steps "
+                    "(effective batch %d, unchanged)",
+                    config.batch_size, batch_size, accum, batch_size * accum,
+                )
+            return batch_size, accum
+        except torch.cuda.OutOfMemoryError:
+            model.zero_grad(set_to_none=True)
+            _release_cuda()
+            batch_size //= 2
+            accum *= 2
+
+    raise RuntimeError(
+        f"even a batch of {config.min_batch_size} will not fit on this device. "
+        f"{memory_note()}. Something other than batch size is consuming the GPU -- check "
+        "whether an earlier cell is still holding a model."
+    )
+
+
+def _release_cuda() -> None:
+    """Return freed blocks to the driver. The caching allocator keeps them otherwise, which
+    looks like a leak and, worse, fragments the pool for the next allocation."""
+    import gc
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def memory_note() -> str:
@@ -613,22 +675,28 @@ def finetune(
     train_set = torch.utils.data.Subset(dataset, range(split))
     val_set = torch.utils.data.Subset(dataset, range(split, len(dataset)))
 
-    train_loader = DataLoader(train_set, batch_size=config.batch_size, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=config.batch_size)
+    step_fn = STEP_FUNCTIONS.get(base_model_name, _generic_step)
+
+    # Establish what fits BEFORE committing to a multi-epoch run.
+    batch_size, accum = fit_batch_size(peft_model, train_set, config, step_fn)
+    config = replace(config, batch_size=batch_size, grad_accum_steps=accum)
+
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=batch_size)
 
     optimizer = torch.optim.AdamW(
         [p for p in peft_model.parameters() if p.requires_grad], lr=config.lr
     )
 
-    step_fn = STEP_FUNCTIONS.get(base_model_name, _generic_step)
-
     # State the size of the job before starting it. Without this the first sign of life is
     # the end of epoch 0, which on the full universe is many minutes of silence.
     steps_per_epoch = math.ceil(len(train_set) / config.batch_size)
     logger.info(
-        "plan: %s on %s | %d train / %d val windows | %d steps/epoch | up to %d epochs "
-        "(%d steps, patience %d)",
-        base_model_name, device, len(train_set), len(val_set), steps_per_epoch,
+        "plan: %s on %s | %d train / %d val windows | batch %d x %d accum "
+        "(effective %d) | %d steps/epoch | up to %d epochs (%d steps, patience %d)",
+        base_model_name, device, len(train_set), len(val_set),
+        config.batch_size, config.grad_accum_steps,
+        config.batch_size * config.grad_accum_steps, steps_per_epoch,
         config.epochs, steps_per_epoch * config.epochs, config.patience,
     )
 
@@ -706,8 +774,11 @@ def _run_epoch(
     from a hang, which is exactly how this looked on Colab.
     """
     total, seen = 0.0, 0
+    accum = max(1, config.grad_accum_steps)
     # The loader always yields CPU tensors; the model may be anywhere.
     device = _model_device(model)
+    if optimizer is not None:
+        optimizer.zero_grad(set_to_none=True)
 
     try:
         n_batches = len(loader)
@@ -722,20 +793,22 @@ def _run_epoch(
         context = context.to(device)
         future = future.to(device)
 
-        if optimizer is not None:
-            optimizer.zero_grad()
-
         loss = step_fn(model, context, future, config)
 
         if optimizer is not None:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad], config.max_grad_norm
-            )
-            optimizer.step()
+            # Scale by the accumulation factor so the gradient matches what a single batch
+            # of the effective size would have produced, rather than its sum.
+            (loss / accum).backward()
+            if index % accum == 0 or index == n_batches:
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad], config.max_grad_norm
+                )
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
         total += loss.detach().item() * len(context)
         seen += len(context)
+        del loss
 
         if log_every and index % log_every == 0:
             elapsed = time.perf_counter() - started

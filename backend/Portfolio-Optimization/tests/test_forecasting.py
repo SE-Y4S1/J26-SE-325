@@ -1329,3 +1329,105 @@ def test_memory_note_never_breaks_a_run() -> None:
 
     note = memory_note()
     assert isinstance(note, str) and note
+
+
+# --------------------------------------------------------------------------------------
+# OOM defences
+# --------------------------------------------------------------------------------------
+
+
+def test_gradient_accumulation_preserves_the_effective_batch() -> None:
+    """Halving the batch and doubling accumulation must leave the optimisation unchanged.
+
+    If it did not, the OOM fallback would silently alter training rather than only its
+    memory profile -- and the run would still finish, so nothing would flag it.
+    """
+    from dataclasses import replace as dc_replace
+
+    from forecasting.finetune_lora import LoRAConfig, _run_epoch
+
+    torch.manual_seed(0)
+    data = [(torch.randn(16, 4), torch.randn(16, 1)) for _ in range(4)]
+
+    def _run(batch_size: int, accum: int) -> list[float]:
+        torch.manual_seed(0)
+        model = torch.nn.Linear(4, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        # Re-chunk the same samples into the requested batch size.
+        contexts = torch.cat([c for c, _ in data])
+        futures = torch.cat([f for _, f in data])
+        loader = [
+            (contexts[i : i + batch_size], futures[i : i + batch_size])
+            for i in range(0, len(contexts), batch_size)
+        ]
+        config = dc_replace(LoRAConfig(), grad_accum_steps=accum, max_grad_norm=1e9)
+        _run_epoch(
+            model, loader, config, optimizer,
+            lambda m, c, f, cfg: torch.nn.functional.mse_loss(m(c), f),
+        )
+        return [p.detach().clone().flatten().tolist() for p in model.parameters()][0]
+
+    full = _run(batch_size=16, accum=1)
+    split = _run(batch_size=8, accum=2)
+
+    assert full == pytest.approx(split, abs=1e-5), (
+        "batch 8 x 2 accumulation diverged from batch 16 -- the fallback changes training"
+    )
+
+
+def test_fit_batch_size_is_a_no_op_without_cuda() -> None:
+    """On CPU there is nothing to probe, and probing anyway would cost a forward/backward
+    on every run for no benefit."""
+    from forecasting.finetune_lora import LoRAConfig, fit_batch_size
+
+    config = LoRAConfig(batch_size=64, grad_accum_steps=1)
+    batch, accum = fit_batch_size(torch.nn.Linear(4, 1), [], config, None)
+
+    assert (batch, accum) == (64, 1)
+
+
+def test_fit_batch_size_halves_until_it_fits(monkeypatch) -> None:
+    """The probe must back off and compensate, so the effective batch is preserved.
+
+    CUDA is faked: the point is the search, which has to be right before it ever runs
+    somewhere it cannot be debugged.
+    """
+    import forecasting.finetune_lora as fl
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(fl, "_release_cuda", lambda: None)
+    monkeypatch.setattr(fl, "_model_device", lambda m: torch.device("cpu"))
+
+    dataset = [(torch.randn(4), torch.randn(1)) for _ in range(64)]
+    model = torch.nn.Linear(4, 1)
+
+    def _step(m, context, future, config):  # noqa: ANN001, ARG001
+        if len(context) > 16:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+        return m(context).sum()
+
+    batch, accum = fl.fit_batch_size(model, dataset, fl.LoRAConfig(batch_size=64), _step)
+
+    assert batch == 16, f"settled on batch {batch}, expected 16"
+    assert batch * accum == 64, "the effective batch must survive the back-off"
+
+
+def test_fit_batch_size_gives_up_with_a_useful_message(monkeypatch) -> None:
+    """If nothing fits, the cause is not batch size, and the error should say so rather
+    than leaving someone halving a number that was never the problem."""
+    import forecasting.finetune_lora as fl
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(fl, "_release_cuda", lambda: None)
+    monkeypatch.setattr(fl, "_model_device", lambda m: torch.device("cpu"))
+
+    def _always_oom(m, context, future, config):  # noqa: ANN001, ARG001
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    with pytest.raises(RuntimeError, match="other than batch size"):
+        fl.fit_batch_size(
+            torch.nn.Linear(4, 1),
+            [(torch.randn(4), torch.randn(1)) for _ in range(64)],
+            fl.LoRAConfig(batch_size=64),
+            _always_oom,
+        )
