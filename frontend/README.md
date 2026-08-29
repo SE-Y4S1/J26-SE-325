@@ -20,7 +20,37 @@ from the root.
 | `npm run build` | production build — **also typechecks**, which `next dev` does not |
 | `npm run gen:api` | regenerate TypeScript types from each service's live OpenAPI |
 | `npm run typecheck` | `tsc --noEmit` |
+| `npm test` | Jest unit and component tests |
+| `npm run test:e2e` | Playwright end-to-end, against the real backends |
 | `npx eslint .` | lint (`next lint` was removed in Next 16) |
+
+## Tests
+
+**Jest** covers the logic every screen sits on: the fetch wrapper's error classification,
+portfolio selection from the URL, the formatting helpers, and that a withdrawal marked
+`feasible: false` renders as a shortfall rather than an error.
+
+**Playwright runs against the real Platform and Component 1 services**, not mocks. It starts
+them itself from their existing virtualenvs — `npm run test:e2e` needs nothing running
+first. That is a deliberate deviation from docker-compose: building the component1 image
+installs torch and the full ML stack, which is hours on a slow link, and these are the same
+uvicorn processes serving the same apps. To run against compose instead, bring the stack up
+and set `PW_SKIP_WEBSERVER=1`.
+
+Two things worth knowing before editing the specs:
+
+- **The demo book can never be infeasible.** The participation cap is 10% of ADV *in shares*
+  per day and every seeded holding's ADV dwarfs its position, so the whole book liquidates
+  in one day. The infeasible spec builds its own illiquid portfolio through the API.
+  Requesting more than the portfolio is worth is a *different* path — the service rejects
+  that with a 400.
+- **`@example.test` addresses are rejected.** pydantic's `EmailStr` refuses the reserved
+  special-use TLDs, so fixtures use `@example.com`.
+
+Playwright is pinned to 1.61.1 because that is the release whose chromium revision (1228) is
+already in this machine's browser cache; a newer one triggers a large download. The config
+also asks for `channel: "chromium"` — the full build rather than the headless shell, for the
+same reason. On any other machine `npx playwright install chromium` covers both.
 
 ## Structure
 

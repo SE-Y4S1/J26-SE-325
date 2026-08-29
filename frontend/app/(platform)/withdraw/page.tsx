@@ -135,7 +135,10 @@ function WithdrawScreen() {
   );
 }
 
-function PlanResult({ plan }: { plan: WithdrawalResponse }) {
+// Exported for tests: the feasible/infeasible distinction is a research-relevant
+// behaviour, and asserting it through the whole page would mean mocking auth, the
+// portfolio hook and the API to reach it.
+export function PlanResult({ plan }: { plan: WithdrawalResponse }) {
   const trace = (plan.fuzzy_rule_trace ?? []) as unknown as FuzzyRuleTraceEntry[];
 
   return (
