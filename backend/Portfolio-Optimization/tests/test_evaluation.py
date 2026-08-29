@@ -299,3 +299,112 @@ def test_walk_forward_builds_the_forecaster_once(monkeypatch) -> None:
         f"forecaster constructed {builds['count']} times for {fits['count']} folds; "
         "loading foundation weights per fold is what exhausted Colab's RAM"
     )
+
+
+def test_walk_forward_checkpoints_and_resumes_per_fold(tmp_path, monkeypatch) -> None:
+    """A backtest is twenty-odd minutes of compute and Colab reclaims long sessions.
+
+    Measured during the investigation: memory stays flat at ~3.3GB of 12.7 across every
+    fold, so the interruption has nothing to do with the code -- which means the code
+    cannot prevent it and should survive it instead. Folds are independent by construction,
+    so each is banked as it completes and a resumed run skips it.
+    """
+    import numpy as np
+    import pandas as pd
+
+    import evaluation.backtest as bt
+    from forecasting.base import ForecastResult
+
+    fits = {"count": 0}
+
+    class _Recorder:
+        name, version = "recorder", "v1"
+
+        def fit(self, features, *, horizon, **kwargs) -> None:  # noqa: ANN001, ARG002
+            fits["count"] += 1
+
+        def predict_quantiles(self, features, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+            frame = features.sort_values("timestamp")
+            return ForecastResult(
+                symbol=str(frame["symbol"].iloc[0]), horizon=horizon,
+                quantiles=(0.1, 0.5, 0.9), values=np.zeros((1, 3)),
+                timestamps=pd.DatetimeIndex([frame["timestamp"].iloc[-1]]),
+                model_name=self.name, model_version=self.version,
+            )
+
+    monkeypatch.setattr("forecasting.base.get_forecaster", lambda name, **kw: _Recorder())
+
+    features = pd.DataFrame({
+        "timestamp": pd.bdate_range("2015-01-01", periods=2000),
+        "symbol": "AAA",
+        "close": 100.0,
+        "target_return": 0.001,
+    })
+    config = bt.BacktestConfig(
+        train_window_days=365, test_window_days=180, step_days=180, embargo_days=5
+    )
+    checkpoint = tmp_path / "folds.csv"
+
+    cold = bt.run_walk_forward(
+        features, "recorder", horizon=5, config=config,
+        log_to_mlflow=False, checkpoint=checkpoint,
+    )
+    assert fits["count"] > 1, "expected several folds"
+    assert checkpoint.exists(), "the checkpoint should be written as folds complete"
+    cold_folds = fits["count"]
+
+    fits["count"] = 0
+    warm = bt.run_walk_forward(
+        features, "recorder", horizon=5, config=config,
+        log_to_mlflow=False, checkpoint=checkpoint,
+    )
+
+    assert fits["count"] == 0, (
+        f"refitted {fits['count']} of {cold_folds} folds; a resumed run must reuse the "
+        "checkpoint rather than repeat twenty minutes of compute"
+    )
+    assert len(warm) == len(cold), "resuming must reproduce the same predictions"
+
+
+def test_walk_forward_without_a_checkpoint_is_unchanged(tmp_path, monkeypatch) -> None:
+    """Checkpointing is opt-in; the existing callers pass nothing and must not start
+    writing files as a side effect."""
+    import numpy as np
+    import pandas as pd
+
+    import evaluation.backtest as bt
+    from forecasting.base import ForecastResult
+
+    class _Stub:
+        name, version = "stub", "v1"
+
+        def fit(self, features, *, horizon, **kwargs) -> None:  # noqa: ANN001, ARG002
+            return None
+
+        def predict_quantiles(self, features, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+            frame = features.sort_values("timestamp")
+            return ForecastResult(
+                symbol=str(frame["symbol"].iloc[0]), horizon=horizon,
+                quantiles=(0.1, 0.5, 0.9), values=np.zeros((1, 3)),
+                timestamps=pd.DatetimeIndex([frame["timestamp"].iloc[-1]]),
+                model_name=self.name, model_version=self.version,
+            )
+
+    monkeypatch.setattr("forecasting.base.get_forecaster", lambda name, **kw: _Stub())
+
+    features = pd.DataFrame({
+        "timestamp": pd.bdate_range("2015-01-01", periods=1200),
+        "symbol": "AAA",
+        "close": 100.0,
+        "target_return": 0.001,
+    })
+    result = bt.run_walk_forward(
+        features, "stub", horizon=5,
+        config=bt.BacktestConfig(
+            train_window_days=365, test_window_days=180, step_days=180, embargo_days=5
+        ),
+        log_to_mlflow=False,
+    )
+
+    assert not result.empty
+    assert list(tmp_path.iterdir()) == [], "no checkpoint should be written when none is asked for"

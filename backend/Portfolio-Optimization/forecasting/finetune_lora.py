@@ -294,7 +294,20 @@ def memory_note() -> str:
     try:
         import psutil
 
-        parts.append(f"rss {psutil.Process().memory_info().rss / 1e9:.1f}G")
+        process = psutil.Process()
+        parts.append(f"rss {process.memory_info().rss / 1e9:.1f}G")
+        # Peak RSS ever reached, which the point-in-time figure misses entirely: this is
+        # sampled between folds, after a gc, so it records the trough while the spike
+        # inside a fit goes unseen. VmHWM is the kernel's own high-water mark.
+        try:
+            hwm = [
+                line for line in Path("/proc/self/status").read_text().splitlines()
+                if line.startswith("VmHWM:")
+            ]
+            if hwm:
+                parts.append(f"peak-rss {int(hwm[0].split()[1]) / 1e6:.1f}G")
+        except Exception:  # noqa: BLE001 - Linux only; absent on Windows, and optional
+            pass
     except Exception:  # noqa: BLE001 - psutil is optional; never fail a run over a log line
         pass
     if torch.cuda.is_available():

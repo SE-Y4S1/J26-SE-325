@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import gc
 import logging
+from pathlib import Path
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -176,6 +177,7 @@ def run_walk_forward(
     *,
     horizon: int,
     config: BacktestConfig | None = None,
+    checkpoint: Path | None = None,
     log_to_mlflow: bool = True,
     forecaster_kwargs: dict | None = None,
 ) -> pd.DataFrame:
@@ -200,6 +202,21 @@ def run_walk_forward(
         raise ValueError("no folds could be generated for this data range")
 
     predictions: list[pd.DataFrame] = []
+    completed: set[int] = set()
+
+    # Fold-level resume. A backtest is twenty-odd minutes of compute and Colab reclaims
+    # long-running sessions, so an all-or-nothing run loses everything to an interruption
+    # that has nothing to do with the code. Folds are independent by construction -- that is
+    # what makes the metrics aggregable -- so each one can be banked as it finishes.
+    if checkpoint is not None and checkpoint.exists():
+        prior = pd.read_csv(checkpoint, parse_dates=["timestamp"])
+        if not prior.empty:
+            predictions.append(prior)
+            completed = set(prior["fold"].unique().tolist())
+            logger.info(
+                "resuming %s from %s: %d fold(s) already computed",
+                forecaster_name, checkpoint, len(completed),
+            )
 
     # Built ONCE, outside the loop. A foundation model's weights are 200-900MB and do not
     # change between folds, so constructing a forecaster per fold re-downloaded and
@@ -217,9 +234,16 @@ def run_walk_forward(
     )
 
     for fold, train, test in iter_fold_data(frame, folds, warmup=warmup_periods()):
-        assert_fold_is_clean(train, test, embargo_days=config.embargo_days)
+        if fold.fold_index in completed:
+            continue
 
         try:
+            # Inside the try: a fold whose split is unusable is a reason to drop THAT fold,
+            # not to abandon the twenty already computed. It is logged as an error rather
+            # than a warning because a look-ahead violation is a methodology problem, not a
+            # flaky model.
+            assert_fold_is_clean(train, test, embargo_days=config.embargo_days)
+
             forecaster.fit(train, horizon=horizon, log_to_mlflow=False)
             result = forecaster.predict_quantiles(test, horizon=horizon)
         except Exception as exc:  # noqa: BLE001 - one bad fold must not kill the backtest
@@ -233,6 +257,10 @@ def run_walk_forward(
             on=["symbol", "timestamp"], how="left",
         )
         predictions.append(fold_frame)
+
+        if checkpoint is not None:
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            pd.concat(predictions, ignore_index=True).to_csv(checkpoint, index=False)
 
         # A fold's training tensors are hundreds of megabytes at universe scale, and the
         # next fold rebuilds them from scratch. Dropping them here keeps the peak to one

@@ -38,3 +38,6 @@ __pycache__/
 .coverage
 htmlcov/
 .ipynb_checkpoints/
+
+# Per-fold backtest checkpoints (resumable; regenerated on demand)
+artifacts/results/_folds_*.csv
