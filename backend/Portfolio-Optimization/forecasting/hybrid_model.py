@@ -54,6 +54,10 @@ class HybridConfig:
     # walk_forward_points caps how many model calls each symbol costs.
     min_context: int = 64
     walk_forward_points: int = 200
+    # Cuts sent to the base model per forward pass. Only used when the base exposes
+    # predict_quantiles_batch; the LSTM returns every in-sample row from one call and
+    # never reaches the walk.
+    base_batch_size: int = 32
 
 
 class HybridForecaster:
@@ -225,24 +229,46 @@ class HybridForecaster:
                 stride = len(cuts) // self.config.walk_forward_points
                 cuts = cuts[::stride][: self.config.walk_forward_points]
 
+            # One call per cut is a full pass over a 200M+ parameter model, and there are
+            # hundreds of cuts per symbol on every fold of a backtest -- the hybrid was
+            # taking hours and looked hung. Both foundation adapters have always accepted a
+            # LIST of series, so the cuts go through in batches. Each series is normalised
+            # against its own statistics, so this changes speed and nothing else.
+            batch_fn = getattr(self.base, "predict_quantiles_batch", None)
+            batch = max(1, self.config.base_batch_size) if batch_fn else 1
+
             rows = []
-            for cut in cuts:
+            for start in range(0, len(cuts), batch):
+                chunk = cuts[start : start + batch]
+                windows = [group.iloc[: cut + 1] for cut in chunk]
                 try:
-                    result = self.base.predict_quantiles(group.iloc[: cut + 1], horizon=horizon)
+                    if batch_fn:
+                        results = batch_fn(windows, horizon=horizon)
+                    else:
+                        results = [
+                            self.base.predict_quantiles(window, horizon=horizon)
+                            for window in windows
+                        ]
                 except Exception as exc:  # noqa: BLE001
-                    logger.debug("base forecast failed for %s at cut %d: %s", symbol, cut, exc)
+                    logger.debug("base forecast failed for %s near cut %d: %s",
+                                 symbol, chunk[0], exc)
                     continue
-                row = result.to_frame().rename(columns=rename).iloc[-1]
-                rows.append(
-                    {
-                        "symbol": symbol,
-                        # Stamp at the CUT, not at whatever the adapter labelled its own
-                        # last input row, so the join lands on the row whose target this
-                        # forecast is actually predicting.
-                        "timestamp": group.loc[cut, "timestamp"],
-                        **{c: float(row[c]) for c in qcols},
-                    }
-                )
+
+                for cut, result in zip(chunk, results):
+                    row = result.to_frame().rename(columns=rename).iloc[-1]
+                    rows.append(
+                        {
+                            "symbol": symbol,
+                            # Stamp at the CUT, not at whatever the adapter labelled its own
+                            # last input row, so the join lands on the row whose target this
+                            # forecast is actually predicting.
+                            "timestamp": group.loc[cut, "timestamp"],
+                            **{c: float(row[c]) for c in qcols},
+                        }
+                    )
+
+                if start and start % (batch * 20) == 0:
+                    logger.info("  %s: %d/%d walk-forward points", symbol, start, len(cuts))
 
             if rows:
                 frames.append(pd.DataFrame(rows))

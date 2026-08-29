@@ -1450,3 +1450,100 @@ def test_chronos_predict_quantiles_matches_the_installed_signature() -> None:
     )
     for name in ("prediction_length", "quantile_levels"):
         assert name in parameters, f"predict_quantiles no longer accepts {name}"
+
+
+# --------------------------------------------------------------------------------------
+# Batched base inference
+#
+# The hybrid's walk-forward made one call per cut -- ~5,200 full passes over a 231M model
+# per fold, thirteen folds deep. It looked hung on Colab because it effectively was.
+# --------------------------------------------------------------------------------------
+
+
+class _BatchingStub:
+    """A base with the foundation adapters' shape, recording how it was called."""
+
+    name, version = "batch_stub", "v1"
+
+    def __init__(self) -> None:
+        self.batch_calls, self.single_calls, self.sizes = 0, 0, []
+
+    def fit(self, features, *, horizon, **kwargs) -> None:  # noqa: ANN001, ARG002
+        return None
+
+    def _one(self, features, horizon):  # noqa: ANN001
+        from forecasting.base import ForecastResult
+
+        frame = features.sort_values("timestamp")
+        # A value derived from the window, so a mis-ordered batch cannot go unnoticed.
+        level = float(frame["close"].iloc[-1])
+        return ForecastResult(
+            symbol=str(frame["symbol"].iloc[0]), horizon=horizon, quantiles=(0.1, 0.5, 0.9),
+            values=np.array([[level - 1, level, level + 1]], dtype=float),
+            timestamps=pd.DatetimeIndex([pd.to_datetime(frame["timestamp"].iloc[-1])]),
+            model_name=self.name, model_version=self.version,
+        )
+
+    def predict_quantiles(self, features, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+        self.single_calls += 1
+        return self._one(features, horizon)
+
+    def predict_quantiles_batch(self, frames, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+        self.batch_calls += 1
+        self.sizes.append(len(frames))
+        return [self._one(f, horizon) for f in frames]
+
+
+def _walk(base, *, batch_size, points=60):
+    from forecasting.hybrid_model import HybridConfig, HybridForecaster
+
+    hybrid = HybridForecaster(
+        base,
+        HybridConfig(window=20, log_to_mlflow=False, min_context=30,
+                     walk_forward_points=points, base_batch_size=batch_size),
+    )
+    return hybrid._walk_forward_base(_feature_table(n=300), horizon=5)
+
+
+def test_batched_walk_forward_matches_one_at_a_time() -> None:
+    """THE guard. Batching is a speed change; if it altered a single forecast it would
+    corrupt RQ1 silently, because the run would still complete and the numbers would still
+    look plausible."""
+    batched = _walk(_BatchingStub(), batch_size=16)
+
+    class _NoBatch(_BatchingStub):
+        predict_quantiles_batch = None       # forces the one-at-a-time path
+
+    one_at_a_time = _walk(_NoBatch(), batch_size=16)
+
+    pd.testing.assert_frame_equal(batched, one_at_a_time)
+
+
+def test_batched_walk_forward_actually_batches() -> None:
+    """Without this, a broken getattr would silently fall back to the slow path and the
+    hybrid would quietly take hours again."""
+    base = _BatchingStub()
+    _walk(base, batch_size=16)
+
+    # One single call per SYMBOL is expected and cheap: it is the probe that decides
+    # whether the adapter returns many in-sample rows (the LSTM) or one (the foundation
+    # models). What must not happen is one call per CUT, of which there are hundreds.
+    assert base.single_calls == 1, (
+        f"{base.single_calls} single calls for one symbol; only the shape probe should "
+        "use the one-at-a-time path"
+    )
+    assert base.batch_calls > 0, "fell back to one-at-a-time despite a batch method"
+    assert max(base.sizes) > 1, f"batch sizes were {base.sizes}; nothing was actually batched"
+    assert max(base.sizes) <= 16, "batch exceeded the configured size"
+
+
+def test_walk_forward_still_works_without_a_batch_method() -> None:
+    """The LSTM has no batch path and must keep working."""
+    class _NoBatch(_BatchingStub):
+        predict_quantiles_batch = None
+
+    base = _NoBatch()
+    frame = _walk(base, batch_size=16)
+
+    assert not frame.empty
+    assert base.single_calls > 1
