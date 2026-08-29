@@ -17,6 +17,7 @@ Two subtler cases the assertion also covers:
 
 from __future__ import annotations
 
+import gc
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -182,6 +183,7 @@ def run_walk_forward(
     from features.feature_store import add_targets
     from features.technical import warmup_periods
     from forecasting.base import get_forecaster
+    from forecasting.finetune_lora import memory_note
 
     config = config or BacktestConfig(embargo_days=horizon)
     if config.embargo_days < horizon:
@@ -210,6 +212,10 @@ def run_walk_forward(
     # documented no-op, and there was never anything per-fold to construct.
     forecaster = get_forecaster(forecaster_name, **(forecaster_kwargs or {}))
 
+    logger.info(
+        "backtest %s: %d folds, %s", forecaster_name, len(folds), memory_note()
+    )
+
     for fold, train, test in iter_fold_data(frame, folds, warmup=warmup_periods()):
         assert_fold_is_clean(train, test, embargo_days=config.embargo_days)
 
@@ -228,10 +234,29 @@ def run_walk_forward(
         )
         predictions.append(fold_frame)
 
+        # A fold's training tensors are hundreds of megabytes at universe scale, and the
+        # next fold rebuilds them from scratch. Dropping them here keeps the peak to one
+        # fold's worth rather than leaving the last one resident while the next allocates.
+        del train, test, result, fold_frame
+        gc.collect()
+
+        # Per-fold, because a backtest that dies mid-run leaves no other evidence -- and on
+        # Colab the session dies with it, taking the traceback too.
+        logger.info(
+            "  fold %d/%d done (%d predictions so far)  %s",
+            fold.fold_index + 1, len(folds), sum(len(f) for f in predictions), memory_note(),
+        )
+
     if not predictions:
         raise RuntimeError("every fold failed; nothing to report")
 
     combined = pd.concat(predictions, ignore_index=True)
+
+    # The next candidate loads its own model; this one should not still be resident when it
+    # does. Matters most for the foundation adapters, which are 200-900MB apiece.
+    del forecaster, predictions, frame
+    gc.collect()
+    logger.info("backtest %s complete: %s", forecaster_name, memory_note())
 
     if log_to_mlflow:
         _log_backtest(forecaster_name, horizon, combined, len(folds))
