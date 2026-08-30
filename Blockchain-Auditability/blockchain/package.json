@@ -1,0 +1,18 @@
+{
+  "name": "blockchain-auditability-contracts",
+  "version": "1.0.0",
+  "description": "Smart Contract Audit Registry for Privacy-Preserving AI-to-Smart-Contract Audit Bridge",
+  "main": "hardhat.config.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "test": "hardhat test"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "ethers": "^6.11.1",
+    "hardhat": "^2.22.1"
+  }
+}
