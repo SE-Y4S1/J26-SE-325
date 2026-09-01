@@ -32,7 +32,7 @@ const NAV: NavItem[] = [
   // them, so the integration surface is obvious to anyone looking at the app.
   { href: "/fraud", label: "Fraud", component: "2", ready: false },
   { href: "/audit", label: "Audit", component: "3", ready: false },
-  { href: "/assistant", label: "Assistant", component: "4", ready: false },
+  { href: "/assistant", label: "Assistant", component: "4", ready: true },
 ];
 
 function Shell({ children }: { children: ReactNode }) {

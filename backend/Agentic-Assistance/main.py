@@ -7,10 +7,20 @@ from agent import agent
 from responsible_ai import run_responsible_ai_checks
 
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(
     title="FinAgent - Agentic Financial Assistant",
     description="Component 4 - Agentic LLM Assistant & Responsible AI",
     version="0.2.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
