@@ -66,16 +66,19 @@ test("assistant screen accepts a question and reaches a real state", async ({ pa
   // or the service is down and the page says so. The full round trip is asserted separately
   // in research-features.spec.ts, which skips unless Component 4 is actually running.
   await page.getByRole("link", { name: "Assistant" }).click();
-  await expect(page.getByRole("heading", { name: "Assistant" })).toBeVisible();
 
-  await page.getByRole("button", { name: "Ask" }).click();
+  // Targets Component 4's own UI, which replaced the scaffold I had written: a placeholder
+  // input and a Send button rather than a labelled field and an "Ask" button.
+  const input = page.getByPlaceholder("Ask the financial assistant...");
+  await expect(input).toBeVisible({ timeout: 30_000 });
+  await input.fill("What is a liquidity-aware withdrawal?");
+  await page.getByRole("button", { name: "Send" }).click();
 
+  // The question appearing in the transcript is proof the UI accepted it and dispatched the
+  // call; the answer itself is asserted in research-features.spec.ts, where waiting minutes
+  // on a CPU model does not make the everyday suite flaky.
   await expect(
-    page
-      .getByText(/The agent is working/)
-      .first()
-      .or(page.getByText(/Answer|Evidence/).first())
-      .or(page.getByText(/Assistant is not running/).first()),
+    page.getByText("What is a liquidity-aware withdrawal?").first(),
   ).toBeVisible({ timeout: 30_000 });
 });
 

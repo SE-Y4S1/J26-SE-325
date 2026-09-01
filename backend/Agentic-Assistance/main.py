@@ -1,5 +1,3 @@
-import os
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,37 +7,28 @@ from langchain_core.messages import HumanMessage
 from agent import agent
 from responsible_ai import run_responsible_ai_checks
 
-
 app = FastAPI(
     title="FinAgent - Agentic Financial Assistant",
     description="Component 4 - Agentic LLM Assistant & Responsible AI",
     version="0.2.0"
 )
 
-
-# --------------------------------------------------
-# INTEGRATION SURFACE ONLY
-#
-# Added so the shared platform can reach this service. Nothing below touches the agent,
-# the tools or the responsible-AI checks.
-#
-# CORS: the browser calls each service directly, so without this the frontend cannot talk
-# to Component 4 at all. ALLOWED_ORIGINS is the same convention the other services use,
-# read from the environment rather than imported, so this folder keeps no dependency on
-# anyone else's code.
-# --------------------------------------------------
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        origin.strip()
-        for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-        if origin.strip()
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --------------------------------------------------
+# INTEGRATION SURFACE ONLY
+#
+# CORS is handled above, by this component's own middleware. The only thing added here for
+# the platform is a health endpoint; nothing below touches the agent, the tools or the
+# responsible-AI checks.
+# --------------------------------------------------
 
 
 @app.get("/health")

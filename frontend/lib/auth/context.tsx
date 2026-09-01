@@ -22,6 +22,28 @@ import { getToken } from "@/lib/api/client";
 import * as platform from "@/lib/api/platform";
 import type { User } from "@/lib/api/types";
 
+/**
+ * Opt-in demo mode: stand in a fake signed-in user so a screen can be shown without the
+ * platform service running.
+ *
+ * This exists because Component 4's assistant UI needs to be demonstrable on its own. It is
+ * off unless explicitly switched on, because when it is on the platform has no access
+ * control at all -- every guard below sees a signed-in user and lets the visitor through.
+ * NEXT_PUBLIC_* is inlined at build time, so a production build without it cannot enable
+ * this at runtime.
+ */
+const DEMO_AUTH = process.env.NEXT_PUBLIC_DEMO_AUTH === "1";
+
+const DEMO_USER: User = {
+  id: 1,
+  email: "evaluator@university.edu",
+  display_name: "Research Evaluator",
+  created_at: "2026-08-30T00:00:00Z",
+};
+
+/** The demo user in demo mode, otherwise signed out. */
+const fallbackUser = (): User | null => (DEMO_AUTH ? DEMO_USER : null);
+
 interface AuthState {
   user: User | null;
   /** True until the initial token check finishes. Guards must wait for this, or they
@@ -46,13 +68,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     async function restore() {
       if (!getToken()) {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setUser(fallbackUser());
+          setLoading(false);
+        }
         return;
       }
-      const current = await platform.me();
-      if (!cancelled) {
-        setUser(current);
-        setLoading(false);
+
+      try {
+        const current = await platform.me();
+        if (!cancelled) {
+          setUser(current ?? fallbackUser());
+          setLoading(false);
+        }
+      } catch {
+        // A rejected token is a signed-out visitor, not a signed-in one -- unless we are
+        // deliberately demoing without a backend.
+        if (!cancelled) {
+          setUser(fallbackUser());
+          setLoading(false);
+        }
       }
     }
 

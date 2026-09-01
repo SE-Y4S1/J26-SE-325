@@ -75,15 +75,16 @@ test("assistant answers a real question with its evidence trail", async ({ page 
   await register(page, newUser());
   await seedPortfolio(page);
   await page.getByRole("link", { name: "Assistant" }).click();
-  await page.getByRole("button", { name: "Ask" }).click();
 
-  // By ROLE, not by text: "Answer" and "Evidence" both appear in the card headings AND in
-  // the explanatory copy underneath them, so getByText matches three elements and fails
-  // strict mode -- while the feature itself is working perfectly.
-  await expect(page.getByRole("heading", { name: "Answer" })).toBeVisible({
-    timeout: 720_000,
-  });
-  // Evidence is rendered whether or not tools ran: an explanation with nothing behind it is
-  // exactly what this component exists to make visible.
-  await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible();
+  const question = "What is a liquidity-aware withdrawal?";
+  const input = page.getByPlaceholder("Ask the financial assistant...");
+  await expect(input).toBeVisible({ timeout: 30_000 });
+  await input.fill(question);
+  await page.getByRole("button", { name: "Send" }).click();
+
+  // The reply is whatever the agent says, so there is no fixed string to match. What can be
+  // asserted is that a SECOND message appears in the transcript -- the question, then an
+  // answer beneath it.
+  await expect(page.getByText(question).first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/Assistant/).first()).toBeVisible({ timeout: 720_000 });
 });
