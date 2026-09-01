@@ -1,4 +1,7 @@
+import os
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from langchain_core.messages import HumanMessage
@@ -12,6 +15,42 @@ app = FastAPI(
     description="Component 4 - Agentic LLM Assistant & Responsible AI",
     version="0.2.0"
 )
+
+
+# --------------------------------------------------
+# INTEGRATION SURFACE ONLY
+#
+# Added so the shared platform can reach this service. Nothing below touches the agent,
+# the tools or the responsible-AI checks.
+#
+# CORS: the browser calls each service directly, so without this the frontend cannot talk
+# to Component 4 at all. ALLOWED_ORIGINS is the same convention the other services use,
+# read from the environment rather than imported, so this folder keeps no dependency on
+# anyone else's code.
+# --------------------------------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip()
+        for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+        if origin.strip()
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+def health():
+    """Liveness only -- deliberately does NOT invoke the agent.
+
+    docker-compose and the frontend need to distinguish "this service is not running" from
+    "the agent failed on this request". Calling the LLM here would conflate the two and make
+    the check slow and key-dependent.
+    """
+    return {"status": "ok", "component": "agentic-assistance"}
 
 
 # --------------------------------------------------

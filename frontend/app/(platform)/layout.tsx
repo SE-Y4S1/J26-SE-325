@@ -28,11 +28,12 @@ const NAV: NavItem[] = [
   { href: "/withdraw", label: "Withdraw", component: "1", ready: true },
   { href: "/optimize", label: "Optimize", component: "1", ready: true },
   { href: "/forecast", label: "Forecast", component: "1", ready: true },
-  // Teammates' components. `ready: false` renders them visibly pending rather than hiding
-  // them, so the integration surface is obvious to anyone looking at the app.
-  { href: "/fraud", label: "Fraud", component: "2", ready: false },
-  { href: "/audit", label: "Audit", component: "3", ready: false },
-  { href: "/assistant", label: "Assistant", component: "4", ready: false },
+  // Teammates' components, now wired to their real services. `ready` still exists because a
+  // service being LIVE and a service being UP are different things -- each page handles the
+  // second case itself, via ApiError.isUnavailable.
+  { href: "/fraud", label: "Fraud", component: "2", ready: true },
+  { href: "/audit", label: "Audit", component: "3", ready: true },
+  { href: "/assistant", label: "Assistant", component: "4", ready: true },
 ];
 
 function Shell({ children }: { children: ReactNode }) {
