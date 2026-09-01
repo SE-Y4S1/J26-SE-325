@@ -14,6 +14,8 @@ import { Button, Card, Field, Input, Notice, Stat, money } from "@/components/ui
 import { ApiError } from "@/lib/api/client";
 import { scoreTransaction, type ScoreResponse, type TransactionInput } from "@/lib/api/fraud";
 
+import { AttackSimulator } from "./AttackSimulator";
+
 const DEFAULT_TX: TransactionInput = {
   user_id: "u_1001",
   amount: 1200,
@@ -35,6 +37,7 @@ const TONE: Record<ScoreResponse["decision"], "success" | "warn" | "error"> = {
 };
 
 export default function FraudPage() {
+  const [tab, setTab] = useState<"score" | "attack">("score");
   const [tx, setTx] = useState<TransactionInput>(DEFAULT_TX);
   const [result, setResult] = useState<ScoreResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,6 +77,28 @@ export default function FraudPage() {
         </p>
       </div>
 
+      <div className="flex gap-2 border-b border-neutral-200">
+        {([["score", "Score a transaction"], ["attack", "Adversarial robustness"]] as const).map(
+          ([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className={
+                tab === key
+                  ? "border-b-2 border-neutral-900 px-3 py-2 text-sm font-medium"
+                  : "px-3 py-2 text-sm text-neutral-500 hover:text-neutral-900"
+              }
+            >
+              {label}
+            </button>
+          ),
+        )}
+      </div>
+
+      {tab === "attack" && <AttackSimulator />}
+
+      {tab === "score" && (
+      <>
       <Card title="Transaction" subtitle="Behavioural signals matter as much as the amount.">
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="User">
@@ -185,6 +210,8 @@ export default function FraudPage() {
             </Card>
           )}
         </div>
+      )}
+      </>
       )}
     </div>
   );

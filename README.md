@@ -17,7 +17,7 @@ assistance for stock markets.
 |---|---|---|---|---|
 | 1 | Liquidity-aware forecasting & portfolio optimization | Nivakaran S. | [`backend/Portfolio-Optimization`](backend/Portfolio-Optimization) | **built** |
 | 2 | Real-time fraud detection | Dushanthini R. | [`backend/Fraud-Detection`](backend/Fraud-Detection) | built — FastAPI on :8001, wired to the frontend |
-| 3 | Blockchain auditability | Abeysekara W.C.S.M | [`Blockchain-Auditability`](Blockchain-Auditability) | built — Express + Solidity on :8002, wired to the frontend |
+| 3 | Blockchain auditability | Abeysekara W.C.S.M | [`backend/Blockchain-Auditability`](backend/Blockchain-Auditability) | built — Express + Solidity on :8002, wired to the frontend |
 | 4 | Explainable agentic assistance | W.V.A.D.K. Chamara | [`backend/Agentic-Assistance`](backend/Agentic-Assistance) | built — FastAPI on :8003, wired to the frontend (needs an LLM key) |
 | — | Shared platform service (auth, portfolios) | — | [`backend/Platform`](backend/Platform) | **built** |
 | — | Web frontend | — | [`frontend`](frontend) | **built** |
@@ -88,14 +88,38 @@ three teammate screens with their services down, then plans a withdrawal success
 | Component 1 | 401 tests pass after merging `main` and `Chenuli` |
 | Component 2 | **runs** — `/health` OK, and `/score` correctly BLOCKs a high-risk transaction (risk 0.733) |
 | Component 3 | **runs** — `/api/health` OK, records endpoint responds; starts in mock-blockchain mode with no `contractConfig.json` |
-| Component 4 | integration surface verified by parse; the agent itself needs LangChain and an LLM key, neither installed here |
+| Component 4 | **runs** — `/health` OK, CORS preflight returns the frontend origin, and a real agent round trip answers with its responsible-AI checks (~82s on CPU) |
 | Frontend | 31 Jest, 16 Playwright, `tsc` clean |
 | Compose | `docker compose config` validates all 8 services |
 
+### Component 4 and the model alias
+
+Component 4's agent uses **Ollama, not a hosted API** — `agent.py` constructs
+`ChatOllama(model="llama3.2:3b")`. Two consequences worth knowing:
+
+- **There is no API key to set.** An earlier version of `docker-compose.yml` passed
+  `OPENAI_API_KEY` and installed `langchain-openai`; both were wrong, and it omitted
+  `langchain-ollama`, which is the package actually imported. Fixed to install from the
+  component's own `requirements.txt`.
+- **Inside a container, `localhost:11434` is the container, not the host.** The compose
+  service therefore sets `OLLAMA_HOST=http://host.docker.internal:11434` with a matching
+  `extra_hosts` entry, or every chat call fails with a connection error.
+
+> **On this machine `llama3.2:3b` is an alias for `gemma4-e4b`.** The real model is ~2GB,
+> which is roughly a day of downloading on this connection, so it was aliased with
+> `ollama cp gemma4-e4b:latest llama3.2:3b` — no code change, no download. **Do not attribute
+> any Component 4 output here to Llama 3.2**; it came from Gemma. Remove the alias with
+> `ollama rm llama3.2:3b`, and on a machine with the real model pulled the code uses the real
+> one.
+
+A round trip takes about **82 seconds** on CPU. The Assistant E2E spec allows for that; the
+other specs use a 30-second budget, which is correct for them because a service that is *down*
+fails immediately.
+
 **Not yet verified:** a full `docker compose up`. Docker Desktop was not running on the
-development machine, so Components 2 and 3 were started directly instead — same processes,
+development machine, so all four services were started directly instead — same processes,
 same ports, same endpoints, but the container images and healthchecks themselves are
-unproven. Component 4 has never been started at all.
+unproven.
 
 Running the real services immediately earned its keep: Component 3 returns
 `{success, count, records}` rather than a bare array, so the first version of the frontend
@@ -116,7 +140,7 @@ backend/
   Platform/                shared auth + portfolio service
   Portfolio-Optimization/  Component 1  (built)
   Fraud-Detection/         Component 2
-  Blockchain-Auditability/ Component 3
+  Blockchain-Auditability/ Component 3  (Express + Solidity + its own Vite app)
   Agentic-Assistance/      Component 4
 frontend/                  Next.js 16 web app
 docs/                      TAF and research documents

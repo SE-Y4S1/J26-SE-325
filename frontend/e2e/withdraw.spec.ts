@@ -10,14 +10,6 @@ import { expect, test } from "@playwright/test";
 
 import { newUser, register, seedPortfolio } from "./fixtures";
 
-/** The portfolio's total, read off the screen so the specs do not hardcode the demo book. */
-async function portfolioValue(page: import("@playwright/test").Page): Promise<number> {
-  const hint = await page.getByText(/Portfolio value \$/).first().textContent();
-  const total = Number((hint ?? "").replace(/[^0-9.]/g, ""));
-  expect(total, "could not read the portfolio value off the withdraw screen").toBeGreaterThan(0);
-  return total;
-}
-
 test.beforeEach(async ({ page }) => {
   await register(page, newUser());
   await seedPortfolio(page);

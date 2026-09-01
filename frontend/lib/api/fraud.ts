@@ -56,3 +56,43 @@ export function auditTrail(): Promise<unknown> {
 export function fraudHealth(): Promise<{ status: string }> {
   return request<{ status: string }>("fraud", "/health", { auth: false });
 }
+
+
+// --- adversarial robustness -------------------------------------------------------------
+// /simulate-attack is the evidence behind Component 2's second research gap: that a
+// dual-stream model survives evasion a single-stream one does not. Contract read from
+// schemas.py::AttackResponse and confirmed against the running service.
+
+export type AttackType = "camouflage" | "slow_drift" | "structuring";
+
+export interface AttackStep {
+  step: number;
+  label: string;
+  amount: number;
+  behavioral_score: number;
+  graph_score: number;
+  risk_score: number;
+  decision: string;
+  reason: string;
+}
+
+export interface AttackResponse {
+  attack_type: string;
+  title: string;
+  description: string;
+  baseline: AttackStep;
+  steps: AttackStep[];
+  summary: string;
+  detected: boolean;
+  /** True when a behaviour-only model would have let the attack through -- the ablation. */
+  single_stream_would_have_missed: boolean;
+  disclaimer: string;
+}
+
+export function simulateAttack(attack_type: AttackType, steps = 8): Promise<AttackResponse> {
+  return request<AttackResponse>("fraud", "/simulate-attack", {
+    method: "POST",
+    body: { attack_type, steps },
+    auth: false,
+  });
+}
