@@ -1,13 +1,11 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from langchain_core.messages import HumanMessage
 
 from agent import agent
 from responsible_ai import run_responsible_ai_checks
-
-
-from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="FinAgent - Agentic Financial Assistant",
@@ -22,6 +20,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --------------------------------------------------
+# INTEGRATION SURFACE ONLY
+#
+# CORS is handled above, by this component's own middleware. The only thing added here for
+# the platform is a health endpoint; nothing below touches the agent, the tools or the
+# responsible-AI checks.
+# --------------------------------------------------
+
+
+@app.get("/health")
+def health():
+    """Liveness only -- deliberately does NOT invoke the agent.
+
+    docker-compose and the frontend need to distinguish "this service is not running" from
+    "the agent failed on this request". Calling the LLM here would conflate the two and make
+    the check slow and key-dependent.
+    """
+    return {"status": "ok", "component": "agentic-assistance"}
 
 
 # --------------------------------------------------

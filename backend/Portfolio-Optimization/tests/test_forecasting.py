@@ -16,7 +16,10 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+import inspect
+
 import pytest
+from types import SimpleNamespace
 import torch
 
 from forecasting.base import (
@@ -784,3 +787,763 @@ def test_hybrid_preserves_non_crossing_quantiles() -> None:
 def test_hybrid_refuses_to_predict_before_fit() -> None:
     with pytest.raises(RuntimeError, match="call fit"):
         _hybrid().predict_quantiles(_feature_table(n=100), horizon=5)
+
+
+class _SingleRowBase:
+    """A base with the shape of the real foundation adapters.
+
+    TimesFM and Chronos-Bolt both return ONE row per call, stamped at the last input
+    timestamp. That shape is what broke the hybrid on Colab, and no stub in this file had
+    it -- the LSTM returns many in-sample rows, so every hybrid test passed while the two
+    bases the component actually ships with could not train at all.
+    """
+
+    name = "single_row_stub"
+    version = "stub"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def fit(self, features, *, horizon, **kwargs) -> None:  # noqa: ANN001, ARG002
+        return None
+
+    def predict_quantiles(self, features, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+        import numpy as np
+        import pandas as pd
+
+        from forecasting.base import ForecastResult
+
+        self.calls += 1
+        frame = features.sort_values("timestamp")
+        # A weak signal so the residual head has something real to correct.
+        level = float(frame["close"].pct_change().tail(5).mean() or 0.0)
+        return ForecastResult(
+            symbol=str(frame["symbol"].iloc[0]),
+            horizon=horizon,
+            quantiles=(0.1, 0.5, 0.9),
+            values=np.array([[level - 0.01, level, level + 0.01]], dtype=float),
+            timestamps=pd.DatetimeIndex([pd.to_datetime(frame["timestamp"].iloc[-1])]),
+            model_name=self.name,
+            model_version=self.version,
+        )
+
+
+def test_hybrid_trains_on_a_single_row_foundation_base() -> None:
+    """Regression guard for the Colab failure: RuntimeError('no overlap between base
+    forecasts and targets') on every foundation base.
+
+    One call per symbol stamps the forecast at the last input timestamp -- which is exactly
+    the row add_targets leaves NaN, since the final `horizon` rows have no realised future.
+    The join then dropped everything. The fix walks the cut point forward and stamps each
+    forecast at its cut, so it lines up with the target it is actually predicting.
+    """
+    from forecasting.hybrid_model import HybridConfig, HybridForecaster
+
+    base = _SingleRowBase()
+    hybrid = HybridForecaster(
+        base,
+        HybridConfig(window=20, log_to_mlflow=False),
+    )
+    hybrid.fit(_feature_table(n=300), horizon=5, log_to_mlflow=False)
+
+    assert hybrid.head is not None
+    assert hybrid.version != "untrained"
+    # It must actually have walked, not made a single call.
+    assert base.calls > 1, f"base was called {base.calls} time(s); the walk did not happen"
+
+
+def test_walk_forward_never_stamps_a_forecast_on_an_unrealised_target() -> None:
+    """The property behind the fix: every base forecast must land on a row whose target
+    exists. If any cut fell in the final `horizon` rows the join would silently shrink,
+    and the head would train on fewer points than intended without anything saying so.
+    """
+    from features.feature_store import add_targets
+    from forecasting.hybrid_model import HybridConfig, HybridForecaster
+
+    horizon = 5
+    features = add_targets(_feature_table(n=300), horizon=horizon)
+    hybrid = HybridForecaster(
+        _SingleRowBase(),
+        HybridConfig(window=20, log_to_mlflow=False),
+    )
+
+    forecasts = hybrid._walk_forward_base(features, horizon=horizon)
+    assert not forecasts.empty
+
+    merged = features.merge(forecasts, on=["symbol", "timestamp"], how="inner")
+    assert len(merged) == len(forecasts), "a forecast was stamped on a timestamp not in the data"
+    assert merged["target_return"].notna().all(), "a forecast landed on an unrealised target"
+
+
+# --------------------------------------------------------------------------------------
+# Per-architecture LoRA training steps
+#
+# The Colab run died inside the training loop, twice, with two different errors: TimesFM
+# with "forward() missing 1 required positional argument: 'masks'", Chronos with our own
+# "model returned neither a loss nor a tensor". The loop had guessed at a common interface
+# neither model has. These tests pin down what each architecture is actually asked to do.
+# --------------------------------------------------------------------------------------
+
+
+def test_unsupported_lora_is_checked_before_anything_loads() -> None:
+    """The refusal mechanism, not a claim about any particular model. TimesFM was listed
+    unsupported on the grounds that decode() runs under torch.no_grad(); that was wrong --
+    forward() is differentiable and prefill alone covers a horizon within one output patch.
+    The mechanism stays because a genuinely untrainable architecture must fail in a second
+    rather than after a model download."""
+    import forecasting.finetune_lora as fl
+
+    monkey = dict(fl.UNSUPPORTED_LORA)
+    monkey["pretend_model"] = "cannot be trained, for a stated reason"
+    original, fl.UNSUPPORTED_LORA = fl.UNSUPPORTED_LORA, monkey
+    try:
+        with pytest.raises(RuntimeError, match="for a stated reason"):
+            fl.finetune("pretend_model", pd.DataFrame({"close": [1.0]}), horizon=5)
+    finally:
+        fl.UNSUPPORTED_LORA = original
+
+
+def test_chronos_step_asks_the_model_for_its_own_loss() -> None:
+    """Chronos-Bolt computes a pinball loss internally when given a target. The step must
+    use that rather than scoring the quantile predictions itself -- the model normalises the
+    target with the same loc/scale as the context, which an external loss would not."""
+    import torch
+
+    from forecasting.finetune_lora import LoRAConfig, _chronos_step
+
+    seen = {}
+
+    class _StubChronos:
+        def __call__(self, *, context, target=None, mask=None, target_mask=None):
+            seen["context"] = context
+            seen["target"] = target
+            return SimpleNamespace(loss=torch.tensor(0.25), quantile_preds=None)
+
+    ctx = torch.randn(4, 64)
+    fut = torch.randn(4, 5)
+    loss = _chronos_step(_StubChronos(), ctx, fut, LoRAConfig())
+
+    assert float(loss) == pytest.approx(0.25)
+    assert seen["target"] is fut, "the future must be passed as `target`, not scored outside"
+    assert seen["context"] is ctx
+
+
+def test_chronos_step_matches_the_installed_library_signature() -> None:
+    """Guard against contract drift. _chronos_step calls forward(context=..., target=...) by
+    keyword; if chronos-forecasting renames either, the fine-tune breaks on Colab where it
+    cannot be debugged cheaply. This catches it here, and needs no model weights."""
+    bolt = pytest.importorskip("chronos.chronos_bolt")
+
+    parameters = inspect.signature(bolt.ChronosBoltModelForForecasting.forward).parameters
+    assert "context" in parameters, "Chronos forward() no longer takes `context`"
+    assert "target" in parameters, "Chronos forward() no longer takes `target`"
+
+
+def test_chronos_step_reports_a_missing_loss_clearly() -> None:
+    """If the model returns no loss despite a target, say that, rather than letting a None
+    reach loss.backward() and surface as an AttributeError."""
+    from forecasting.finetune_lora import LoRAConfig, _chronos_step
+
+    class _NoLoss:
+        def __call__(self, **kwargs):
+            return SimpleNamespace(loss=None)
+
+    with pytest.raises(RuntimeError, match="no loss"):
+        _chronos_step(_NoLoss(), None, None, LoRAConfig())
+
+
+def test_unsupported_architecture_names_itself_in_the_error() -> None:
+    """The generic step is the last resort. When it cannot work, the error must name the
+    model class and point at the registry, so the next person knows where to add a step."""
+    import torch
+
+    from forecasting.finetune_lora import LoRAConfig, _generic_step
+
+    class _WrongInterface(torch.nn.Module):
+        def forward(self, inputs, masks):  # noqa: ARG002 - mirrors TimesFM's signature
+            return None
+
+    with pytest.raises(RuntimeError, match="STEP_FUNCTIONS"):
+        _generic_step(_WrongInterface(), torch.randn(2, 8), torch.randn(2, 5), LoRAConfig())
+
+
+def test_run_epoch_delegates_to_the_step_function() -> None:
+    """_run_epoch must not compute a loss itself any more -- that was the guessing that
+    broke both models. It runs whatever the architecture supplied."""
+    import torch
+
+    from forecasting.finetune_lora import LoRAConfig, _run_epoch
+
+    calls = []
+
+    def _step(model, context, future, config):  # noqa: ANN001, ARG001
+        calls.append(len(context))
+        return torch.tensor(0.5, requires_grad=True)
+
+    loader = [(torch.randn(3, 8), torch.randn(3, 2)), (torch.randn(2, 8), torch.randn(2, 2))]
+    loss = _run_epoch(torch.nn.Linear(8, 2), loader, LoRAConfig(), None, _step)
+
+    assert calls == [3, 2], "every batch must go through the step function"
+    assert loss == pytest.approx(0.5)
+
+
+# --------------------------------------------------------------------------------------
+# TimesFM LoRA step
+# --------------------------------------------------------------------------------------
+
+
+class _StubTimesFMConfig:
+    quantiles = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+
+class _StubTimesFM(torch.nn.Module):
+    """The interface _timesfm_step relies on, at a size a test can afford.
+
+    p / o / q and the four-tuple return mirror TimesFM_2p5_200M_torch_module exactly; the
+    real thing is exercised by the slow test below.
+    """
+
+    config = _StubTimesFMConfig()
+
+    def __init__(self, patch_len: int = 32, out_len: int = 128) -> None:
+        super().__init__()
+        self.p, self.o = patch_len, out_len
+        self.q = len(self.config.quantiles) + 1
+        self.proj = torch.nn.Linear(patch_len, self.o * self.q)
+        self.seen: dict[str, object] = {}
+
+    def forward(self, inputs, masks, decode_caches=None):  # noqa: ANN001
+        self.seen["inputs"] = inputs
+        self.seen["masks"] = masks
+        out = self.proj(inputs)
+        return (inputs, inputs, out, out), None
+
+
+def test_timesfm_step_produces_a_differentiable_loss() -> None:
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_step
+
+    model = _StubTimesFM()
+    loss = _timesfm_step(model, torch.randn(3, 128) * 0.01, torch.randn(3, 5) * 0.01, LoRAConfig())
+
+    assert torch.isfinite(loss)
+    assert loss.requires_grad
+    loss.backward()
+    assert model.proj.weight.grad is not None
+    assert model.proj.weight.grad.abs().sum() > 0
+
+
+def test_timesfm_step_reads_the_quantile_columns_not_the_mean() -> None:
+    """TimesFM's head emits len(quantiles) + 1 columns, and column 0 is the MEAN. Reading
+    it as the 0.1 quantile would train against the wrong target and still converge, which a
+    loss curve cannot reveal -- so the mapping is asserted rather than assumed."""
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_quantile_indices
+
+    model = _StubTimesFM()
+    indices = _timesfm_quantile_indices(model, LoRAConfig(quantiles=(0.1, 0.5, 0.9)))
+
+    assert indices == [1, 5, 9], "0.1/0.5/0.9 must map past the leading mean column"
+
+
+def test_timesfm_step_rejects_a_quantile_the_model_does_not_emit() -> None:
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_quantile_indices
+
+    with pytest.raises(RuntimeError, match="not among them"):
+        _timesfm_quantile_indices(_StubTimesFM(), LoRAConfig(quantiles=(0.05,)))
+
+
+def test_timesfm_step_refuses_a_horizon_beyond_one_output_patch() -> None:
+    """Past output_patch_len, decode() feeds its own output back autoregressively. This
+    step reproduces prefill only, so it must refuse rather than silently train on a horizon
+    it cannot represent."""
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_step
+
+    model = _StubTimesFM(out_len=16)
+    with pytest.raises(RuntimeError, match="exceeds TimesFM's output patch length"):
+        _timesfm_step(model, torch.randn(2, 64), torch.randn(2, 20), LoRAConfig())
+
+
+def test_timesfm_step_truncates_context_to_whole_patches() -> None:
+    """forward() patches by reshape, which needs an exact multiple of the patch length. The
+    most RECENT whole patches are the ones to keep -- dropping from the tail would forecast
+    from a window that stops short of the present."""
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_step
+
+    model = _StubTimesFM()
+    context = torch.randn(2, 140) * 0.01           # 4 patches of 32, plus 12 spare
+    _timesfm_step(model, context, torch.randn(2, 5) * 0.01, LoRAConfig())
+
+    used = model.seen["inputs"]
+    assert used.shape == (2, 4, 32), f"expected 4 whole patches, got {tuple(used.shape)}"
+    assert model.seen["masks"].dtype == torch.bool
+
+
+def test_timesfm_step_rejects_a_context_shorter_than_one_patch() -> None:
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_step
+
+    with pytest.raises(RuntimeError, match="shorter than one"):
+        _timesfm_step(_StubTimesFM(), torch.randn(2, 8), torch.randn(2, 5), LoRAConfig())
+
+
+@pytest.mark.slow
+def test_timesfm_step_trains_the_real_architecture() -> None:
+    """The stub proves the wiring; this proves the wiring matches the real model.
+
+    Instantiated with random weights -- no checkpoint, so no download. One catch makes this
+    test subtler than it looks: every transformer norm `scale` initialises to exactly ZERO,
+    which zeroes both residual branches and makes the whole 20-layer stack an identity. A
+    naive run therefore shows gradients reaching only the tokenizer and the output head, and
+    looks exactly like a broken step function. The scales are filled with a trained-like
+    value first so the test measures the step rather than the initialisation.
+    """
+    timesfm_torch = pytest.importorskip("timesfm.timesfm_2p5.timesfm_2p5_torch")
+
+    from forecasting.finetune_lora import LoRAConfig, _timesfm_step
+
+    torch.manual_seed(0)
+    model = timesfm_torch.TimesFM_2p5_200M_torch_module()
+    with torch.no_grad():
+        for layer in model.stacked_xf:
+            for norm in ("pre_attn_ln", "post_attn_ln", "pre_ff_ln", "post_ff_ln"):
+                getattr(layer, norm).scale.fill_(0.5)
+
+    loss = _timesfm_step(model, torch.randn(2, 128) * 0.01, torch.randn(2, 5) * 0.01, LoRAConfig())
+    assert torch.isfinite(loss)
+    loss.backward()
+
+    # The point of LoRA here is to adapt the attention projections, so gradient MUST reach
+    # them. Only the tokenizer and output head receiving gradient is the failure mode.
+    qkv_grad = model.stacked_xf[0].attn.qkv_proj.weight.grad
+    assert qkv_grad is not None, "no gradient reached the first transformer layer"
+    assert qkv_grad.abs().max() > 0, "gradient reached the transformer layer but was zero"
+
+
+# --------------------------------------------------------------------------------------
+# Device handling
+#
+# Colab failed with "mat1 is on cpu, different from other tensors on cuda:0": TimesFM's
+# load_checkpoint() moves itself to cuda:0 whenever CUDA exists, while the DataLoader went
+# on yielding CPU tensors. It could not surface locally, where everything is CPU, so these
+# tests use the `meta` device to create a real device boundary on a CPU-only machine.
+# --------------------------------------------------------------------------------------
+
+
+def test_resolve_device_honours_an_explicit_preference() -> None:
+    from forecasting.base import resolve_device
+
+    assert resolve_device("cpu").type == "cpu"
+    assert resolve_device("meta").type == "meta"
+
+
+def test_resolve_device_picks_the_gpu_when_there_is_one(monkeypatch) -> None:
+    """Auto-detection both ways. The CPU branch is what this machine exercises; the CUDA
+    branch is the one that matters on Colab and can only be reached by patching."""
+    from forecasting.base import resolve_device
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert resolve_device(None).type == "cpu"
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert resolve_device(None).type == "cuda"
+
+
+def test_chronos_config_no_longer_pins_the_cpu(monkeypatch) -> None:
+    """ChronosConfig.device was hardcoded "cpu" for this laptop, which silently sent Colab's
+    fine-tune to the CPU too -- no error, just twenty epochs at the wrong speed."""
+    from forecasting.base import resolve_device
+    from forecasting.chronos_adapter import ChronosConfig
+
+    assert ChronosConfig().device is None, "a pinned device would follow the code to Colab"
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert resolve_device(ChronosConfig().device).type == "cuda"
+
+
+def test_model_device_reads_the_parameters() -> None:
+    from forecasting.finetune_lora import _model_device
+
+    assert _model_device(torch.nn.Linear(2, 2)).type == "cpu"
+    assert _model_device(torch.nn.Linear(2, 2).to("meta")).type == "meta"
+    assert _model_device(torch.nn.Module()).type == "cpu", "a parameterless model must not raise"
+
+
+def test_run_epoch_moves_batches_to_the_model_device() -> None:
+    """THE regression guard for the Colab failure.
+
+    The model's parameters sit on `meta` while the loader yields CPU tensors -- the same
+    split as a CUDA model fed by a CPU DataLoader, reproducible without a GPU. Before the
+    fix the step function received CPU tensors and the matmul blew up inside the model.
+    """
+    from forecasting.finetune_lora import LoRAConfig, _run_epoch
+
+    seen = []
+
+    def _step(model, context, future, config):  # noqa: ANN001, ARG001
+        seen.append((context.device.type, future.device.type))
+        return torch.tensor(0.5)
+
+    model = torch.nn.Linear(8, 2).to("meta")
+    loader = [(torch.randn(3, 8), torch.randn(3, 2)), (torch.randn(2, 8), torch.randn(2, 2))]
+
+    _run_epoch(model, loader, LoRAConfig(), None, _step)
+
+    assert seen == [("meta", "meta"), ("meta", "meta")], (
+        f"batches reached the step function on {seen}, not on the model's device"
+    )
+
+
+def test_smoke_subset_always_yields_usable_windows() -> None:
+    """The smoke check's own regression guard.
+
+    Its first version sliced to 400 rows per symbol while leaving context_length at 512, so
+    build_finetune_dataset skipped every symbol and raised "no windows could be built: need
+    at least 518 bars". The slice and the context length have to be chosen together.
+    """
+    from forecasting.finetune_lora import build_finetune_dataset, smoke_subset
+
+    for bars in (2000, 400, 200):
+        features = pd.concat(
+            [_price_frame(n=bars, seed=i).assign(symbol=s) for i, s in enumerate(("AAA", "BBB"))],
+            ignore_index=True,
+        )
+        subset, context = smoke_subset(features, horizon=5)
+
+        assert subset["symbol"].nunique() == 1, "a smoke slice is one symbol by design"
+        assert context % 32 == 0, f"context {context} is not a whole number of TimesFM patches"
+
+        dataset = build_finetune_dataset(subset, context_length=context, horizon=5)
+        assert len(dataset) > 0, f"{bars} bars produced no windows at context {context}"
+
+
+def test_smoke_subset_refuses_a_series_it_cannot_use() -> None:
+    """Too short to form even one patch of context must say so, rather than returning a
+    slice that fails later inside build_finetune_dataset."""
+    from forecasting.finetune_lora import smoke_subset
+
+    with pytest.raises(ValueError, match="too short"):
+        smoke_subset(_price_frame(n=20).assign(symbol="TINY"), horizon=5)
+
+
+# --------------------------------------------------------------------------------------
+# Training progress
+#
+# On the full universe an epoch is ~1,100 optimizer steps on a 231M-parameter model, so
+# logging only at epoch boundaries left the Colab cell silent for many minutes -- which
+# looks exactly like a hang. These pin the progress output that fixes that.
+# --------------------------------------------------------------------------------------
+
+
+def test_duration_reads_at_a_glance() -> None:
+    from forecasting.finetune_lora import _duration
+
+    assert _duration(45) == "45s"
+    assert _duration(605) == "10m05s"
+    assert _duration(7500) == "2h05m"
+
+
+def test_run_epoch_logs_progress_during_the_epoch(caplog) -> None:
+    """The point is DURING, not after. A 40-batch epoch must report while it runs."""
+    from forecasting.finetune_lora import LoRAConfig, _run_epoch
+
+    loader = [(torch.randn(2, 8), torch.randn(2, 2)) for _ in range(40)]
+
+    def _step(model, context, future, config):  # noqa: ANN001, ARG001
+        return torch.tensor(0.25)
+
+    with caplog.at_level("INFO", logger="forecasting.finetune_lora"):
+        _run_epoch(torch.nn.Linear(8, 2), loader, LoRAConfig(), None, _step, epoch=3)
+
+    progress = [r.getMessage() for r in caplog.records if "batch" in r.getMessage()]
+    assert progress, "no intra-epoch progress was logged"
+    assert len(progress) > 1, "progress must appear repeatedly, not once at the end"
+    assert "epoch 3" in progress[0], "the epoch number must be identifiable"
+    assert "left" in progress[0], "an ETA is the point -- it tells a slow run from a hung one"
+
+
+def test_run_epoch_survives_a_loader_with_no_length(caplog) -> None:
+    """A generator loader has no len(); progress must degrade rather than raise."""
+    from forecasting.finetune_lora import LoRAConfig, _run_epoch
+
+    def _gen():
+        for _ in range(4):
+            yield torch.randn(2, 8), torch.randn(2, 2)
+
+    def _step(model, context, future, config):  # noqa: ANN001, ARG001
+        return torch.tensor(0.5)
+
+    with caplog.at_level("INFO", logger="forecasting.finetune_lora"):
+        loss = _run_epoch(torch.nn.Linear(8, 2), _gen(), LoRAConfig(), None, _step)
+
+    assert loss == pytest.approx(0.5)
+
+
+# --------------------------------------------------------------------------------------
+# Memory
+#
+# Colab was dying at its 12GB system / 15GB GPU limits. Measured at the real universe
+# scale, the data pipeline is not the cause -- features 119MB, dataset 187MB before this
+# change -- but materialising every window stored 181MB of near-duplicate data built from
+# 400KB of returns, and that is worth not doing regardless.
+# --------------------------------------------------------------------------------------
+
+
+def test_dataset_does_not_materialise_every_window() -> None:
+    """Consecutive windows share all but one step, so storing each one in full is a large
+    multiple of the underlying series. The dataset must hold the series, not the windows."""
+    from forecasting.finetune_lora import build_finetune_dataset
+
+    frame = pd.concat(
+        [_price_frame(n=2000, seed=i).assign(symbol=f"S{i}") for i in range(3)],
+        ignore_index=True,
+    )
+    dataset = build_finetune_dataset(frame, context_length=512, horizon=5)
+
+    materialised = len(dataset) * 512 * 4
+    assert len(dataset) > 4000, "expected a window count worth caring about"
+    assert dataset.nbytes < materialised / 50, (
+        f"holds {dataset.nbytes:,} bytes; materialising would be {materialised:,} -- "
+        "the dataset is still storing windows rather than series"
+    )
+
+
+def test_dataset_windows_are_identical_to_materialised_ones() -> None:
+    """Slicing on demand must return exactly what building them up front did, or the space
+    saving comes at the cost of training on something subtly different."""
+    from forecasting.finetune_lora import build_finetune_dataset
+
+    frame = _price_frame(n=300, seed=7).assign(symbol="AAA")
+    dataset = build_finetune_dataset(frame, context_length=64, horizon=5)
+
+    closes = frame.sort_values("timestamp")["close"].to_numpy(dtype=np.float64)
+    returns = np.log(closes[1:] / closes[:-1]).astype(np.float32)
+
+    for i in (0, 1, len(dataset) // 2, len(dataset) - 1):
+        context, future = dataset[i]
+        assert np.allclose(context.numpy(), returns[i : i + 64])
+        assert np.allclose(future.numpy(), returns[i + 64 : i + 69])
+
+
+def test_memory_note_never_breaks_a_run() -> None:
+    """It is a log line. It must degrade to something printable rather than raise, whatever
+    is or is not installed."""
+    from forecasting.finetune_lora import memory_note
+
+    note = memory_note()
+    assert isinstance(note, str) and note
+
+
+# --------------------------------------------------------------------------------------
+# OOM defences
+# --------------------------------------------------------------------------------------
+
+
+def test_gradient_accumulation_preserves_the_effective_batch() -> None:
+    """Halving the batch and doubling accumulation must leave the optimisation unchanged.
+
+    If it did not, the OOM fallback would silently alter training rather than only its
+    memory profile -- and the run would still finish, so nothing would flag it.
+    """
+    from dataclasses import replace as dc_replace
+
+    from forecasting.finetune_lora import LoRAConfig, _run_epoch
+
+    torch.manual_seed(0)
+    data = [(torch.randn(16, 4), torch.randn(16, 1)) for _ in range(4)]
+
+    def _run(batch_size: int, accum: int) -> list[float]:
+        torch.manual_seed(0)
+        model = torch.nn.Linear(4, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        # Re-chunk the same samples into the requested batch size.
+        contexts = torch.cat([c for c, _ in data])
+        futures = torch.cat([f for _, f in data])
+        loader = [
+            (contexts[i : i + batch_size], futures[i : i + batch_size])
+            for i in range(0, len(contexts), batch_size)
+        ]
+        config = dc_replace(LoRAConfig(), grad_accum_steps=accum, max_grad_norm=1e9)
+        _run_epoch(
+            model, loader, config, optimizer,
+            lambda m, c, f, cfg: torch.nn.functional.mse_loss(m(c), f),
+        )
+        return [p.detach().clone().flatten().tolist() for p in model.parameters()][0]
+
+    full = _run(batch_size=16, accum=1)
+    split = _run(batch_size=8, accum=2)
+
+    assert full == pytest.approx(split, abs=1e-5), (
+        "batch 8 x 2 accumulation diverged from batch 16 -- the fallback changes training"
+    )
+
+
+def test_fit_batch_size_is_a_no_op_without_cuda() -> None:
+    """On CPU there is nothing to probe, and probing anyway would cost a forward/backward
+    on every run for no benefit."""
+    from forecasting.finetune_lora import LoRAConfig, fit_batch_size
+
+    config = LoRAConfig(batch_size=64, grad_accum_steps=1)
+    batch, accum = fit_batch_size(torch.nn.Linear(4, 1), [], config, None)
+
+    assert (batch, accum) == (64, 1)
+
+
+def test_fit_batch_size_halves_until_it_fits(monkeypatch) -> None:
+    """The probe must back off and compensate, so the effective batch is preserved.
+
+    CUDA is faked: the point is the search, which has to be right before it ever runs
+    somewhere it cannot be debugged.
+    """
+    import forecasting.finetune_lora as fl
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(fl, "_release_cuda", lambda: None)
+    monkeypatch.setattr(fl, "_model_device", lambda m: torch.device("cpu"))
+
+    dataset = [(torch.randn(4), torch.randn(1)) for _ in range(64)]
+    model = torch.nn.Linear(4, 1)
+
+    def _step(m, context, future, config):  # noqa: ANN001, ARG001
+        if len(context) > 16:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+        return m(context).sum()
+
+    batch, accum = fl.fit_batch_size(model, dataset, fl.LoRAConfig(batch_size=64), _step)
+
+    assert batch == 16, f"settled on batch {batch}, expected 16"
+    assert batch * accum == 64, "the effective batch must survive the back-off"
+
+
+def test_fit_batch_size_gives_up_with_a_useful_message(monkeypatch) -> None:
+    """If nothing fits, the cause is not batch size, and the error should say so rather
+    than leaving someone halving a number that was never the problem."""
+    import forecasting.finetune_lora as fl
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(fl, "_release_cuda", lambda: None)
+    monkeypatch.setattr(fl, "_model_device", lambda m: torch.device("cpu"))
+
+    def _always_oom(m, context, future, config):  # noqa: ANN001, ARG001
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    with pytest.raises(RuntimeError, match="other than batch size"):
+        fl.fit_batch_size(
+            torch.nn.Linear(4, 1),
+            [(torch.randn(4), torch.randn(1)) for _ in range(64)],
+            fl.LoRAConfig(batch_size=64),
+            _always_oom,
+        )
+
+
+def test_chronos_predict_quantiles_matches_the_installed_signature() -> None:
+    """chronos-forecasting renamed this parameter from `context` to `inputs`, and because
+    the adapter passed it by keyword every backtest fold failed with "missing 1 required
+    positional argument: 'inputs'". The adapter test that would have caught it is marked
+    slow and needs ~200MB of weights, so it never runs here -- this one needs none.
+    """
+    chronos = pytest.importorskip("chronos")
+
+    parameters = list(
+        inspect.signature(chronos.ChronosBoltPipeline.predict_quantiles).parameters
+    )
+    assert parameters[1] not in {"prediction_length", "quantile_levels"}, (
+        "the first argument is no longer the context series; the adapter passes it "
+        "positionally and would now be sending it as something else"
+    )
+    for name in ("prediction_length", "quantile_levels"):
+        assert name in parameters, f"predict_quantiles no longer accepts {name}"
+
+
+# --------------------------------------------------------------------------------------
+# Batched base inference
+#
+# The hybrid's walk-forward made one call per cut -- ~5,200 full passes over a 231M model
+# per fold, thirteen folds deep. It looked hung on Colab because it effectively was.
+# --------------------------------------------------------------------------------------
+
+
+class _BatchingStub:
+    """A base with the foundation adapters' shape, recording how it was called."""
+
+    name, version = "batch_stub", "v1"
+
+    def __init__(self) -> None:
+        self.batch_calls, self.single_calls, self.sizes = 0, 0, []
+
+    def fit(self, features, *, horizon, **kwargs) -> None:  # noqa: ANN001, ARG002
+        return None
+
+    def _one(self, features, horizon):  # noqa: ANN001
+        from forecasting.base import ForecastResult
+
+        frame = features.sort_values("timestamp")
+        # A value derived from the window, so a mis-ordered batch cannot go unnoticed.
+        level = float(frame["close"].iloc[-1])
+        return ForecastResult(
+            symbol=str(frame["symbol"].iloc[0]), horizon=horizon, quantiles=(0.1, 0.5, 0.9),
+            values=np.array([[level - 1, level, level + 1]], dtype=float),
+            timestamps=pd.DatetimeIndex([pd.to_datetime(frame["timestamp"].iloc[-1])]),
+            model_name=self.name, model_version=self.version,
+        )
+
+    def predict_quantiles(self, features, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+        self.single_calls += 1
+        return self._one(features, horizon)
+
+    def predict_quantiles_batch(self, frames, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+        self.batch_calls += 1
+        self.sizes.append(len(frames))
+        return [self._one(f, horizon) for f in frames]
+
+
+def _walk(base, *, batch_size, points=60):
+    from forecasting.hybrid_model import HybridConfig, HybridForecaster
+
+    hybrid = HybridForecaster(
+        base,
+        HybridConfig(window=20, log_to_mlflow=False, min_context=30,
+                     walk_forward_points=points, base_batch_size=batch_size),
+    )
+    return hybrid._walk_forward_base(_feature_table(n=300), horizon=5)
+
+
+def test_batched_walk_forward_matches_one_at_a_time() -> None:
+    """THE guard. Batching is a speed change; if it altered a single forecast it would
+    corrupt RQ1 silently, because the run would still complete and the numbers would still
+    look plausible."""
+    batched = _walk(_BatchingStub(), batch_size=16)
+
+    class _NoBatch(_BatchingStub):
+        predict_quantiles_batch = None       # forces the one-at-a-time path
+
+    one_at_a_time = _walk(_NoBatch(), batch_size=16)
+
+    pd.testing.assert_frame_equal(batched, one_at_a_time)
+
+
+def test_batched_walk_forward_actually_batches() -> None:
+    """Without this, a broken getattr would silently fall back to the slow path and the
+    hybrid would quietly take hours again."""
+    base = _BatchingStub()
+    _walk(base, batch_size=16)
+
+    # One single call per SYMBOL is expected and cheap: it is the probe that decides
+    # whether the adapter returns many in-sample rows (the LSTM) or one (the foundation
+    # models). What must not happen is one call per CUT, of which there are hundreds.
+    assert base.single_calls == 1, (
+        f"{base.single_calls} single calls for one symbol; only the shape probe should "
+        "use the one-at-a-time path"
+    )
+    assert base.batch_calls > 0, "fell back to one-at-a-time despite a batch method"
+    assert max(base.sizes) > 1, f"batch sizes were {base.sizes}; nothing was actually batched"
+    assert max(base.sizes) <= 16, "batch exceeded the configured size"
+
+
+def test_walk_forward_still_works_without_a_batch_method() -> None:
+    """The LSTM has no batch path and must keep working."""
+    class _NoBatch(_BatchingStub):
+        predict_quantiles_batch = None
+
+    base = _NoBatch()
+    frame = _walk(base, batch_size=16)
+
+    assert not frame.empty
+    assert base.single_calls > 1

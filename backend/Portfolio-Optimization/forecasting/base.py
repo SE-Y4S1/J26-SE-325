@@ -21,11 +21,13 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import pandas as pd
 
+# Single source of truth: forecasting/env_report.py also writes to this path.
+from forecasting.env_report import ENV_REPORT_PATH
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_QUANTILES: tuple[float, ...] = (0.1, 0.5, 0.9)
 
-ENV_REPORT_PATH = Path(__file__).resolve().parents[1] / "artifacts" / "env_report.json"
 
 # Baselines have no optional dependencies and are always available.
 _ALWAYS_AVAILABLE = ("baseline_lstm",)
@@ -97,6 +99,26 @@ class Forecaster(Protocol):
         """Forecast `horizon` steps ahead. Must never read rows dated at or after the
         target timestamp -- Phase 7 asserts this."""
         ...
+
+
+def resolve_device(preference: str | None = None) -> "torch.device":  # noqa: F821
+    """The device to use: an explicit preference, else the GPU when there is one.
+
+    Shared by the adapters and the fine-tuner so a run picks a device ONCE. Letting each
+    side decide for itself is what produced "mat1 is on cpu, different from other tensors on
+    cuda:0": TimesFM's load_checkpoint() moves itself to cuda:0 whenever CUDA exists, while
+    the DataLoader went on yielding CPU tensors. The quieter half of the same bug was
+    Chronos defaulting to "cpu" and training there on a GPU runtime -- no error, just twenty
+    epochs at the wrong speed.
+
+    torch is imported lazily: this module is imported by the registry, which must stay
+    usable on a machine where the optional forecasting stack is not installed.
+    """
+    import torch
+
+    if preference is not None:
+        return torch.device(preference)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def available_foundation_models() -> dict[str, bool]:
@@ -178,6 +200,45 @@ def registered_forecasters(*, require_weights: bool = False) -> list[str]:
     return names
 
 
+def _foundation_unavailable(module: str) -> RuntimeError:
+    """Explain why a foundation model is unavailable, rather than assuming it is absent.
+
+    There are three distinct causes and they need different fixes, so reporting all of them
+    as "not installed" sends people to reinstall a package that is already there. On a fresh
+    Colab clone the cause is almost always the first one: artifacts/ is gitignored, so no
+    report exists and every foundation model looks missing however the install went.
+    """
+    from forecasting.env_report import OPTIONAL_FORECASTERS
+
+    dist = OPTIONAL_FORECASTERS.get(module, module)
+
+    if not ENV_REPORT_PATH.exists():
+        return RuntimeError(
+            f"No capability report at {ENV_REPORT_PATH}, so no foundation model can be "
+            f"registered. This says nothing about whether {module} is installed. "
+            "Generate the report with:  python -m forecasting.env_report"
+        )
+
+    try:
+        report = json.loads(ENV_REPORT_PATH.read_text(encoding="utf-8"))
+        meta = report.get("optional_forecasters", {}).get(module, {})
+    except Exception:  # noqa: BLE001 - fall through to the generic message
+        meta = {}
+
+    if error := meta.get("error"):
+        return RuntimeError(
+            f"{module} is present but failed to import: {error}. "
+            "If a pip install replaced a pre-installed package (numpy is the usual one), "
+            "restart the runtime and regenerate the report with: "
+            "python -m forecasting.env_report"
+        )
+
+    return RuntimeError(
+        f"{module} is not installed. Run: uv add --optional {module} '{dist}'. "
+        "Then regenerate the report with: python -m forecasting.env_report"
+    )
+
+
 def get_forecaster(name: str, **kwargs: object) -> Forecaster:
     """Construct a registered forecaster by name.
 
@@ -194,20 +255,14 @@ def get_forecaster(name: str, **kwargs: object) -> Forecaster:
 
     if name == "timesfm":
         if not available.get("timesfm"):
-            raise RuntimeError(
-                "TimesFM is not installed. Run: uv add --optional timesfm 'timesfm[torch]==2.0.2'. "
-                "Note the package version is 2.0.2 -- there is no timesfm==2.5 on PyPI; '2.5' is "
-                "the model generation."
-            )
+            raise _foundation_unavailable("timesfm")
         from forecasting.timesfm_adapter import TimesFMForecaster
 
         return TimesFMForecaster(**kwargs)  # type: ignore[arg-type]
 
     if name == "chronos_bolt":
         if not available.get("chronos"):
-            raise RuntimeError(
-                "Chronos-Bolt is not installed. Run: uv add --optional chronos chronos-forecasting"
-            )
+            raise _foundation_unavailable("chronos")
         from forecasting.chronos_adapter import ChronosBoltForecaster
 
         return ChronosBoltForecaster(**kwargs)  # type: ignore[arg-type]

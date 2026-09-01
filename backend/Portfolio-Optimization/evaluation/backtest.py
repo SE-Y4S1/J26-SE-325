@@ -17,7 +17,9 @@ Two subtler cases the assertion also covers:
 
 from __future__ import annotations
 
+import gc
 import logging
+from pathlib import Path
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -175,6 +177,7 @@ def run_walk_forward(
     *,
     horizon: int,
     config: BacktestConfig | None = None,
+    checkpoint: Path | None = None,
     log_to_mlflow: bool = True,
     forecaster_kwargs: dict | None = None,
 ) -> pd.DataFrame:
@@ -182,6 +185,7 @@ def run_walk_forward(
     from features.feature_store import add_targets
     from features.technical import warmup_periods
     from forecasting.base import get_forecaster
+    from forecasting.finetune_lora import memory_note
 
     config = config or BacktestConfig(embargo_days=horizon)
     if config.embargo_days < horizon:
@@ -198,12 +202,48 @@ def run_walk_forward(
         raise ValueError("no folds could be generated for this data range")
 
     predictions: list[pd.DataFrame] = []
+    completed: set[int] = set()
+
+    # Fold-level resume. A backtest is twenty-odd minutes of compute and Colab reclaims
+    # long-running sessions, so an all-or-nothing run loses everything to an interruption
+    # that has nothing to do with the code. Folds are independent by construction -- that is
+    # what makes the metrics aggregable -- so each one can be banked as it finishes.
+    if checkpoint is not None and checkpoint.exists():
+        prior = pd.read_csv(checkpoint, parse_dates=["timestamp"])
+        if not prior.empty:
+            predictions.append(prior)
+            completed = set(prior["fold"].unique().tolist())
+            logger.info(
+                "resuming %s from %s: %d fold(s) already computed",
+                forecaster_name, checkpoint, len(completed),
+            )
+
+    # Built ONCE, outside the loop. A foundation model's weights are 200-900MB and do not
+    # change between folds, so constructing a forecaster per fold re-downloaded and
+    # re-loaded them every time -- twenty-plus loads across a backtest, which is what
+    # exhausted Colab's RAM.
+    #
+    # This does not weaken the walk-forward: fit() is still called per fold, and
+    # BaselineLSTMForecaster.fit rebuilds its network and reseeds on every call, so a fold
+    # never inherits weights from the one before it. For the zero-shot adapters fit() is a
+    # documented no-op, and there was never anything per-fold to construct.
+    forecaster = get_forecaster(forecaster_name, **(forecaster_kwargs or {}))
+
+    logger.info(
+        "backtest %s: %d folds, %s", forecaster_name, len(folds), memory_note()
+    )
 
     for fold, train, test in iter_fold_data(frame, folds, warmup=warmup_periods()):
-        assert_fold_is_clean(train, test, embargo_days=config.embargo_days)
+        if fold.fold_index in completed:
+            continue
 
-        forecaster = get_forecaster(forecaster_name, **(forecaster_kwargs or {}))
         try:
+            # Inside the try: a fold whose split is unusable is a reason to drop THAT fold,
+            # not to abandon the twenty already computed. It is logged as an error rather
+            # than a warning because a look-ahead violation is a methodology problem, not a
+            # flaky model.
+            assert_fold_is_clean(train, test, embargo_days=config.embargo_days)
+
             forecaster.fit(train, horizon=horizon, log_to_mlflow=False)
             result = forecaster.predict_quantiles(test, horizon=horizon)
         except Exception as exc:  # noqa: BLE001 - one bad fold must not kill the backtest
@@ -218,10 +258,33 @@ def run_walk_forward(
         )
         predictions.append(fold_frame)
 
+        if checkpoint is not None:
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            pd.concat(predictions, ignore_index=True).to_csv(checkpoint, index=False)
+
+        # A fold's training tensors are hundreds of megabytes at universe scale, and the
+        # next fold rebuilds them from scratch. Dropping them here keeps the peak to one
+        # fold's worth rather than leaving the last one resident while the next allocates.
+        del train, test, result, fold_frame
+        gc.collect()
+
+        # Per-fold, because a backtest that dies mid-run leaves no other evidence -- and on
+        # Colab the session dies with it, taking the traceback too.
+        logger.info(
+            "  fold %d/%d done (%d predictions so far)  %s",
+            fold.fold_index + 1, len(folds), sum(len(f) for f in predictions), memory_note(),
+        )
+
     if not predictions:
         raise RuntimeError("every fold failed; nothing to report")
 
     combined = pd.concat(predictions, ignore_index=True)
+
+    # The next candidate loads its own model; this one should not still be resident when it
+    # does. Matters most for the foundation adapters, which are 200-900MB apiece.
+    del forecaster, predictions, frame
+    gc.collect()
+    logger.info("backtest %s complete: %s", forecaster_name, memory_note())
 
     if log_to_mlflow:
         _log_backtest(forecaster_name, horizon, combined, len(folds))

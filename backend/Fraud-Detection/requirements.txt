@@ -1,0 +1,17 @@
+# Real-Time Fraud & Behavioral Anomaly Engine with Deterministic Enforcement
+# Prototype dependencies - intentionally minimal.
+#
+# The detection logic uses only the Python standard library (math, collections,
+# dataclasses), so there is nothing to download for the models themselves and
+# the prototype runs with no dataset and no API key.
+
+fastapi>=0.115,<1.0     # web framework for the /score, /simulate-attack, /health API
+uvicorn>=0.30,<1.0      # ASGI server that runs the app
+pydantic>=2.7,<3.0      # request validation and response schemas
+
+# NOTE FOR THE FULL RESEARCH IMPLEMENTATION (not needed for this prototype):
+# replacing the simulated streams with the proposed models would add
+#   torch                  -> LSTM autoencoder for behavioural sequences
+#   torch-geometric        -> GNN for the transaction relationship graph
+# These are deliberately NOT installed here; see fraud_model.py for the
+# extension points.

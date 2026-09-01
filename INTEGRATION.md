@@ -46,51 +46,41 @@ cd frontend                       && npm run dev
 
 ## Adding your component
 
-Five steps. Nothing outside your own files needs to change.
+**All four are already wired.** This section is kept because the pattern is what a fifth
+service would follow, and because it records what each component actually needed.
 
-**1. Copy two files from Component 1.**
+What integration turned out to require, per component:
 
-| File | Why |
+| | Needed to join |
 |---|---|
-| `service/cors.py` | The browser calls you directly. Without CORS headers it discards your response before your code runs — and the failure looks like a network error, not a 403. |
-| `service/auth.py` | Verifies the platform service's JWT with the shared secret. Verification only, so you never call the platform service on the request path and its downtime cannot become yours. |
+| **C1** Portfolio :8000 | nothing — CORS, JWT and `/health` were designed in |
+| **C2** Fraud :8001 | **nothing** — already had `CORSMiddleware` and `/health` |
+| **C3** Audit :8002 | **nothing** — already had CORS, `/api/health`, and reads `PORT` from the environment |
+| **C4** Assistant :8003 | CORS middleware and a `/health` endpoint — 39 lines added, 0 removed |
 
-Wire both in beside your `app = FastAPI(...)`:
+No component's logic, schema or threshold was touched, and no build file was added to anyone
+else's directory: in compose, Components 2 and 3 run from stock `python:3.12-slim` and
+`node:20-slim` images with their source bind-mounted.
 
-```python
-from service.cors import install_cors
-install_cors(app)
+The two things a service genuinely needs are therefore small:
 
-from service.auth import CallerIdentity, require_user
+1. **CORS**, because the browser calls each service directly. Without it the browser discards
+   the response before any handler runs. Read the origin list from `ALLOWED_ORIGINS` so one
+   env var configures the whole platform.
+2. **A health endpoint** that does *not* touch the expensive path. Component 4's returns a
+   literal, deliberately: compose and the UI need to tell "this service is not running" from
+   "the agent failed on this request", and calling an LLM to answer a healthcheck conflates
+   the two.
 
-@app.post("/your/endpoint")
-def handler(request: YourRequest, caller: CallerIdentity | None = Depends(require_user)):
-    ...
-```
+Then on the frontend: add the base URL to `SERVICES` in `frontend/lib/api/client.ts`, add a
+typed client beside `fraud.ts` / `audit.ts` / `assistant.ts`, replace the page under
+`app/(platform)/<name>/`, and set `ready: true` in `NAV`.
 
-`require_user` returns `None` when `AUTH_REQUIRED` is off, so your existing tests keep
-working unauthenticated. Compose sets it to `true`.
-
-**2. Share `JWT_SECRET`.** One value in the repo-root `.env`, read by every service. The
-platform service refuses to start if it is missing, under 32 characters, or still the
-placeholder.
-
-**3. Register your base URL** in `frontend/lib/api/client.ts`:
-
-```ts
-export const SERVICES = {
-  platform:  process.env.NEXT_PUBLIC_PLATFORM_URL  ?? "http://localhost:8100",
-  portfolio: process.env.NEXT_PUBLIC_PORTFOLIO_URL ?? "http://localhost:8000",
-  fraud:     process.env.NEXT_PUBLIC_FRAUD_URL     ?? "http://localhost:8001",   // <- yours
-} as const;
-```
-
-**4. Generate types, do not write them.** Add your schema to the `gen:api` script in
-`package.json` and run `npm run gen:api` with your service up. Hand-written interfaces drift
-from the backend silently; a generated file turns a contract change into a reviewable diff.
-
-**5. Replace your placeholder page** at `app/(platform)/<name>/page.tsx` and flip
-`ready: true` for your entry in `NAV` in `app/(platform)/layout.tsx`.
+**Failure isolation is a requirement, not a nicety.** Nothing `depends_on` a teammate's
+component, each has its own healthcheck, and every screen renders an explanatory state via
+`ApiError.isUnavailable` rather than an error when its service is down. `e2e/components.spec.ts`
+asserts it: with all three teammate services down, it visits every one of their screens and
+then still plans a withdrawal successfully.
 
 ## What Component 1 already gives you
 

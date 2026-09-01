@@ -4,3 +4,15 @@
 # Repo-root secrets read by docker-compose.yml. JWT_SECRET lives here and must never be
 # committed; .env.example carries the template.
 .env
+
+# Build artefacts. Added because integration work created a virtualenv and bytecode inside
+# backend/Agentic-Assistance/, which would otherwise have been committed into someone else's
+# component. Note that 28 .pyc files are ALREADY tracked from an earlier commit; they are
+# left alone here rather than deleted out from under their author, but they are worth
+# removing (`git rm -r --cached` on the __pycache__ directories) since they regenerate
+# automatically and only cause merge conflicts.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/

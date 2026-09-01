@@ -69,6 +69,26 @@ its error as a function of those features. The base stays frozen (or LoRA-adapte
 head is zero-initialized, so the hybrid starts exactly at the base model's accuracy — which
 gives RQ1 a clean answer to "did the covariates help".
 
+**How the head's training data is generated.** The head learns from base forecasts produced
+by walking a cut point forward: the base predicts from `group[:t+1]`, and that forecast is
+stamped at `t`, where it lines up with the `target_return` it is actually predicting. The
+base never sees its own target.
+
+This matters more than it sounds. Both foundation adapters return a *single* row per call,
+stamped at the last input timestamp — and under `add_targets(horizon=h)` that row's target
+is always NaN, because the final `h` rows of every symbol have no realised future yet. One
+call per symbol therefore produced exactly the rows that cannot be trained on, and the
+hybrid failed with `no overlap between base forecasts and targets` on **every** foundation
+base. It passed with the LSTM only because that adapter returns many in-sample rows, which
+is why no test caught it until Colab did. `tests/test_forecasting.py` now carries a
+single-row stub base with the foundation adapters' shape.
+
+Each cut costs one forward pass, so `HybridConfig.walk_forward_points` caps how many a
+symbol is worth; `min_context` sets the shortest prefix worth forecasting from. Early cuts
+give the base less context than it would have in production, which is inherent to
+walk-forward generation rather than a defect — but it is worth stating when reporting RQ1.
+
+
 ### The grounding constraint
 
 The agent may reason over signals and decide *how* to invoke the optimizer. It may **never**
@@ -143,6 +163,28 @@ huggingface-cli download google/timesfm-2.5-200m-pytorch
 Without those weights the pipeline still runs end to end: `baseline_lstm` covers forecasting
 and the local Ollama model covers sentiment.
 
+### The capability report is a required step, not a test artefact
+
+`forecasting/base.py` decides which foundation adapters to register by reading
+`artifacts/env_report.json`. It does not import the packages to find out — one broken
+optional dependency would otherwise take down the whole registry at import time, making the
+LSTM baseline and the entire optimization path unreachable over something neither needs.
+
+`artifacts/` is gitignored, so **a fresh checkout has no report and sees no foundation
+models at all**, however the install went. Regenerate it after installing or changing either
+optional package:
+
+```bash
+uv run python -m forecasting.env_report
+```
+
+Skipping this produces the most misleading error in the component — `get_forecaster` raising
+*"Chronos-Bolt is not installed"* about a package that is installed and importable. The
+message now distinguishes a missing report from a missing package from a package that fails
+to import, and prints the underlying error in the last case. The notebook bootstrap runs
+this automatically; a fresh clone driven from a shell has to run it.
+
+
 Copy `.env.example` to `.env` for API keys (all optional — GDELT and yfinance need none).
 
 The reference agent needs [Ollama](https://ollama.com) with `gemma4-e4b` pulled. It is a
@@ -168,6 +210,32 @@ failure if followed as written.
 
 **Added from the TAF, missing from the brief:** *"containerize and monitor the services"* —
 Phase 8.
+
+### Fine-tuning the two foundation models
+
+Neither exposes a HuggingFace-style training interface, and they do not share one with each
+other, so `forecasting/finetune_lora.py` gives each its own step (`STEP_FUNCTIONS`).
+
+**Chronos-Bolt** computes its own pinball loss: `forward(context, target=...)` normalises the
+target with the same loc/scale as the context and pads a short target with a zero mask, so a
+5-step horizon against its fixed `prediction_length` needs nothing from us. Scoring its
+quantile predictions externally would have applied the wrong normalisation.
+
+**TimesFM 2.5** has no training entry point at all. `decode()` runs under `torch.no_grad()`,
+but it is not the only path: `forward()` is an ordinary differentiable module, and for a
+horizon within one `output_patch_len` (128) `decode()`'s autoregressive loop never runs, so
+its prefill — patch, running-stats normalise, forward, denormalise — *is* the whole
+computation. `_timesfm_step` mirrors that prefill line for line, because any divergence is a
+train/serve mismatch nothing downstream would catch.
+
+Two traps worth knowing if you touch this:
+
+- The output head emits `len(quantiles) + 1` columns and **column 0 is the mean**. Reading it
+  as the 0.1 quantile trains against the wrong target and still converges.
+- Every transformer norm `scale` initialises to exactly **zero**, so a randomly-initialised
+  TimesFM is an identity function and gradients reach only the tokenizer and output head.
+  That looks identical to a broken training step. The slow test fills the scales before
+  asserting that gradient reaches the attention projections.
 
 ---
 
@@ -432,6 +500,16 @@ proposal-named method and is preferred whenever its weights are present.
 - **This machine has an AMD Radeon 610M and no CUDA.** torch is pinned to the CPU-only index
   (see `pyproject.toml`); the default Windows PyPI wheel bundles ~2.5GB of unusable CUDA
   libraries. LoRA fine-tuning therefore belongs in Colab, with inference local on CPU.
+
+  This is a *hazard for the code*, not only an inconvenience. Anything written to suit a
+  CPU-only machine follows the repository onto a GPU one. Two bugs of exactly that shape
+  have already been fixed: the fine-tuning loop had no device handling at all and blew up on
+  Colab with `mat1 is on cpu, different from other tensors on cuda:0`, and `ChronosConfig`
+  pinned `device="cpu"` with the comment *"this machine has no CUDA"*, which made Colab train
+  on the CPU with no error at all — just twenty epochs at the wrong speed. Device is now
+  resolved once per run by `forecasting/base.py::resolve_device`, and the training loop moves
+  every batch to wherever the model is. Prefer auto-detection over a pin, and be suspicious
+  of any default justified by this laptop.
 - **Small models fail the tool-calling contract in two distinct ways**, both observed with
   gemma4-e4b and both handled in `agent/reference_agent.py`:
   1. *Looping.* It cycles the three context tools indefinitely and never calls the optimizer,

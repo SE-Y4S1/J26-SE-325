@@ -113,32 +113,61 @@ class TimesFMForecaster:
         Forecasts RETURNS rather than price levels, matching the Chronos adapter and the LSTM
         baseline so RQ1 compares like with like.
         """
+        return self.predict_quantiles_batch([features], horizon=horizon, quantiles=quantiles)[0]
+
+    def predict_quantiles_batch(
+        self,
+        frames: list[pd.DataFrame],
+        *,
+        horizon: int,
+        quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
+        **kwargs: object,
+    ) -> list[ForecastResult]:
+        """Forecast many series in ONE forward pass.
+
+        `forecast()` has always taken a list; passing a one-element list is what made the
+        hybrid's walk-forward untenable -- roughly 5,200 single-item calls per fold, each a
+        full pass over a 231M-parameter model, thirteen folds deep.
+
+        Batching does not change any individual result: the model normalises each series
+        against its own statistics, so a series forecast alongside others is forecast
+        exactly as it would have been alone. A test asserts that rather than assuming it.
+        """
         model = self._load()
-        frame = features.sort_values("timestamp")
-        symbol = str(frame["symbol"].iloc[0]) if "symbol" in frame.columns else "unknown"
 
-        closes = frame["close"].to_numpy(dtype=np.float32)
-        if len(closes) < 2:
-            raise ValueError(f"{symbol}: need at least 2 closes to form a return series")
+        contexts, symbols, stamps = [], [], []
+        for features in frames:
+            frame = features.sort_values("timestamp")
+            symbol = str(frame["symbol"].iloc[0]) if "symbol" in frame.columns else "unknown"
+            closes = frame["close"].to_numpy(dtype=np.float32)
+            if len(closes) < 2:
+                raise ValueError(f"{symbol}: need at least 2 closes to form a return series")
 
-        returns = np.log(closes[1:] / closes[:-1])
-        context = returns[-self.config.context_length :]
+            returns = np.log(closes[1:] / closes[:-1])
+            contexts.append(returns[-self.config.context_length :])
+            symbols.append(symbol)
+            stamps.append(pd.to_datetime(frame["timestamp"].iloc[-1]))
 
-        point, quantile_forecast = model.forecast(horizon=horizon, inputs=[context])
+        _point, quantile_forecast = model.forecast(horizon=horizon, inputs=contexts)
+        grids = np.asarray(quantile_forecast)
 
-        # quantile_forecast is (batch, horizon, n_levels); the leading level column is the
-        # mean, so the quantile grid starts at index 1.
-        grid = np.asarray(quantile_forecast)[0, -1, 1:]
-        values = np.interp(
-            np.asarray(quantiles), np.asarray(TIMESFM_QUANTILE_LEVELS), grid
-        ).reshape(1, len(quantiles))
-
-        return ForecastResult(
-            symbol=symbol,
-            horizon=horizon,
-            quantiles=tuple(quantiles),
-            values=enforce_non_crossing(values),
-            timestamps=pd.DatetimeIndex([pd.to_datetime(frame["timestamp"].iloc[-1])]),
-            model_name=self.name,
-            model_version=self.version,
-        )
+        results = []
+        for index, symbol in enumerate(symbols):
+            # (batch, horizon, n_levels); the leading level column is the mean, so the
+            # quantile grid starts at index 1.
+            grid = grids[index, -1, 1:]
+            values = np.interp(
+                np.asarray(quantiles), np.asarray(TIMESFM_QUANTILE_LEVELS), grid
+            ).reshape(1, len(quantiles))
+            results.append(
+                ForecastResult(
+                    symbol=symbol,
+                    horizon=horizon,
+                    quantiles=tuple(quantiles),
+                    values=enforce_non_crossing(values),
+                    timestamps=pd.DatetimeIndex([stamps[index]]),
+                    model_name=self.name,
+                    model_version=self.version,
+                )
+            )
+        return results

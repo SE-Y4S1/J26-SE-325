@@ -11,6 +11,8 @@
 export const SERVICES = {
   platform: process.env.NEXT_PUBLIC_PLATFORM_URL ?? "http://localhost:8100",
   portfolio: process.env.NEXT_PUBLIC_PORTFOLIO_URL ?? "http://localhost:8000",
+  fraud: process.env.NEXT_PUBLIC_FRAUD_URL ?? "http://localhost:8001",
+  audit: process.env.NEXT_PUBLIC_AUDIT_URL ?? "http://localhost:8002",
   assistant: process.env.NEXT_PUBLIC_ASSISTANT_URL ?? "http://localhost:8003",
 } as const;
 

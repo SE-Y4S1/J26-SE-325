@@ -101,25 +101,81 @@ services:
       - ./backend/Portfolio-Optimization/artifacts/mlruns:/mlruns
     restart: unless-stopped
 
-  # --- reserved for teammates -------------------------------------------------------------
-  # Each needs three things to join: copy service/cors.py and service/auth.py from
-  # Component 1, share the same JWT_SECRET, and add its URL to SERVICES in
-  # frontend/lib/api/client.ts. See any placeholder page in the running app.
+  # --- teammates' components ---------------------------------------------------------------
+  # None of these add a file to anyone's folder. Each runs from a stock image with the
+  # component bind-mounted, so the only thing this file knows about them is how to start
+  # them and where to check they are alive.
   #
-  # component2:                    # Fraud Detection
-  #   build:
-  #     context: ./backend/Fraud-Detection
-  #   ports: ["8001:8001"]
-  #   environment:
-  #     JWT_SECRET: ${JWT_SECRET:?}
-  #     AUTH_REQUIRED: "true"
-  #     ALLOWED_ORIGINS: http://localhost:3000
-  #     KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-  #   depends_on:
-  #     kafka: {condition: service_healthy}
-  #
-  # component3:                    # Blockchain Auditability  -> ports ["8002:8002"]
-  # component4:                    # Agentic Assistance       -> ports ["8003:8003"]
+  # Every one is `restart: unless-stopped` and nothing depends_on them: a teammate's service
+  # failing to start must never take the rest of the platform down with it.
+
+  component2:                      # Fraud Detection  (Dhushanthini R)
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./backend/Fraud-Detection:/app
+    # Its detection logic is pure standard library -- fastapi, uvicorn and pydantic are the
+    # whole dependency list -- so installing at start costs seconds and needs no Dockerfile.
+    command: >
+      sh -c "pip install --quiet --no-cache-dir -r requirements.txt &&
+             uvicorn app:app --host 0.0.0.0 --port 8001"
+    ports: ["8001:8001"]
+    environment:
+      ALLOWED_ORIGINS: http://localhost:3000
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  component3:                      # Blockchain Auditability  (Abeysekara W C S M)
+    image: node:20-slim
+    working_dir: /app
+    volumes:
+      - ./backend/Blockchain-Auditability/backend:/app
+    # PORT is read from the environment by its index.js, so it runs on 8002 without any
+    # change to the source.
+    command: sh -c "npm install --silent && node src/index.js"
+    ports: ["8002:8002"]
+    environment:
+      PORT: "8002"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:8002/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+    restart: unless-stopped
+
+  component4:                      # Agentic Assistance  (W V A D K Chamara)
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./backend/Agentic-Assistance:/app
+    # Its own requirements.txt, rather than a guessed package list. An earlier version of
+    # this file installed langchain-openai and shap: neither is used by the service, and it
+    # omitted langchain-ollama, which is.
+    command: >
+      sh -c "pip install --quiet --no-cache-dir -r requirements.txt &&
+             uvicorn main:app --host 0.0.0.0 --port 8003"
+    ports: ["8003:8003"]
+    environment:
+      ALLOWED_ORIGINS: http://localhost:3000
+      # The agent talks to OLLAMA, not OpenAI -- agent.py uses ChatOllama. Inside a
+      # container "localhost" is the container, so it has to be pointed at the host
+      # explicitly or every chat call fails with a connection error.
+      OLLAMA_HOST: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8003/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
 
 volumes:
   platform_data:

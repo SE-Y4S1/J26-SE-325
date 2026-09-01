@@ -239,3 +239,172 @@ def test_assert_fold_is_clean_passes_with_a_sufficient_gap() -> None:
     train = pd.DataFrame({"timestamp": pd.date_range("2024-01-01", periods=30)})
     test = pd.DataFrame({"timestamp": pd.date_range("2024-02-10", periods=30)})
     assert_fold_is_clean(train, test, embargo_days=5)
+
+
+def test_walk_forward_builds_the_forecaster_once(monkeypatch) -> None:
+    """THE fix for the Colab crash.
+
+    get_forecaster was called inside the fold loop, so a foundation model's 200-900MB of
+    weights were re-downloaded and re-loaded on every fold -- twenty-plus loads across a
+    backtest, which is what exhausted the runtime's RAM. The weights do not change between
+    folds, so there is nothing to rebuild.
+    """
+    import numpy as np
+    import pandas as pd
+
+    import evaluation.backtest as bt
+
+    builds = {"count": 0}
+    fits = {"count": 0}
+
+    class _Recorder:
+        name, version = "recorder", "v1"
+
+        def __init__(self) -> None:
+            builds["count"] += 1
+
+        def fit(self, features, *, horizon, **kwargs) -> None:  # noqa: ANN001, ARG002
+            fits["count"] += 1
+
+        def predict_quantiles(self, features, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+            from forecasting.base import ForecastResult
+
+            frame = features.sort_values("timestamp")
+            return ForecastResult(
+                symbol=str(frame["symbol"].iloc[0]), horizon=horizon,
+                quantiles=(0.1, 0.5, 0.9), values=np.zeros((1, 3)),
+                timestamps=pd.DatetimeIndex([frame["timestamp"].iloc[-1]]),
+                model_name=self.name, model_version=self.version,
+            )
+
+    monkeypatch.setattr("forecasting.base.get_forecaster", lambda name, **kw: _Recorder())
+
+    n = 2000
+    features = pd.DataFrame({
+        "timestamp": pd.bdate_range("2015-01-01", periods=n),
+        "symbol": "AAA",
+        "close": 100.0,
+        "target_return": 0.001,
+    })
+
+    bt.run_walk_forward(
+        features, "recorder", horizon=5,
+        config=bt.BacktestConfig(train_window_days=365, test_window_days=180,
+                                 step_days=180, embargo_days=5),
+        log_to_mlflow=False,
+    )
+
+    assert fits["count"] > 1, "the walk-forward must still refit on every fold"
+    assert builds["count"] == 1, (
+        f"forecaster constructed {builds['count']} times for {fits['count']} folds; "
+        "loading foundation weights per fold is what exhausted Colab's RAM"
+    )
+
+
+def test_walk_forward_checkpoints_and_resumes_per_fold(tmp_path, monkeypatch) -> None:
+    """A backtest is twenty-odd minutes of compute and Colab reclaims long sessions.
+
+    Measured during the investigation: memory stays flat at ~3.3GB of 12.7 across every
+    fold, so the interruption has nothing to do with the code -- which means the code
+    cannot prevent it and should survive it instead. Folds are independent by construction,
+    so each is banked as it completes and a resumed run skips it.
+    """
+    import numpy as np
+    import pandas as pd
+
+    import evaluation.backtest as bt
+    from forecasting.base import ForecastResult
+
+    fits = {"count": 0}
+
+    class _Recorder:
+        name, version = "recorder", "v1"
+
+        def fit(self, features, *, horizon, **kwargs) -> None:  # noqa: ANN001, ARG002
+            fits["count"] += 1
+
+        def predict_quantiles(self, features, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+            frame = features.sort_values("timestamp")
+            return ForecastResult(
+                symbol=str(frame["symbol"].iloc[0]), horizon=horizon,
+                quantiles=(0.1, 0.5, 0.9), values=np.zeros((1, 3)),
+                timestamps=pd.DatetimeIndex([frame["timestamp"].iloc[-1]]),
+                model_name=self.name, model_version=self.version,
+            )
+
+    monkeypatch.setattr("forecasting.base.get_forecaster", lambda name, **kw: _Recorder())
+
+    features = pd.DataFrame({
+        "timestamp": pd.bdate_range("2015-01-01", periods=2000),
+        "symbol": "AAA",
+        "close": 100.0,
+        "target_return": 0.001,
+    })
+    config = bt.BacktestConfig(
+        train_window_days=365, test_window_days=180, step_days=180, embargo_days=5
+    )
+    checkpoint = tmp_path / "folds.csv"
+
+    cold = bt.run_walk_forward(
+        features, "recorder", horizon=5, config=config,
+        log_to_mlflow=False, checkpoint=checkpoint,
+    )
+    assert fits["count"] > 1, "expected several folds"
+    assert checkpoint.exists(), "the checkpoint should be written as folds complete"
+    cold_folds = fits["count"]
+
+    fits["count"] = 0
+    warm = bt.run_walk_forward(
+        features, "recorder", horizon=5, config=config,
+        log_to_mlflow=False, checkpoint=checkpoint,
+    )
+
+    assert fits["count"] == 0, (
+        f"refitted {fits['count']} of {cold_folds} folds; a resumed run must reuse the "
+        "checkpoint rather than repeat twenty minutes of compute"
+    )
+    assert len(warm) == len(cold), "resuming must reproduce the same predictions"
+
+
+def test_walk_forward_without_a_checkpoint_is_unchanged(tmp_path, monkeypatch) -> None:
+    """Checkpointing is opt-in; the existing callers pass nothing and must not start
+    writing files as a side effect."""
+    import numpy as np
+    import pandas as pd
+
+    import evaluation.backtest as bt
+    from forecasting.base import ForecastResult
+
+    class _Stub:
+        name, version = "stub", "v1"
+
+        def fit(self, features, *, horizon, **kwargs) -> None:  # noqa: ANN001, ARG002
+            return None
+
+        def predict_quantiles(self, features, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+            frame = features.sort_values("timestamp")
+            return ForecastResult(
+                symbol=str(frame["symbol"].iloc[0]), horizon=horizon,
+                quantiles=(0.1, 0.5, 0.9), values=np.zeros((1, 3)),
+                timestamps=pd.DatetimeIndex([frame["timestamp"].iloc[-1]]),
+                model_name=self.name, model_version=self.version,
+            )
+
+    monkeypatch.setattr("forecasting.base.get_forecaster", lambda name, **kw: _Stub())
+
+    features = pd.DataFrame({
+        "timestamp": pd.bdate_range("2015-01-01", periods=1200),
+        "symbol": "AAA",
+        "close": 100.0,
+        "target_return": 0.001,
+    })
+    result = bt.run_walk_forward(
+        features, "stub", horizon=5,
+        config=bt.BacktestConfig(
+            train_window_days=365, test_window_days=180, step_days=180, embargo_days=5
+        ),
+        log_to_mlflow=False,
+    )
+
+    assert not result.empty
+    assert list(tmp_path.iterdir()) == [], "no checkpoint should be written when none is asked for"

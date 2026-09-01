@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Real-Time Fraud &amp; Behavioral Anomaly Engine - Prototype Demo</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --panel-2: #273449;
+    --line: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --allow: #22c55e;
+    --stepup: #f59e0b;
+    --block: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", Roboto, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    background: linear-gradient(90deg, #0b1220, #172554);
+    border-bottom: 1px solid var(--line);
+    padding: 18px 28px;
+  }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  .badge-sim {
+    display: inline-block; margin-top: 8px; padding: 3px 10px; border-radius: 999px;
+    background: #422006; color: #fbbf24; border: 1px solid #a16207;
+    font-size: 11px; font-weight: 600; letter-spacing: .4px;
+  }
+
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 20px 28px 60px; }
+  .grid { display: grid; grid-template-columns: 340px 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 1000px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px 18px; margin-bottom: 20px;
+  }
+  .card h2 {
+    margin: 0 0 12px; font-size: 13px; text-transform: uppercase;
+    letter-spacing: .8px; color: var(--accent);
+  }
+
+  /* pipeline diagram */
+  .pipeline { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .stage {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 10px; font-size: 12px; white-space: nowrap; transition: all .25s;
+  }
+  .stage.lit { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; color: #fff; }
+  .arrow { color: var(--muted); font-size: 13px; }
+
+  /* form */
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input[type=number], input[type=text], select {
+    width: 100%; padding: 8px 10px; border-radius: 6px;
+    border: 1px solid var(--line); background: #0b1220; color: var(--text); font-size: 13px;
+  }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
+  .check input { width: 15px; height: 15px; }
+
+  button {
+    cursor: pointer; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); padding: 9px 12px;
+    font-size: 13px; font-weight: 600; transition: .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .btn-primary { background: #0369a1; border-color: #0284c7; width: 100%; margin-top: 14px; padding: 11px; }
+  .btn-primary:hover:not(:disabled) { background: #0284c7; }
+  .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .btn-grid.one { grid-template-columns: 1fr; }
+  .btn-normal { border-left: 3px solid var(--allow); }
+  .btn-susp   { border-left: 3px solid var(--stepup); }
+  .btn-high   { border-left: 3px solid var(--block); }
+  .btn-attack { border-left: 3px solid #a855f7; }
+
+  /* scores */
+  .scores { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 720px) { .scores { grid-template-columns: 1fr; } }
+  .score-box { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .score-box .name { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+  .score-box .val { font-size: 30px; font-weight: 700; margin: 4px 0 6px; font-variant-numeric: tabular-nums; }
+  .score-box .sub { font-size: 11px; color: var(--muted); }
+  .bar { height: 7px; border-radius: 4px; background: #0b1220; overflow: hidden; margin-bottom: 6px; }
+  .bar > i { display: block; height: 100%; width: 0; transition: width .5s ease; }
+
+  /* decision */
+  .decision {
+    border-radius: 10px; padding: 18px 20px; margin-bottom: 16px;
+    border: 2px solid var(--line); background: var(--panel-2);
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  }
+  .decision .word { font-size: 34px; font-weight: 800; letter-spacing: 1px; }
+  .decision .desc { font-size: 13px; color: var(--muted); max-width: 620px; }
+  .d-ALLOW   { border-color: var(--allow);  background: rgba(34,197,94,.10); }
+  .d-ALLOW .word { color: var(--allow); }
+  .d-STEPUP  { border-color: var(--stepup); background: rgba(245,158,11,.10); }
+  .d-STEPUP .word { color: var(--stepup); }
+  .d-BLOCK   { border-color: var(--block);  background: rgba(239,68,68,.10); }
+  .d-BLOCK .word { color: var(--block); }
+
+  ul.reasons { margin: 0; padding-left: 18px; }
+  ul.reasons li { margin-bottom: 5px; }
+  .rules { margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .rules code {
+    background: #0b1220; border: 1px solid var(--line); border-radius: 4px;
+    padding: 1px 5px; color: #fbbf24;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10.5px; letter-spacing: .5px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tag { padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 700; }
+  .tag-ALLOW { background: rgba(34,197,94,.18); color: #4ade80; }
+  .tag-STEPUP { background: rgba(245,158,11,.18); color: #fbbf24; }
+  .tag-BLOCK { background: rgba(239,68,68,.18); color: #f87171; }
+
+  .note { font-size: 11.5px; color: var(--muted); margin-top: 10px; }
+  .err { background: rgba(239,68,68,.12); border: 1px solid var(--block); color: #fca5a5;
+         padding: 10px 12px; border-radius: 7px; margin-bottom: 14px; }
+  .hidden { display: none; }
+  .thresholds { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Real-Time Fraud &amp; Behavioral Anomaly Engine with Deterministic Enforcement</h1>
+  <p>Dual-stream anomaly detection feeding a deterministic security gateway &mdash; ALLOW / STEP-UP / BLOCK</p>
+  <span class="badge-sim" id="simBadge">PROTOTYPE &mdash; simulated LSTM &amp; GNN outputs, no trained model</span>
+</header>
+
+<div class="wrap">
+
+  <div class="card">
+    <h2>Detection pipeline</h2>
+    <div class="pipeline" id="pipeline">
+      <div class="stage" data-s="0">Transaction</div><span class="arrow">&rarr;</span>
+      <div class="stage" data-s="1">Behavioural analysis</div><span class="arrow">&rarr;</span>
+      <div class="stage" data-s="2">LSTM-like anomaly score</div><span class="arrow">+</span>
+      <div class="stage" data-s="3">GNN-like relational score</div><span class="arrow">&rarr;</span>
+      <div class="stage" data-s="4">Fusion &rarr; final risk</div><span class="arrow">&rarr;</span>
+      <div class="stage" data-s="5">Deterministic gateway</div><span class="arrow">&rarr;</span>
+      <div class="stage" data-s="6">ALLOW / STEP-UP / BLOCK</div>
+    </div>
+    <div class="thresholds" id="thresholds">Loading policy&hellip;</div>
+  </div>
+
+  <div class="grid">
+
+    <!-- ============ LEFT: input ============ -->
+    <div>
+      <div class="card">
+        <h2>Transaction input</h2>
+
+        <label for="userId">Customer</label>
+        <select id="userId">
+          <option value="u_1001">u_1001 - established customer</option>
+          <option value="u_2002">u_2002 - established customer</option>
+          <option value="u_3003">u_3003 - unknown actor</option>
+        </select>
+
+        <label for="amount">Amount</label>
+        <input type="number" id="amount" value="1200" min="0" step="100" />
+
+        <div class="row">
+          <div>
+            <label for="deviceId">Device</label>
+            <select id="deviceId">
+              <option value="dev_trusted_01">dev_trusted_01 (known)</option>
+              <option value="dev_phone_22">dev_phone_22 (known)</option>
+              <option value="dev_unknown_45">dev_unknown_45 (new)</option>
+              <option value="dev_shared_99">dev_shared_99 (shared / mule)</option>
+            </select>
+          </div>
+          <div>
+            <label for="location">Location</label>
+            <select id="location">
+              <option value="Colombo, LK">Colombo, LK</option>
+              <option value="Kandy, LK">Kandy, LK</option>
+              <option value="Dubai, AE">Dubai, AE</option>
+              <option value="Unknown, XX">Unknown, XX</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="typing">Typing speed (keystrokes/min)</label>
+            <input type="number" id="typing" value="250" min="0" max="2000" step="10" />
+          </div>
+          <div>
+            <label for="nav">Navigation pattern</label>
+            <select id="nav">
+              <option value="normal">normal</option>
+              <option value="focused">focused</option>
+              <option value="exploratory">exploratory</option>
+              <option value="hesitant">hesitant</option>
+              <option value="rapid">rapid</option>
+              <option value="erratic">erratic</option>
+              <option value="automated">automated</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="freq">Transactions in last 24h</label>
+            <input type="number" id="freq" value="3" min="0" max="1000" />
+          </div>
+          <div>
+            <label for="age">Account age (days)</label>
+            <input type="number" id="age" value="900" min="0" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="prevAmount">Previous transaction amount</label>
+            <input type="number" id="prevAmount" value="1100" min="0" step="100" />
+          </div>
+          <div>
+            <label for="beneficiary">Beneficiary</label>
+            <select id="beneficiary">
+              <option value="ben_family_02">ben_family_02 (known)</option>
+              <option value="ben_utility_22">ben_utility_22 (known)</option>
+              <option value="ben_new_88">ben_new_88 (new)</option>
+              <option value="ben_mule_77">ben_mule_77 (mule network)</option>
+            </select>
+          </div>
+        </div>
+
+        <label for="ip">IP address (relational signal)</label>
+        <input type="text" id="ip" value="192.168.1.20" />
+
+        <div class="check">
+          <input type="checkbox" id="deviceChange" />
+          <label for="deviceChange" style="margin:0">Device fingerprint changed</label>
+        </div>
+        <div class="check">
+          <input type="checkbox" id="benChange" />
+          <label for="benChange" style="margin:0">Newly added beneficiary</label>
+        </div>
+        <div class="check">
+          <input type="checkbox" id="persist" />
+          <label for="persist" style="margin:0">Stateful mode (engine learns from this transaction)</label>
+        </div>
+
+        <button class="btn-primary" id="analyzeBtn">Analyze Transaction</button>
+        <div class="note">
+          Stateful mode is off by default so every demo click gives an identical,
+          reproducible result. Turn it on to show the engine adapting over time.
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Demo scenarios</h2>
+        <div class="btn-grid one">
+          <button class="btn-normal" onclick="loadPreset('normal')">Normal Transaction</button>
+          <button class="btn-susp"   onclick="loadPreset('suspicious')">Suspicious Transaction</button>
+          <button class="btn-high"   onclick="loadPreset('high')">High-Risk Transaction</button>
+        </div>
+        <div class="note">Loads the fields, then runs the analysis automatically.</div>
+      </div>
+
+      <div class="card">
+        <h2>Adversarial simulations</h2>
+        <div class="btn-grid one">
+          <button class="btn-attack" onclick="runAttack('camouflage')">Camouflage Attack</button>
+          <button class="btn-attack" onclick="runAttack('slow_drift')">Slow Drift Attack</button>
+          <button class="btn-attack" onclick="runAttack('structuring')">Structuring Attack</button>
+        </div>
+        <div class="note">
+          Safe, fully simulated synthetic sequences. No real systems are involved.
+        </div>
+        <button style="width:100%;margin-top:12px" onclick="resetEngine()">Reset engine state</button>
+      </div>
+    </div>
+
+    <!-- ============ RIGHT: results ============ -->
+    <div>
+      <div id="errorBox" class="err hidden"></div>
+
+      <div class="card">
+        <h2>Gateway decision</h2>
+        <div class="decision d-ALLOW" id="decisionBox">
+          <div class="word" id="decisionWord">READY</div>
+          <div class="desc" id="decisionDesc">
+            Choose a scenario or fill the form, then click <b>Analyze Transaction</b>.
+          </div>
+        </div>
+
+        <div class="scores">
+          <div class="score-box">
+            <div class="name">Behavioural anomaly score</div>
+            <div class="val" id="bVal">--</div>
+            <div class="bar"><i id="bBar" style="background:#38bdf8"></i></div>
+            <div class="sub">Simulated LSTM autoencoder (stream A)</div>
+          </div>
+          <div class="score-box">
+            <div class="name">Relationship / GNN risk score</div>
+            <div class="val" id="gVal">--</div>
+            <div class="bar"><i id="gBar" style="background:#a855f7"></i></div>
+            <div class="sub">Simulated graph neural network (stream B)</div>
+          </div>
+          <div class="score-box">
+            <div class="name">Final fraud risk score</div>
+            <div class="val" id="rVal">--</div>
+            <div class="bar"><i id="rBar" style="background:#f97316"></i></div>
+            <div class="sub">Late fusion of stream A and stream B</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Why this decision (explainability)</h2>
+        <ul class="reasons" id="reasonList"><li>No transaction analysed yet.</li></ul>
+        <div class="rules" id="ruleList"></div>
+      </div>
+
+      <div class="card hidden" id="attackCard">
+        <h2 id="attackTitle">Adversarial simulation</h2>
+        <p id="attackDesc" style="margin-top:0;color:var(--muted);font-size:13px"></p>
+        <table>
+          <thead>
+            <tr>
+              <th>#</th><th>Stage</th><th class="num">Amount</th>
+              <th class="num">Behav</th><th class="num">Graph</th><th class="num">Risk</th>
+              <th>Decision</th><th>Top reason</th>
+            </tr>
+          </thead>
+          <tbody id="attackRows"></tbody>
+        </table>
+        <div class="note" id="attackSummary"></div>
+      </div>
+
+      <div class="card">
+        <h2>Audit log</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Time (UTC)</th><th>Transaction</th><th class="num">Risk</th>
+              <th>Decision</th><th>Attack</th><th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="auditRows"><tr><td colspan="6" style="color:var(--muted)">Empty.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// If the page is opened straight from disk, fall back to the local server.
+const API = location.protocol === "file:" ? "http://127.0.0.1:8000" : "";
+
+// -------------------------------------------------------------------------
+// Presets. Each uses its own customer so the scenarios never interfere.
+// -------------------------------------------------------------------------
+const PRESETS = {
+  normal: {
+    userId: "u_1001", amount: 1200, deviceId: "dev_trusted_01", location: "Colombo, LK",
+    typing: 250, nav: "normal", freq: 3, age: 900, prevAmount: 1100,
+    beneficiary: "ben_family_02", ip: "192.168.1.20",
+    deviceChange: false, benChange: false
+  },
+  suspicious: {
+    userId: "u_2002", amount: 18000, deviceId: "dev_unknown_45", location: "Dubai, AE",
+    typing: 400, nav: "exploratory", freq: 6, age: 900, prevAmount: 1200,
+    beneficiary: "ben_utility_22", ip: "41.90.12.7",
+    deviceChange: true, benChange: false
+  },
+  high: {
+    userId: "u_3003", amount: 275000, deviceId: "dev_shared_99", location: "Unknown, XX",
+    typing: 780, nav: "automated", freq: 16, age: 5, prevAmount: 1200,
+    beneficiary: "ben_mule_77", ip: "203.0.113.77",
+    deviceChange: true, benChange: true
+  }
+};
+
+const $ = (id) => document.getElementById(id);
+
+function showError(message) {
+  const box = $("errorBox");
+  if (!message) { box.classList.add("hidden"); return; }
+  box.textContent = message;
+  box.classList.remove("hidden");
+}
+
+async function api(path, options) {
+  const response = await fetch(API + path, options);
+  let payload = null;
+  try { payload = await response.json(); } catch (e) { /* non-JSON body */ }
+  if (!response.ok) {
+    const detail = payload ? (payload.detail || payload.error || JSON.stringify(payload))
+                           : response.statusText;
+    throw new Error(detail);
+  }
+  return payload;
+}
+
+function setBusy(busy) {
+  document.querySelectorAll("button").forEach(b => { b.disabled = busy; });
+}
+
+// Light up the pipeline diagram stage by stage.
+async function animatePipeline() {
+  const stages = document.querySelectorAll("#pipeline .stage");
+  stages.forEach(s => s.classList.remove("lit"));
+  for (const stage of stages) {
+    stage.classList.add("lit");
+    await new Promise(r => setTimeout(r, 70));
+  }
+}
+
+function loadPreset(name) {
+  const p = PRESETS[name];
+  $("userId").value = p.userId;
+  $("amount").value = p.amount;
+  $("deviceId").value = p.deviceId;
+  $("location").value = p.location;
+  $("typing").value = p.typing;
+  $("nav").value = p.nav;
+  $("freq").value = p.freq;
+  $("age").value = p.age;
+  $("prevAmount").value = p.prevAmount;
+  $("beneficiary").value = p.beneficiary;
+  $("ip").value = p.ip;
+  $("deviceChange").checked = p.deviceChange;
+  $("benChange").checked = p.benChange;
+  analyze();
+}
+
+function readForm() {
+  return {
+    user_id: $("userId").value,
+    amount: Number($("amount").value),
+    location: $("location").value,
+    device_id: $("deviceId").value,
+    device_change: $("deviceChange").checked,
+    typing_speed: Number($("typing").value),
+    navigation_pattern: $("nav").value,
+    transaction_frequency: Number($("freq").value),
+    beneficiary_change: $("benChange").checked,
+    beneficiary_id: $("beneficiary").value,
+    ip_address: $("ip").value.trim() || null,
+    previous_transaction_amount: Number($("prevAmount").value),
+    account_age: Number($("age").value),
+    persist_state: $("persist").checked
+  };
+}
+
+const DECISION_TEXT = {
+  "ALLOW":   "Risk is in the low band. The transaction is processed normally.",
+  "STEP-UP": "Risk is in the medium band. The gateway demands additional authentication (OTP or biometric) before the money moves.",
+  "BLOCK":   "Risk is in the high band, or a hard policy rule fired. The transaction is refused and referred for manual review."
+};
+
+function paintScores(result) {
+  const items = [
+    ["b", result.behavioral_score],
+    ["g", result.graph_score],
+    ["r", result.risk_score]
+  ];
+  for (const [key, value] of items) {
+    $(key + "Val").textContent = value.toFixed(3);
+    $(key + "Bar").style.width = Math.round(value * 100) + "%";
+  }
+
+  const cls = result.decision === "STEP-UP" ? "STEPUP" : result.decision;
+  $("decisionBox").className = "decision d-" + cls;
+  $("decisionWord").textContent = result.decision;
+  $("decisionDesc").innerHTML =
+    "<b>" + result.reason + "</b><br>" + (DECISION_TEXT[result.decision] || "");
+
+  const list = $("reasonList");
+  list.innerHTML = "";
+  (result.reasons || []).forEach(reason => {
+    const li = document.createElement("li");
+    li.textContent = reason;
+    list.appendChild(li);
+  });
+  if (!list.children.length) list.innerHTML = "<li>No specific indicators.</li>";
+
+  $("ruleList").innerHTML = (result.rules_fired && result.rules_fired.length)
+    ? "Deterministic policy rules fired: " +
+      result.rules_fired.map(r => "<code>" + r.replace(/</g, "&lt;") + "</code>").join(" ")
+    : "No override rules fired - the decision comes purely from the configured "
+      + "risk thresholds (policy " + (result.policy_version || "") + ").";
+}
+
+async function analyze() {
+  setBusy(true);
+  showError("");
+  try {
+    animatePipeline();
+    const result = await api("/score", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(readForm())
+    });
+    paintScores(result);
+    $("attackCard").classList.add("hidden");
+    await refreshAudit();
+  } catch (err) {
+    showError("Could not analyse the transaction: " + err.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function decisionTag(decision) {
+  const cls = decision === "STEP-UP" ? "STEPUP" : decision;
+  return '<span class="tag tag-' + cls + '">' + decision + "</span>";
+}
+
+async function runAttack(type) {
+  setBusy(true);
+  showError("");
+  try {
+    animatePipeline();
+    const result = await api("/simulate-attack", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attack_type: type, steps: 8 })
+    });
+
+    $("attackTitle").textContent = result.title + "  [simulated]";
+    $("attackDesc").textContent = result.description;
+
+    const rows = [result.baseline].concat(result.steps);
+    $("attackRows").innerHTML = rows.map(row =>
+      "<tr>" +
+        "<td>" + row.step + "</td>" +
+        "<td>" + row.label + "</td>" +
+        '<td class="num">' + row.amount.toLocaleString() + "</td>" +
+        '<td class="num">' + row.behavioral_score.toFixed(3) + "</td>" +
+        '<td class="num">' + row.graph_score.toFixed(3) + "</td>" +
+        '<td class="num">' + row.risk_score.toFixed(3) + "</td>" +
+        "<td>" + decisionTag(row.decision) + "</td>" +
+        "<td>" + row.reason + "</td>" +
+      "</tr>"
+    ).join("");
+
+    let summary = "<b>Finding:</b> " + result.summary;
+    if (result.single_stream_would_have_missed) {
+      summary += "<br><b>Dual-stream benefit:</b> a behaviour-only model would have "
+               + "ALLOWED the final stage. The relational stream is what caught it.";
+    }
+    summary += "<br><i>" + result.disclaimer + "</i>";
+    $("attackSummary").innerHTML = summary;
+    $("attackCard").classList.remove("hidden");
+
+    // Show the last stage in the big decision panel too.
+    const last = result.steps[result.steps.length - 1];
+    paintScores({
+      behavioral_score: last.behavioral_score,
+      graph_score: last.graph_score,
+      risk_score: last.risk_score,
+      decision: last.decision,
+      reason: result.title + " - final stage: " + last.label,
+      reasons: [last.reason],
+      rules_fired: [],
+      policy_version: ""
+    });
+
+    await refreshAudit();
+    $("attackCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (err) {
+    showError("Could not run the simulation: " + err.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function refreshAudit() {
+  try {
+    const data = await api("/audit?limit=12");
+    const body = $("auditRows");
+    if (!data.entries.length) {
+      body.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">Empty.</td></tr>';
+      return;
+    }
+    body.innerHTML = data.entries.map(entry =>
+      "<tr>" +
+        "<td>" + entry.timestamp.replace("T", " ").replace("+00:00", "") + "</td>" +
+        "<td>" + entry.transaction_id + "</td>" +
+        '<td class="num">' + entry.risk_score.toFixed(3) + "</td>" +
+        "<td>" + decisionTag(entry.decision) + "</td>" +
+        "<td>" + (entry.attack_type || "-") + "</td>" +
+        "<td>" + entry.reason + "</td>" +
+      "</tr>"
+    ).join("");
+  } catch (err) {
+    /* the audit table is informational only; never break the demo for it */
+  }
+}
+
+async function resetEngine() {
+  setBusy(true);
+  try {
+    await api("/reset", { method: "POST" });
+    $("attackCard").classList.add("hidden");
+    $("decisionBox").className = "decision d-ALLOW";
+    $("decisionWord").textContent = "READY";
+    $("decisionDesc").textContent = "Engine state cleared. Ready for a fresh demonstration.";
+    ["b", "g", "r"].forEach(k => {
+      $(k + "Val").textContent = "--";
+      $(k + "Bar").style.width = "0%";
+    });
+    $("reasonList").innerHTML = "<li>No transaction analysed yet.</li>";
+    $("ruleList").textContent = "";
+    await refreshAudit();
+    showError("");
+  } catch (err) {
+    showError("Reset failed: " + err.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function loadPolicy() {
+  try {
+    const [cfg, health] = await Promise.all([api("/config"), api("/health")]);
+    $("thresholds").innerHTML =
+      "Enforced policy <b>" + cfg.policy_version + "</b> &nbsp;|&nbsp; " +
+      "ALLOW: " + cfg.bands["ALLOW"] + " &nbsp;|&nbsp; " +
+      "STEP-UP: " + cfg.bands["STEP-UP"] + " &nbsp;|&nbsp; " +
+      "BLOCK: " + cfg.bands["BLOCK"] + " &nbsp;|&nbsp; " +
+      "fusion = " + cfg.fusion.behavioral_weight + " x behavioural + " +
+      cfg.fusion.graph_weight + " x relational (+ corroboration bonus)";
+    $("simBadge").textContent = "PROTOTYPE - model mode: " + health.model_mode +
+      " (no trained neural network)";
+  } catch (err) {
+    $("thresholds").textContent =
+      "Cannot reach the API. Start it with:  uvicorn app:app --reload";
+  }
+}
+
+$("analyzeBtn").addEventListener("click", analyze);
+loadPolicy();
+refreshAudit();
+</script>
+</body>
+</html>
