@@ -73,30 +73,28 @@ def get_sentiment(symbol: str) -> dict[str, float | None]:
 
 
 def get_forecast(symbol: str, horizon: int) -> dict[str, float | str | None]:
-    """p10/p50/p90 from the active hybrid model. Wraps forecasting.hybrid_model."""
-    from forecasting.model_registry import get_active_version
+    """p10/p50/p90 from the active hybrid model, via the cached forecast service."""
+    from forecasting.serving import get_service
 
-    try:
-        from forecasting.base import get_forecaster
-
-        forecaster = get_forecaster("hybrid")
-    except Exception as exc:  # noqa: BLE001 - no trained model yet is a normal early state
-        logger.info("no hybrid forecaster available: %s", exc)
+    service = get_service()
+    if service.head(horizon) is None:
         return {
             "symbol": symbol, "horizon": horizon,
             "error": "no trained forecaster is currently registered",
         }
+    from data.history import get_history
+    from data.instruments import resolve
 
-    result = forecaster.predict_quantiles(_features_for(symbol), horizon=horizon)
-    frame = result.to_frame().iloc[-1]
-
+    result = service.forecast(symbol, get_history(resolve(symbol)).bars, horizon)
+    if result["method"] != "hybrid":
+        return {"symbol": symbol, "horizon": horizon, "error": result.get("reason") or "model unavailable"}
     return {
         "symbol": symbol,
         "horizon": horizon,
-        "p10": _clean(frame["p10"]),
-        "p50": _clean(frame["p50"]),
-        "p90": _clean(frame["p90"]),
-        "model_version": get_active_version(),
+        "p10": _clean(result["p10"]),
+        "p50": _clean(result["p50"]),
+        "p90": _clean(result["p90"]),
+        "model_version": result["model_version"],
     }
 
 
@@ -121,7 +119,11 @@ def run_fuzzy_ga_withdrawal(
         risk_tolerance=risk_tolerance,
         deadline_days=deadline_days,
     )
+    return plan_to_dict(plan)
 
+
+def plan_to_dict(plan) -> dict[str, Any]:  # noqa: ANN001 - WithdrawalPlan
+    """The JSON shape of a plan (tool observation and API payload alike)."""
     return {
         "assets_to_sell": [
             {
@@ -143,6 +145,14 @@ def run_fuzzy_ga_withdrawal(
         "days_required": plan.days_required,
         "feasible": plan.feasible,
         "fuzzy_rule_trace": list(plan.fuzzy_rule_trace),
+        "cost_breakdown": {
+            "slippage": round(plan.slippage_cost, 2),
+            "timing_risk": round(plan.timing_cost, 2),
+            "forecast_drift": round(plan.drift_cost, 2),
+            "fx_conversion": round(plan.fx_cost, 2),
+            "realized_pnl": round(plan.realized_pnl, 2),
+            "crystallized_loss": round(plan.crystallized_loss, 2),
+        },
     }
 
 
@@ -150,8 +160,13 @@ def run_moead_rebalance(
     portfolio_state: dict[str, Any],
     risk_preference: float = 0.5,
     selection_rule: str = "knee",
+    max_weight: float = 0.25,
 ) -> dict[str, Any]:
-    """Long-term allocation. Wraps optimization.moead_rebalance + pareto_selection."""
+    """Long-term allocation. Wraps optimization.moead_rebalance + pareto_selection.
+
+    `expected_return` per holding is the forecaster's daily drift when the symbol has a
+    hybrid forecast (service/api._build_portfolio), else 0.
+    """
     import numpy as np
 
     from optimization.moead_rebalance import MOEADConfig, optimize_allocation
@@ -184,7 +199,9 @@ def run_moead_rebalance(
     front = optimize_allocation(
         expected_returns, scenarios, adv, current_weights, float(total), symbols,
         volatility=volatility,
-        config=MOEADConfig(n_partitions=8, n_generations=100),
+        # The cap is only satisfiable when n x cap >= 1; with fewer holdings than 1/cap,
+        # equal weights is the tightest feasible cap.
+        config=MOEADConfig(n_partitions=8, n_generations=100, max_weight=max(max_weight, 1.0 / len(symbols))),
     )
     chosen = select(
         front.objectives, front.weights,
@@ -263,17 +280,3 @@ def _clean(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return None if math.isnan(as_float) else round(as_float, 6)
-
-
-def _features_for(symbol: str):
-    """Assemble the recent feature window a forecaster needs for one symbol."""
-    from datetime import date, timedelta
-
-    from data.ingestion import bars_to_frame, fetch_ohlcv
-    from features.feature_store import build_feature_table
-    from features.technical import compute_universe_indicators
-
-    end = date.today()
-    start = end - timedelta(days=365)
-    bars = {symbol: bars_to_frame(fetch_ohlcv(symbol, _infer_asset_class(symbol), start, end))}
-    return build_feature_table(bars, compute_universe_indicators(bars))

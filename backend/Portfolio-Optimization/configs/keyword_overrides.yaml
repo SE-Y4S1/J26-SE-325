@@ -1,0 +1,13 @@
+# Version-controlled corrections to generated keyword profiles (news/keywords.py).
+#
+# Any list given here REPLACES that list in the stored profile, and the profile is marked
+# `reviewed`. Corrections made on the keyword review screen are stored under
+# artifacts/keywords/ instead; anything committed here is applied on top of those.
+#
+# Example:
+#
+# COMB.N0000:
+#   company: [Commercial Bank of Ceylon, ComBank, Commercial Bank PLC]
+#   exclude: [hair comb, honeycomb]
+#   sector: banks
+{}

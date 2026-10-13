@@ -158,7 +158,10 @@ def frame_to_bars(frame: pd.DataFrame) -> list[MarketBar]:
     """Validate a normalized OHLCV frame into MarketBar models."""
     if frame.empty:
         return []
-    return [MarketBar(**row) for row in frame.to_dict(orient="records")]
+    # NaN -> None: pydantic rejects NaN against `gt=0`, and a missing open (CSE) is absent
+    # data rather than an invalid bar.
+    records = frame.astype(object).where(frame.notna(), None).to_dict(orient="records")
+    return [MarketBar(**row) for row in records]
 
 
 def bars_to_frame(bars: list[MarketBar]) -> pd.DataFrame:

@@ -27,6 +27,7 @@ from service.contracts import (
     WithdrawalRequest,
     WithdrawalResponse,
 )
+from data.http import UpstreamError
 from service.auth import CallerIdentity, require_user
 from service.events import publish_decision
 
@@ -79,6 +80,11 @@ def _install_metrics(application: FastAPI) -> None:
 _install_metrics(app)
 
 
+from service.market import router as market_router  # noqa: E402 - after app construction
+
+app.include_router(market_router)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -98,21 +104,81 @@ def _model_version() -> str:
         return "unregistered"
 
 
-def _to_portfolio_state(holdings: list[Holding]) -> dict[str, dict[str, float]]:
-    """Contract models -> the plain dict shape the optimizers consume."""
+# Used only for holdings with no prepared metrics (untracked, or preparation pending).
+DEFAULT_DAILY_VOLATILITY = 0.0126
+DEFAULT_VOLATILITY_PCT = 0.5
+
+
+def _build_portfolio(
+    holdings: list[Holding], *, deadline_days: int = 1, base_currency: str | None = None,
+) -> tuple[dict[str, dict[str, float]], dict[str, dict], dict]:
+    """Contract models -> (optimizer state, per-holding market context, currency block).
+
+    Request path: reads the active set's SQLite snapshot only, never a model or an exchange
+    -- except an FX rate for a currency not seen in the last hour (data/fx.py caches them).
+
+    * Every amount is converted into the base currency, so a CSE holding in LKR and a US
+      holding in USD are planned against one LKR target. The conversion spread becomes the
+      holding's fx_cost_pct, which the GA charges on proceeds.
+    * Volatility, forecast drift/spread, news sentiment and attention come from the prepared
+      snapshot when the symbol has one; a symbol not yet prepared falls back to the old
+      constants and no signals (its market_context says `untracked` or `preparing`).
+    """
+    from data import active_set
+    from data.fx import BASE_CURRENCY, conversion_spread, get_rate
+    from optimization.signals import holding_signals, market_context
+
+    from data.instruments import native_currency
+
+    base = (base_currency or BASE_CURRENCY).strip().upper()
+    # Legacy single-currency request (no base named, no holding currency): every amount is
+    # already in one currency and nothing is converted -- exactly the old behaviour.
+    legacy = base_currency is None and all(h.currency is None for h in holdings)
+    active_set.touch([holding.symbol for holding in holdings])
+
     state: dict[str, dict[str, float]] = {}
+    contexts: dict[str, dict] = {}
+    rates: dict[str, dict] = {}
     for holding in holdings:
-        value = holding.quantity * holding.current_price
+        if legacy:
+            currency = base
+        else:
+            # Stored portfolios carry no currency: take the tracked instrument's, else route
+            # the symbol offline (CSE -> LKR, Binance -> quote asset, Yahoo -> suffix).
+            tracked = active_set.get_instrument(holding.symbol)
+            currency = (holding.currency or (tracked.currency if tracked else None)
+                        or native_currency(holding.symbol)).strip().upper()
+        rate = get_rate(currency, base)
+        spread = conversion_spread(currency, base)
+        if currency != base:
+            rates[currency] = {"rate": rate.rate, "as_of": rate.as_of.isoformat(), "source": rate.source,
+                               "spread": spread}
+        price = holding.current_price * rate.rate
+        metrics = active_set.metrics_for(holding.symbol) or {}
+        snapshot = active_set.snapshot_for(holding.symbol)
+        signals = holding_signals(snapshot, deadline_days)
         state[holding.symbol] = {
-            "value": value,
-            "price": holding.current_price,
+            "value": holding.quantity * price,
+            "price": price,
             "quantity": holding.quantity,
-            "adv_usd": holding.avg_daily_volume,
-            "daily_volatility": 0.0126,
-            "volatility_pct": 0.5,
-            "cost_basis": holding.cost_basis if holding.cost_basis is not None else holding.current_price,
+            "adv_usd": holding.avg_daily_volume * rate.rate,
+            "daily_volatility": float(metrics.get("daily_volatility", DEFAULT_DAILY_VOLATILITY)),
+            "volatility_pct": float(metrics.get("volatility_pct", DEFAULT_VOLATILITY_PCT)),
+            "cost_basis": (holding.cost_basis if holding.cost_basis is not None else holding.current_price) * rate.rate,
+            "fx_cost_pct": spread,
+            **signals,
         }
-    return state
+        if "drift_daily" in signals:
+            state[holding.symbol]["expected_return"] = signals["drift_daily"]
+        context = market_context(snapshot, signals, deadline_days)
+        context["currency"] = currency
+        contexts[holding.symbol] = context
+    return state, contexts, {"base": base, "rates": rates}
+
+
+def _to_portfolio_state(holdings: list[Holding], **kwargs: object) -> dict[str, dict[str, float]]:
+    """The optimizer state alone (see _build_portfolio)."""
+    return _build_portfolio(holdings, **kwargs)[0]  # type: ignore[arg-type]
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -141,32 +207,48 @@ def forecast(
     request: ForecastRequest,
     caller: CallerIdentity | None = Depends(require_user),
 ) -> ForecastResponse:
-    """Per-symbol quantile forecast from the active hybrid model."""
-    from service.deps import get_active_forecaster
+    """Per-symbol quantile forecast from the active hybrid model (TimesFM + LSTM head).
 
-    forecaster = get_active_forecaster()
-    if forecaster is None:
+    Strictly the model: when no trained head (or its base) can run for this horizon the
+    answer is 503 with the reason, never the empirical band the analysis pipeline falls back
+    to -- that one is labelled as such on /analysis/forecast/{symbol}.
+    """
+    from service.deps import forecaster_unavailable_reason, get_active_forecaster
+
+    service = get_active_forecaster()
+    if service is None:
         raise HTTPException(
             status_code=503,
-            detail="No trained forecaster is registered. Run Phase 3/4 training first.",
+            detail="No trained forecaster is registered or runnable here. " + forecaster_unavailable_reason(),
         )
 
-    from agent.tools import get_forecast as forecast_tool
+    from data import active_set
+    from data.history import get_history
+    from data.http import UpstreamError
+    from data.instruments import resolve
 
     forecasts: list[SymbolForecast] = []
+    versions: set[str] = set()
+    active_set.touch(request.symbols)
     for symbol in request.symbols:
-        result = forecast_tool(symbol, request.horizon)
-        if "error" in result:
-            raise HTTPException(status_code=422, detail=f"{symbol}: {result['error']}")
-        forecasts.append(
-            SymbolForecast(
-                symbol=symbol, horizon=request.horizon,
-                p10=result["p10"], p50=result["p50"], p90=result["p90"],
-            )
-        )
+        try:
+            instrument = active_set.get_instrument(symbol.upper()) or resolve(symbol)
+            bars = get_history(instrument).bars
+        except LookupError as exc:
+            raise HTTPException(status_code=422, detail=f"{symbol}: {exc}") from None
+        except UpstreamError as exc:
+            raise HTTPException(status_code=503, detail=f"{symbol}: {exc}") from None
+        result = service.forecast(instrument.symbol, bars, request.horizon)
+        if result["method"] != "hybrid":
+            raise HTTPException(status_code=503, detail=f"{symbol}: {result.get('reason') or 'model unavailable'}")
+        versions.add(result["model_version"])
+        forecasts.append(SymbolForecast(symbol=symbol, horizon=request.horizon,
+                                        p10=result["p10"], p50=result["p50"], p90=result["p90"]))
 
     return ForecastResponse(
-        forecasts=forecasts, model_version=_model_version(), generated_at=_now()
+        forecasts=forecasts,
+        model_version=versions.pop() if len(versions) == 1 else _model_version(),
+        generated_at=_now(),
     )
 
 
@@ -181,10 +263,15 @@ def optimize_portfolio(
     if not request.holdings:
         raise HTTPException(status_code=422, detail="holdings must not be empty")
 
+    try:
+        state = _to_portfolio_state(request.holdings, base_currency=request.base_currency)
+    except UpstreamError as exc:
+        raise HTTPException(status_code=503, detail=f"FX rate unavailable: {exc}") from None
     result = run_moead_rebalance(
-        _to_portfolio_state(request.holdings),
+        state,
         risk_preference=request.risk_preference,
         selection_rule=request.selection_rule,
+        max_weight=request.max_weight,
     )
     if "error" in result:
         raise HTTPException(status_code=422, detail=result["error"])
@@ -226,30 +313,47 @@ def withdraw(
     if not request.holdings:
         raise HTTPException(status_code=422, detail="holdings must not be empty")
 
-    portfolio_state = _to_portfolio_state(request.holdings)
+    try:
+        portfolio_state, market_context, currency = _build_portfolio(
+            request.holdings, deadline_days=request.deadline_days, base_currency=request.base_currency)
+    except UpstreamError as exc:
+        raise HTTPException(status_code=503, detail=f"FX rate unavailable: {exc}") from None
     total_value = sum(h["value"] for h in portfolio_state.values())
     if request.target_amount > total_value:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"target_amount {request.target_amount:,.2f} exceeds total portfolio value "
-                f"{total_value:,.2f}"
+                f"{total_value:,.2f} {currency['base']}"
             ),
         )
 
-    result = run_fuzzy_ga_withdrawal(
-        urgency=request.urgency,
-        risk_tolerance=request.risk_tolerance,
-        liquidity_target=request.target_amount,
-        portfolio_state=portfolio_state,
-        deadline_days=request.deadline_days,
-    )
-    if "error" in result:
-        raise HTTPException(status_code=422, detail=result["error"])
+    inputs = {"urgency": request.urgency, "risk_tolerance": request.risk_tolerance,
+              "liquidity_target": request.target_amount, "deadline_days": request.deadline_days}
 
+    # Laya Stage 2: per-holding action and portfolio urgency/risk, folded into the GA inputs
+    # when confident. Without Laya (or below threshold) nothing changes; the record says why.
+    from data import active_set
+    from decision.engine import apply as apply_decisions
+
+    snapshots = {symbol: active_set.snapshot_for(symbol) for symbol in portfolio_state}
+    portfolio_state, inputs, decisions, decision_meta = apply_decisions(portfolio_state, snapshots, inputs)
+    for symbol, record in decisions.items():
+        market_context.setdefault(symbol, {})["decision"] = record
+
+    result: dict | None = None
     agent_trace: list[dict] = []
     if request.use_agent:
-        agent_trace = _run_agent_trace(request, portfolio_state, result)
+        # The agent chooses the optimizer inputs AND its tool call is the plan returned, so
+        # the trace shown is exactly the reasoning behind these numbers (previously the
+        # trace came from a second, separate GA run with different inputs).
+        result, agent_trace, agent_inputs = _run_agent(request, portfolio_state)
+        if result is not None:
+            inputs.update(agent_inputs)
+    if result is None:
+        result = run_fuzzy_ga_withdrawal(portfolio_state=portfolio_state, **inputs)
+    if "error" in result:
+        raise HTTPException(status_code=422, detail=result["error"])
 
     response = WithdrawalResponse(
         assets_to_sell=[AssetSale(**sale) for sale in result["assets_to_sell"]],
@@ -265,6 +369,12 @@ def withdraw(
         fuzzy_rule_trace=result["fuzzy_rule_trace"],
         agent_reasoning_trace=agent_trace,
         generated_at=_now(),
+        market_context=market_context,
+        currency=currency,
+        cost_breakdown=result.get("cost_breakdown"),
+        baseline_comparison=_baseline_comparison(portfolio_state, result, inputs),
+        effective_inputs={**{k: v for k, v in inputs.items() if k != "liquidity_target"},
+                          "decision": decision_meta},
     )
 
     publish_decision("withdraw", request.model_dump(mode="json"),
@@ -272,12 +382,55 @@ def withdraw(
     return response
 
 
-def _run_agent_trace(
-    request: WithdrawalRequest,
-    portfolio_state: dict[str, dict[str, float]],
-    plan: dict,
-) -> list[dict]:
-    """Produce the agent's internal reasoning trace for a withdrawal.
+def _plan_summary(method: str, plan: dict) -> dict:
+    return {
+        "method": method,
+        "feasible": plan["feasible"],
+        "raised_amount": round(plan["raised_amount"], 2),
+        "expected_realized_loss": round(plan["expected_realized_loss"], 2),
+        "expected_slippage_pct": round(plan["expected_slippage_pct"], 6),
+        "crystallized_loss": round((plan.get("cost_breakdown") or {}).get("crystallized_loss", 0.0), 2),
+        "days_required": plan["days_required"],
+    }
+
+
+def _baseline_comparison(portfolio_state: dict, plan: dict, inputs: dict) -> list[dict]:
+    """The GA plan beside the three naive baselines, costed by the same simulator with the
+    same risk aversion -- so any difference is the schedule, not the accounting."""
+    from agent.tools import plan_to_dict
+    from optimization.ga_withdrawal import risk_aversion_for
+    from optimization.naive_liquidation import BASELINES
+
+    rows = [_plan_summary("fuzzy_ga", plan)]
+    for name, baseline in BASELINES.items():
+        try:
+            costed = baseline(portfolio_state, inputs["liquidity_target"], deadline_days=inputs["deadline_days"],
+                              timing_risk_aversion=risk_aversion_for(inputs["risk_tolerance"]))
+        except Exception as exc:  # noqa: BLE001 - a comparison row must not sink the plan
+            logger.warning("baseline %s failed: %s", name, exc)
+            continue
+        rows.append(_plan_summary(name, plan_to_dict(costed)))
+    return rows
+
+
+def _run_agent(request: WithdrawalRequest, portfolio_state: dict[str, dict[str, float]]
+               ) -> tuple[dict | None, list[dict], dict]:
+    """Run the agent; return (its grounded plan, trace, the inputs it chose) or (None, [], {})."""
+    from agent.tool_schema import GROUNDING_TOOL_NAME
+
+    transcript = _agent_transcript(request, portfolio_state)
+    if transcript is None:
+        return None, [], {}
+    for step in transcript.steps:
+        if step.tool_name == GROUNDING_TOOL_NAME and step.observation and "error" not in step.observation:
+            arguments = step.tool_arguments or {}
+            chosen = {k: arguments[k] for k in ("urgency", "risk_tolerance", "deadline_days") if k in arguments}
+            return step.observation, _trace_rows(transcript), chosen
+    return None, _trace_rows(transcript), {}
+
+
+def _agent_transcript(request: WithdrawalRequest, portfolio_state: dict[str, dict[str, float]]):  # noqa: ANN202
+    """The agent's episode for a withdrawal, or None when it fails or is not grounded.
 
     Uses the deterministic scripted policy, NOT the Ollama reference agent: the reference
     agent is scaffolding for validating the tool interface and must never sit in a request
@@ -294,16 +447,19 @@ def _run_agent_trace(
                 stress_scenario="live", market_regime="live",
             )
         )
-    except Exception as exc:  # noqa: BLE001 - the trace is auxiliary, the plan is not
-        logger.warning("agent trace failed: %s", exc)
-        return []
+    except Exception as exc:  # noqa: BLE001 - the agent is auxiliary; the direct GA still runs
+        logger.warning("agent failed: %s", exc)
+        return None
 
     if not transcript.grounded:
-        # A non-grounded trace must never be attached -- it would be exactly the fabricated
+        # A non-grounded episode must never be used -- it would be exactly the fabricated
         # reasoning the constraint exists to prevent.
         logger.error("agent trace was not grounded: %s", transcript.grounding_error)
-        return []
+        return None
+    return transcript
 
+
+def _trace_rows(transcript) -> list[dict]:  # noqa: ANN001
     return [
         {
             "step": step.step_index,

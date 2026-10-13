@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # auto|finbert|ollama. "auto" prefers FinBERT when its weights are already cached and
     # falls back to the local Ollama model, so no code path ever starts a large download.
     sentiment_backend: str = "auto"
+    # Platform base currency. Holdings keep their native currency; totals, withdrawal
+    # targets and plans are expressed in this one. See data/fx.py.
+    base_currency: str = "LKR"
     universe_path: Path = ROOT / "configs" / "universe.yaml"
     resolved_universe_path: Path = ROOT / "configs" / "resolved_universe.yaml"
 
@@ -50,7 +53,7 @@ _model_cache: dict[str, object] = {}
 
 
 def get_active_forecaster():
-    """Load the active hybrid model once and reuse it across requests.
+    """The forecast service when at least one trained head can run here, else None.
 
     Returns None rather than raising when nothing is trained yet: /forecast should report
     "no model registered" as a clean 503, and /portfolio/withdraw must keep working
@@ -60,9 +63,10 @@ def get_active_forecaster():
         return _model_cache["forecaster"]
 
     try:
-        from forecasting.base import get_forecaster
+        from forecasting.serving import get_service
 
-        forecaster = get_forecaster("hybrid")
+        service = get_service()
+        forecaster = service if service.available() else None
     except Exception as exc:  # noqa: BLE001 - "not trained yet" is a normal early state
         logger.info("no active forecaster available: %s", exc)
         forecaster = None
@@ -71,7 +75,22 @@ def get_active_forecaster():
     return forecaster
 
 
+def forecaster_unavailable_reason() -> str:
+    """Why no head can serve, per horizon, for the 503 detail."""
+    try:
+        from forecasting.serving import FORECAST_HORIZONS, get_service
+
+        service = get_service()
+        reasons = [f"h={h}: {service.reason(h)}" for h in FORECAST_HORIZONS if service.head(h) is None]
+        return "; ".join(reasons)
+    except Exception as exc:  # noqa: BLE001
+        return str(exc)
+
+
 def reset_caches() -> None:
     """Clear cached settings and models. Testing only."""
     get_settings.cache_clear()
     _model_cache.clear()
+    from forecasting.serving import reset
+
+    reset()

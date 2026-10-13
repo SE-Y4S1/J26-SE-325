@@ -1,0 +1,112 @@
+{
+ "reqCompanyAnnouncement": [
+  {
+   "id": 32205,
+   "createdDate": 1786622638000,
+   "dateOfAnnouncement": "13 Aug 2026",
+   "announcementCategory": "DEALINGS BY DIRECTORS",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 38463
+  },
+  {
+   "id": 31637,
+   "createdDate": 1782816663000,
+   "dateOfAnnouncement": "30 Jun 2026",
+   "announcementCategory": "CORPORATE DISCLOSURE",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 37747
+  },
+  {
+   "id": 31632,
+   "createdDate": 1782815953000,
+   "dateOfAnnouncement": "30 Jun 2026",
+   "announcementCategory": "RESIGNATION OF DIRECTORS",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 37746
+  },
+  {
+   "id": 31606,
+   "createdDate": 1782801386000,
+   "dateOfAnnouncement": "26 Jun 2026",
+   "announcementCategory": "DEALINGS BY DIRECTORS",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 37709
+  },
+  {
+   "id": 31562,
+   "createdDate": 1782468999000,
+   "dateOfAnnouncement": "26 Jun 2026",
+   "announcementCategory": "ANNUAL GENERAL MEETING - APPROVED",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 37689
+  },
+  {
+   "id": 31074,
+   "createdDate": 1779807454000,
+   "dateOfAnnouncement": "26 May 2026",
+   "announcementCategory": "CIRCULAR TO SHAREHOLDERS",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 37126
+  },
+  {
+   "id": 31072,
+   "createdDate": 1779807061000,
+   "dateOfAnnouncement": "26 May 2026",
+   "announcementCategory": "ANNUAL GENERAL MEETING - INITIAL",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 37125
+  },
+  {
+   "id": 31066,
+   "createdDate": 1779793556000,
+   "dateOfAnnouncement": "26 May 2026",
+   "announcementCategory": "RESIGNATION OF DIRECTORS",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 37124
+  },
+  {
+   "id": 31062,
+   "createdDate": 1779792720000,
+   "dateOfAnnouncement": "26 May 2026",
+   "announcementCategory": "CASH DIVIDEND",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 37122
+  },
+  {
+   "id": 30507,
+   "createdDate": 1774970171000,
+   "dateOfAnnouncement": "31 Mar 2026",
+   "announcementCategory": "CORPORATE DISCLOSURE",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 36461
+  },
+  {
+   "id": 30251,
+   "createdDate": 1773315729000,
+   "dateOfAnnouncement": "12 Mar 2026",
+   "announcementCategory": "CORPORATE DISCLOSURE",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 36161
+  },
+  {
+   "id": 29699,
+   "createdDate": 1769594068000,
+   "dateOfAnnouncement": "28 Jan 2026",
+   "announcementCategory": "CASH DIVIDEND",
+   "company": "JOHN KEELLS HOLDINGS PLC",
+   "remarks": null,
+   "announcementId": 35485
+  }
+ ]
+}

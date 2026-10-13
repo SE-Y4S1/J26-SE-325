@@ -1,4 +1,4 @@
-"""The JSON contract. FROZEN once Phase 6 lands.
+"""The JSON contract. FROZEN once Phase 6 lands; later changes are ADDITIVE and optional only.
 
 A separately fine-tuned Llama (Colab), Component 3 (blockchain provenance) and Component 4
 (explanation layer) all bind to these field names. Renaming one after the fine-tuning run
@@ -33,6 +33,9 @@ class Holding(BaseModel):
     current_price: float = Field(gt=0)
     avg_daily_volume: float = Field(ge=0)
     cost_basis: float | None = None
+    # Currency of current_price, avg_daily_volume and cost_basis (LKR for CSE, USD for Yahoo,
+    # USDT for Binance). None = already in the request's base currency (the old behaviour).
+    currency: str | None = None
 
 
 class ForecastRequest(BaseModel):
@@ -62,6 +65,7 @@ class PortfolioRequest(BaseModel):
     selection_rule: str = Field(default="knee")
     max_weight: float = Field(default=0.25, gt=0.0, le=1.0)
     allow_shorting: bool = False
+    base_currency: str | None = None    # None = the service's BASE_CURRENCY
 
 
 class PortfolioResponse(BaseModel):
@@ -85,6 +89,7 @@ class WithdrawalRequest(BaseModel):
     risk_tolerance: float = Field(default=0.5, ge=0.0, le=1.0)
     deadline_days: int = Field(default=1, ge=1, le=30)
     use_agent: bool = False     # route through the Phase 5c agent instead of calling the GA directly
+    base_currency: str | None = None    # target_amount's currency; None = the service's BASE_CURRENCY
 
 
 class AssetSale(BaseModel):
@@ -119,6 +124,19 @@ class WithdrawalResponse(BaseModel):
     agent_reasoning_trace: list[dict] = Field(default_factory=list)
 
     generated_at: datetime
+
+    # Additive (market-data phases). Absent fields keep older clients working unchanged.
+    # Per holding: forecast band, sentiment tiers, technical/fundamental summary, data age,
+    # and the numeric signals the planner actually used.
+    market_context: dict[str, dict] = Field(default_factory=dict)
+    # {"base": "LKR", "rates": {"USD": {"rate": 300.1, "as_of": ..., "spread": 0.0075}}}
+    currency: dict | None = None
+    # slippage / timing / drift / fx (sum = expected_realized_loss) and realized P&L.
+    cost_breakdown: dict | None = None
+    # The same request costed by the naive baselines through the same simulator (RQ3).
+    baseline_comparison: list[dict] = Field(default_factory=list)
+    # The inputs the plan was produced with (the agent may adjust urgency/risk tolerance).
+    effective_inputs: dict | None = None
 
 
 class HealthResponse(BaseModel):

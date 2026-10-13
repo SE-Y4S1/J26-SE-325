@@ -31,9 +31,24 @@ most-liquid-first ignores the deadline.
 
 FITNESS (minimize)
 ------------------
-    realized_loss + slippage + timing_risk
+    slippage + timing_risk + expected_drift + fx_conversion
+  + realized_loss_weight x crystallized_loss   (selling below cost basis)
   + shortfall_penalty            (hard constraint: raise $X within N days)
   + priority_violation_penalty   (deviation from the fuzzy sell ordering)
+
+FORECAST- AND MARKET-AWARE TERMS (all optional per holding; neutral when absent)
+  drift_daily            expected daily log-drift from the forecaster. A slice sold on day d
+                         forgoes ~drift x (deadline - d) of forecast return: selling a holding
+                         forecast to rise costs that rise, selling one forecast to fall avoids
+                         the fall. So falling names go first and rising ones are kept.
+  forecast_sigma_daily   forecast-implied daily volatility (from the p10-p90 band). Replaces
+                         the historical sigma in the timing-risk term when present, so an
+                         asset the model is unsure about carries more risk per day held.
+  fx_cost_pct            conversion spread paid to bring proceeds into the base currency.
+                         Selling a USD asset to raise LKR pays it; an LKR holding does not.
+  cost_basis             per-unit cost in the base currency. Proceeds below it crystallise a
+                         loss, which is weighted into the fitness (and reported), so the GA
+                         prefers raising cash from winners when the costs are otherwise close.
 
 The fuzzy layer enters twice -- seeding the initial population AND penalizing deviation --
 so the GA cannot quietly ignore it and converge to a purely cost-driven schedule. The
@@ -67,6 +82,12 @@ logger = logging.getLogger(__name__)
 TIMING_RISK_AVERSION = 1.0
 
 
+def risk_aversion_for(risk_tolerance: float) -> float:
+    """Timing-risk aversion from the request's risk tolerance in [0, 1]: 1.5 at 0 (sell
+    sooner, accept more impact), 1.0 at the neutral 0.5, 0.5 at 1 (wait for cheaper fills)."""
+    return 1.5 - min(max(float(risk_tolerance), 0.0), 1.0)
+
+
 @dataclass
 class GAConfig:
     population_size: int = 120
@@ -76,15 +97,25 @@ class GAConfig:
     tournament_size: int = 3
     seed: int = 42                       # fixed for reproducible dissertation results
     elitism: int = 2
-    # Penalty weights. Shortfall dominates by orders of magnitude: failing to raise the cash
-    # is a constraint violation, not a trade-off to be priced against slippage.
-    shortfall_penalty_weight: float = 1e6
-    priority_penalty_weight: float = 1e2
+    # Penalty weights, in units of the TARGET AMOUNT so they scale with the money the way
+    # the costs do. (They were absolute -- 1e6 x shortfall_fraction^2 -- which at LKR amounts,
+    # ~300x the USD figures, let execution cost outweigh the shortfall: the GA "chose" to
+    # under-raise, and feasible plans fell to 6% of realistic scenarios.)
+    # Shortfall dominates: missing 0.1% of the target costs ~1% of the target, far above any
+    # execution cost, because failing to raise the cash is a constraint violation.
+    shortfall_penalty_weight: float = 10.0
+    # A fully inverted order vs the fuzzy priorities costs ~7 bps of the target -- the same
+    # weight the absolute 1e2 carried on the 150k reference withdrawal it was tuned on.
+    priority_penalty_weight: float = 7e-4
     # Fraction of the initial population seeded from the fuzzy ordering; the rest is random
     # so the GA can still discover schedules the fuzzy rules would not have proposed.
     fuzzy_seed_fraction: float = 0.3
     # Stop early once the best fitness has not improved for this many generations.
     stagnation_patience: int = 30
+    # Weight on crystallised losses (below cost basis) relative to execution costs. Below 1:
+    # a realised loss is an accounting/tax event, not cash lost to the market, so it should
+    # steer ties rather than dominate execution quality.
+    realized_loss_weight: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -119,6 +150,14 @@ class WithdrawalPlan:
     generations_run: int
     method: str = "fuzzy_ga"
     fuzzy_rule_trace: tuple[dict[str, object], ...] = field(default=())
+    # Cost breakdown in the base currency. expected_realized_loss is the sum of the first
+    # four; the P&L pair is reported beside it, not inside it.
+    slippage_cost: float = 0.0
+    timing_cost: float = 0.0
+    drift_cost: float = 0.0
+    fx_cost: float = 0.0
+    realized_pnl: float = 0.0          # proceeds minus cost basis of what was sold
+    crystallized_loss: float = 0.0     # the losing lots' part of that, as a positive number
 
     @property
     def shortfall(self) -> float:
@@ -136,6 +175,7 @@ def simulate_schedule(
     target_amount: float,
     deadline_days: int,
     participation_cap: float,
+    timing_risk_aversion: float = TIMING_RISK_AVERSION,
 ) -> WithdrawalPlan:
     """Walk a chromosome forward day by day, applying the ADV participation cap.
 
@@ -146,8 +186,10 @@ def simulate_schedule(
     order, fractions = chromosome
     symbols = list(holdings.keys())
 
+    # `max_sell_fraction` caps a holding the decision layer chose to keep (Laya `exclude`).
     remaining_notional = {
-        symbols[i]: float(holdings[symbols[i]].get("value", 0.0)) * float(np.clip(fractions[i], 0.0, 1.0))
+        symbols[i]: float(holdings[symbols[i]].get("value", 0.0))
+        * float(np.clip(fractions[i], 0.0, float(holdings[symbols[i]].get("max_sell_fraction", 1.0))))
         for i in range(len(symbols))
     }
 
@@ -155,6 +197,10 @@ def simulate_schedule(
     raised = 0.0
     total_slippage_cost = 0.0
     total_timing_cost = 0.0
+    total_drift_cost = 0.0
+    total_fx_cost = 0.0
+    realized_pnl = 0.0
+    crystallized_loss = 0.0
     days_used = 0
 
     for day in range(deadline_days):
@@ -190,8 +236,23 @@ def simulate_schedule(
             slippage_pct = IMPACT_COEFFICIENT * sigma * (participation ** IMPACT_EXPONENT)
             total_slippage_cost += slippage_pct * notional
 
-            # Timing risk: this slice sat unsold for `day` days before execution.
-            total_timing_cost += TIMING_RISK_AVERSION * sigma * math.sqrt(day) * notional
+            # Timing risk: this slice sat unsold for `day` days before execution. A forecast
+            # band, when there is one, says how uncertain the coming days are better than the
+            # historical sigma does.
+            timing_sigma = float(holding.get("forecast_sigma_daily") or sigma)
+            total_timing_cost += timing_risk_aversion * timing_sigma * math.sqrt(day) * notional
+            # Forecast return forgone on this slice from its sale day to the deadline: selling
+            # an asset forecast to rise gives that rise up (+cost); selling one forecast to
+            # fall avoids the fall (-cost). This is what makes "sell what is forecast to fall,
+            # keep what is forecast to rise" the cheaper schedule.
+            total_drift_cost += float(holding.get("drift_daily", 0.0)) * (deadline_days - day) * notional
+            total_fx_cost += float(holding.get("fx_cost_pct", 0.0)) * notional
+
+            basis = holding.get("cost_basis")
+            if basis is not None and price > 0:
+                pnl = (price * (1.0 - slippage_pct) - float(basis)) * (notional / price)
+                realized_pnl += pnl
+                crystallized_loss += max(0.0, -pnl)
 
             raised += notional
             remaining_notional[symbol] = outstanding - notional
@@ -234,12 +295,18 @@ def simulate_schedule(
         raised_amount=raised,
         target_amount=target_amount,
         expected_slippage_pct=slippage_pct_overall,
-        expected_realized_loss=total_slippage_cost + total_timing_cost,
+        expected_realized_loss=total_slippage_cost + total_timing_cost + total_drift_cost + total_fx_cost,
         residual_weights=residual_weights,
         days_required=days_used,
         feasible=raised >= target_amount - 1e-6,
         fitness=float("nan"),
         generations_run=0,
+        slippage_cost=total_slippage_cost,
+        timing_cost=total_timing_cost,
+        drift_cost=total_drift_cost,
+        fx_cost=total_fx_cost,
+        realized_pnl=realized_pnl,
+        crystallized_loss=crystallized_loss,
     )
 
 
@@ -252,6 +319,7 @@ def evaluate_fitness(
     deadline_days: int,
     participation_cap: float,
     config: GAConfig,
+    timing_risk_aversion: float = TIMING_RISK_AVERSION,
 ) -> tuple[float]:
     """Scalar fitness (DEAP expects a tuple). Lower is better."""
     plan = simulate_schedule(
@@ -260,15 +328,18 @@ def evaluate_fitness(
         target_amount=target_amount,
         deadline_days=deadline_days,
         participation_cap=participation_cap,
+        timing_risk_aversion=timing_risk_aversion,
     )
 
-    cost = plan.expected_realized_loss
+    cost = plan.expected_realized_loss + config.realized_loss_weight * plan.crystallized_loss
     shortfall = max(0.0, target_amount - plan.raised_amount)
-    # Squared so that near-misses are tolerable but large misses are decisively rejected.
-    penalty = config.shortfall_penalty_weight * (shortfall / max(target_amount, 1.0)) ** 2
+    # Linear term so even a tiny miss outweighs execution cost; quadratic so large misses are
+    # rejected decisively. Both scaled by the target.
+    fraction = shortfall / max(target_amount, 1.0)
+    penalty = config.shortfall_penalty_weight * (fraction + fraction ** 2) * target_amount
 
     priority_penalty = _priority_violation(chromosome[0], list(holdings.keys()), fuzzy_priorities)
-    penalty += config.priority_penalty_weight * priority_penalty
+    penalty += config.priority_penalty_weight * priority_penalty * target_amount
 
     return (float(cost + penalty),)
 
@@ -374,6 +445,7 @@ def optimize_withdrawal(
     config = config or GAConfig()
     symbols = list(holdings.keys())
     n = len(symbols)
+    aversion = risk_aversion_for(risk_tolerance)
 
     if n == 0:
         raise ValueError("cannot plan a withdrawal from an empty portfolio")
@@ -398,6 +470,7 @@ def optimize_withdrawal(
             deadline_days=deadline_days,
             participation_cap=participation_cap,
             config=config,
+            timing_risk_aversion=aversion,
         )[0]
 
     scores = [fitness_of(ind) for ind in population]
@@ -453,6 +526,7 @@ def optimize_withdrawal(
         target_amount=target_amount,
         deadline_days=deadline_days,
         participation_cap=participation_cap,
+        timing_risk_aversion=aversion,
     )
 
     if not plan.feasible:
@@ -475,4 +549,10 @@ def optimize_withdrawal(
         generations_run=generations_run,
         method="fuzzy_ga",
         fuzzy_rule_trace=trace,
+        slippage_cost=plan.slippage_cost,
+        timing_cost=plan.timing_cost,
+        drift_cost=plan.drift_cost,
+        fx_cost=plan.fx_cost,
+        realized_pnl=plan.realized_pnl,
+        crystallized_loss=plan.crystallized_loss,
     )

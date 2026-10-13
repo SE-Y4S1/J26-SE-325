@@ -72,6 +72,8 @@ class HybridForecaster:
         self.head: ResidualHead | None = None
         self.feature_cols: list[str] = []
         self.version = "untrained"
+        self.horizon: int | None = None
+        self.n_asset_classes = len(ASSET_CLASS_ORDER)
 
     def fit(
         self,
@@ -90,7 +92,7 @@ class HybridForecaster:
         RQ1 would report an improvement that evaporates in the backtest.
         """
         from features.feature_store import feature_columns
-        from forecasting.baseline_lstm import build_sequences, pinball_loss
+        from forecasting.baseline_lstm import pinball_loss
 
         torch.manual_seed(self.head_config.seed)
         np.random.seed(self.head_config.seed)
@@ -129,15 +131,10 @@ class HybridForecaster:
                 f"the final {horizon} rows of each symbol have no realised future yet."
             )
 
-        quantile_cols = [f"base_p{int(q * 100)}" for q in self.config.quantiles]
-
-        X, y, _ = build_sequences(merged, self.feature_cols, target_col, self.config.window)
+        X, base_matrix, asset_idx, y, _ = self._cut_sequences(features, base_forecasts, target_col,
+                                                              require_target=True)
         if len(X) < 10:
             raise ValueError(f"only {len(X)} sequences; need at least 10")
-
-        # Align the auxiliary inputs to the sequence windows build_sequences produced.
-        base_matrix, asset_idx = self._aligned_aux(merged, quantile_cols, target_col)
-        base_matrix, asset_idx = base_matrix[-len(X):], asset_idx[-len(X):]
 
         # THE TARGET IS THE RESIDUAL, not the return: what the base model got wrong.
         residual_target = y - base_matrix[:, self._median_col()]
@@ -164,6 +161,7 @@ class HybridForecaster:
                 optimizer.step()
 
         self.version = f"hybrid-{self.base.name}-h{horizon}"
+        self.horizon = horizon
         should_log = self.config.log_to_mlflow if log_to_mlflow is None else log_to_mlflow
         if should_log:
             self._log_run(horizon)
@@ -277,28 +275,47 @@ class HybridForecaster:
 
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-    def _aligned_aux(
-        self, merged: pd.DataFrame, quantile_cols: list[str], target_col: str
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Base-forecast matrix and asset-class indices, ordered to match build_sequences."""
-        base_rows: list[np.ndarray] = []
-        asset_rows: list[int] = []
+    def _cut_sequences(
+        self, features: pd.DataFrame, base_forecasts: pd.DataFrame, target_col: str, *, require_target: bool
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DatetimeIndex]:
+        """One training/inference example per base forecast: the `window` CONSECUTIVE
+        feature rows before the cut (from the full history), the base quantiles at the cut,
+        the asset class, and the target at the cut.
 
-        for _, group in merged.groupby("symbol", sort=False):
-            group = group.sort_values("timestamp")
-            base = group[quantile_cols].to_numpy(dtype=np.float32)
-            target = group[target_col].to_numpy(dtype=np.float32)
+        Windows are cut from the full feature table, not from the rows that happen to carry
+        a base forecast. A foundation base is walked forward with a stride, so its forecast
+        rows are not consecutive days; windowing over those rows would train the LSTM on
+        sequences with gaps of several sessions while serving reads consecutive sessions --
+        the same weights reading two different kinds of input.
+
+        Convention (shared with build_sequences and predict_latest): the window is rows
+        [cut - window, cut), the base forecast and target belong to the cut row itself.
+        """
+        quantile_cols = [f"base_p{int(q * 100)}" for q in self.config.quantiles]
+        xs, bases, assets, ys, stamps = [], [], [], [], []
+        forecasts = (base_forecasts.drop_duplicates(["symbol", "timestamp"], keep="last")
+                     .set_index(["symbol", "timestamp"]))
+        for symbol, group in features.groupby("symbol", sort=False):
+            group = group.sort_values("timestamp").reset_index(drop=True)
+            values = group[self.feature_cols].to_numpy(dtype=np.float32)
+            targets = group[target_col].to_numpy(dtype=np.float32) if target_col in group else                 np.full(len(group), np.nan, dtype=np.float32)
             asset = asset_class_index(group["asset_class"].iloc[0]) if "asset_class" in group else 0
-
-            for end in range(self.config.window, len(group)):
-                if np.isnan(target[end]):
+            for pos, stamp in enumerate(group["timestamp"]):
+                if pos < self.config.window or (symbol, stamp) not in forecasts.index:
                     continue
-                base_rows.append(base[end])
-                asset_rows.append(asset)
-
-        if not base_rows:
-            return np.empty((0, len(quantile_cols)), dtype=np.float32), np.empty(0, dtype=np.int64)
-        return np.stack(base_rows), np.array(asset_rows, dtype=np.int64)
+                if require_target and np.isnan(targets[pos]):
+                    continue
+                xs.append(values[pos - self.config.window : pos])
+                bases.append(forecasts.loc[(symbol, stamp), quantile_cols].to_numpy(dtype=np.float32))
+                assets.append(asset)
+                ys.append(targets[pos])
+                stamps.append(stamp)
+        if not xs:
+            empty = np.empty((0, len(quantile_cols)), dtype=np.float32)
+            return (np.empty((0, self.config.window, len(self.feature_cols)), dtype=np.float32), empty,
+                    np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float32), pd.DatetimeIndex([]))
+        return (np.stack(xs), np.stack(bases), np.array(assets, dtype=np.int64),
+                np.array(ys, dtype=np.float32), pd.DatetimeIndex(stamps))
 
     def predict_quantiles(
         self,
@@ -333,21 +350,13 @@ class HybridForecaster:
         if self.head is None:
             raise RuntimeError("call fit() before decompose()")
 
-        from forecasting.baseline_lstm import build_sequences
-
         base_forecasts = self._walk_forward_base(features, horizon=horizon)
-        merged = features.merge(base_forecasts, on=["symbol", "timestamp"], how="inner")
-        if merged.empty:
+        if base_forecasts.empty:
             raise RuntimeError("base model produced no overlapping forecasts")
-
-        target_col = "target_return"
-        if target_col not in merged.columns:
-            merged[target_col] = 0.0
-
-        quantile_cols = [f"base_p{int(q * 100)}" for q in self.config.quantiles]
-        X, _, stamps = build_sequences(merged, self.feature_cols, target_col, self.config.window)
-        base_matrix, asset_idx = self._aligned_aux(merged, quantile_cols, target_col)
-        base_matrix, asset_idx = base_matrix[-len(X):], asset_idx[-len(X):]
+        X, base_matrix, asset_idx, _, stamps = self._cut_sequences(
+            features, base_forecasts, "target_return", require_target=False)
+        if len(X) == 0:
+            raise RuntimeError("base model produced no overlapping forecasts")
 
         self.head.eval()
         with torch.no_grad():
@@ -383,3 +392,96 @@ class HybridForecaster:
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("MLflow logging failed (model is still trained): %s", exc)
+
+    # ----------------------------------------------------------------------------------
+    # Serving: one forecast from the latest window, and a portable checkpoint
+    # ----------------------------------------------------------------------------------
+
+    def predict_latest(self, features: pd.DataFrame, *, horizon: int) -> dict[str, object]:
+        """Forecast from the end of `features` (one symbol): base quantiles from ONE base call
+        on the full history, the head's correction from the last `window` feature rows.
+
+        decompose() walks the base forward over the whole history, which is what training
+        and RQ1 need and far too slow for a request. Returns base, residual and final so the
+        caller can show how much of the forecast came from the covariates.
+        """
+        if self.head is None:
+            raise RuntimeError("no trained head; load a checkpoint or call fit()")
+        group = features.sort_values("timestamp").reset_index(drop=True)
+        if len(group) <= self.config.window:
+            raise ValueError(f"need more than {self.config.window} feature rows, have {len(group)}")
+
+        base = self.base.predict_quantiles(group, horizon=horizon, quantiles=self.config.quantiles)
+        base_values = np.asarray(base.values[-1], dtype=np.float32)
+
+        missing = [c for c in self.feature_cols if c not in group.columns]
+        if missing:
+            # A column the head was trained on but this environment cannot build: zero is
+            # the value the enrichment block itself uses for "absent", so this matches training.
+            logger.warning("features missing at inference, zero-filled: %s", missing)
+            group = group.assign(**{c: 0.0 for c in missing})
+        # The cut is the last row; its window is the `window` rows before it (_cut_sequences).
+        window = group[self.feature_cols].iloc[-self.config.window - 1 : -1].to_numpy(dtype=np.float32)
+        asset = asset_class_index(group["asset_class"].iloc[-1]) if "asset_class" in group else 0
+        asset = asset if asset < self.n_asset_classes else 0
+
+        self.head.eval()
+        with torch.no_grad():
+            residual = self.head(
+                torch.tensor(np.nan_to_num(window)[None, ...]),
+                torch.tensor(np.nan_to_num(base_values)[None, ...]),
+                torch.tensor([asset], dtype=torch.long),
+            ).numpy()[0]
+        final = enforce_non_crossing((base_values + residual)[None, :])[0]
+        return {
+            "quantiles": self.config.quantiles,
+            "base": base_values.tolist(),
+            "residual": residual.tolist(),
+            "final": final.tolist(),
+            "as_of": pd.Timestamp(group["timestamp"].iloc[-1]),
+        }
+
+    def save(self, directory) -> None:  # noqa: ANN001 - str | Path
+        """Head weights + the metadata needed to rebuild it. The base is NOT saved: it is a
+        public foundation checkpoint (or a LoRA adapter saved by finetune_lora)."""
+        import json
+        from dataclasses import asdict
+        from pathlib import Path
+
+        if self.head is None:
+            raise RuntimeError("nothing to save; fit() first")
+        path = Path(directory)
+        path.mkdir(parents=True, exist_ok=True)
+        torch.save(self.head.state_dict(), path / "head.pt")
+        meta = {
+            "base_model": self.base.name,
+            "horizon": self.horizon,
+            "window": self.config.window,
+            "quantiles": list(self.config.quantiles),
+            "feature_cols": self.feature_cols,
+            "n_asset_classes": self.n_asset_classes,
+            "asset_class_order": list(ASSET_CLASS_ORDER[: self.n_asset_classes]),
+            "head_config": {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(self.head_config).items()},
+            "version": self.version,
+        }
+        (path / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
+
+    @classmethod
+    def load(cls, directory, base: Forecaster) -> "HybridForecaster":  # noqa: ANN001
+        import json
+        from pathlib import Path
+
+        path = Path(directory)
+        meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
+        head_config = ResidualHeadConfig(**{**meta["head_config"], "quantiles": tuple(meta["quantiles"])})
+        config = HybridConfig(base_model=meta["base_model"], head=head_config,
+                              quantiles=tuple(meta["quantiles"]), window=int(meta["window"]), log_to_mlflow=False)
+        model = cls(base, config)
+        model.feature_cols = list(meta["feature_cols"])
+        model.horizon = meta.get("horizon")
+        model.version = meta.get("version", "loaded")
+        model.n_asset_classes = int(meta["n_asset_classes"])
+        model.head = ResidualHead(len(model.feature_cols), model.n_asset_classes, head_config)
+        model.head.load_state_dict(torch.load(path / "head.pt", map_location="cpu", weights_only=True))
+        model.head.eval()
+        return model

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from optimization.ga_withdrawal import WithdrawalPlan, simulate_schedule
+from optimization.ga_withdrawal import TIMING_RISK_AVERSION, WithdrawalPlan, simulate_schedule
 
 
 def _plan_from_order(
@@ -26,6 +26,7 @@ def _plan_from_order(
     deadline_days: int,
     participation_cap: float,
     method: str,
+    timing_risk_aversion: float = TIMING_RISK_AVERSION,
 ) -> WithdrawalPlan:
     """Cost a fixed order/fraction pair through the shared simulator."""
     plan = simulate_schedule(
@@ -34,6 +35,7 @@ def _plan_from_order(
         target_amount=target_amount,
         deadline_days=deadline_days,
         participation_cap=participation_cap,
+        timing_risk_aversion=timing_risk_aversion,
     )
     return WithdrawalPlan(
         steps=plan.steps,
@@ -47,6 +49,12 @@ def _plan_from_order(
         fitness=float("nan"),      # baselines do not search, so there is no fitness
         generations_run=0,
         method=method,
+        slippage_cost=plan.slippage_cost,
+        timing_cost=plan.timing_cost,
+        drift_cost=plan.drift_cost,
+        fx_cost=plan.fx_cost,
+        realized_pnl=plan.realized_pnl,
+        crystallized_loss=plan.crystallized_loss,
     )
 
 
@@ -56,6 +64,7 @@ def pro_rata(
     *,
     deadline_days: int = 1,
     participation_cap: float = 0.10,
+    timing_risk_aversion: float = TIMING_RISK_AVERSION,
     **_: object,
 ) -> WithdrawalPlan:
     """Sell the same fraction of every holding.
@@ -73,7 +82,7 @@ def pro_rata(
         np.arange(len(symbols)),
         np.full(len(symbols), fraction),
         holdings, target_amount,
-        deadline_days=deadline_days, participation_cap=participation_cap,
+        deadline_days=deadline_days, participation_cap=participation_cap, timing_risk_aversion=timing_risk_aversion,
         method="pro_rata",
     )
 
@@ -84,6 +93,7 @@ def largest_position_first(
     *,
     deadline_days: int = 1,
     participation_cap: float = 0.10,
+    timing_risk_aversion: float = TIMING_RISK_AVERSION,
     **_: object,
 ) -> WithdrawalPlan:
     """Drain the biggest holdings first.
@@ -98,7 +108,7 @@ def largest_position_first(
     return _plan_from_order(
         order, np.ones(len(symbols)),
         holdings, target_amount,
-        deadline_days=deadline_days, participation_cap=participation_cap,
+        deadline_days=deadline_days, participation_cap=participation_cap, timing_risk_aversion=timing_risk_aversion,
         method="largest_first",
     )
 
@@ -109,6 +119,7 @@ def most_liquid_first(
     *,
     deadline_days: int = 1,
     participation_cap: float = 0.10,
+    timing_risk_aversion: float = TIMING_RISK_AVERSION,
     **_: object,
 ) -> WithdrawalPlan:
     """Sell the easiest-to-exit holdings first, ranked by ADV relative to position size.
@@ -132,7 +143,7 @@ def most_liquid_first(
     return _plan_from_order(
         order, np.ones(len(symbols)),
         holdings, target_amount,
-        deadline_days=deadline_days, participation_cap=participation_cap,
+        deadline_days=deadline_days, participation_cap=participation_cap, timing_risk_aversion=timing_risk_aversion,
         method="most_liquid_first",
     )
 

@@ -150,3 +150,135 @@ def compute_universe_indicators(
     if not frames:
         return pd.DataFrame(columns=["timestamp", "symbol", *INDICATOR_COLUMNS])
     return pd.concat(frames, ignore_index=True).sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------------------
+# Technical analysis snapshot (Phase 2c)
+# --------------------------------------------------------------------------------------
+# The indicator table above feeds the forecaster row by row. The snapshot below is the
+# analyst's view of ONE symbol today -- trend, momentum, volume confirmation, where price sits
+# against its range and against its market -- and is what the liquidation analysis (and the
+# Laya technical questions) read. It deliberately needs no opening price: CSE publishes none,
+# so nothing here may depend on one rather than fabricate it.
+
+SNAPSHOT_PARAMS = {"sma_short": 20, "sma_mid": 50, "sma_long": 200, "adx_length": 14,
+                   "range_sessions": 60, "high_52w_sessions": 252, "rs_sessions": 63,
+                   "obv_sessions": 20, "cross_lookback": 20}
+
+
+def _last(series: pd.Series | None) -> float | None:
+    if series is None or series.empty:
+        return None
+    value = series.iloc[-1]
+    return float(value) if pd.notna(value) else None
+
+
+def _ret(close: pd.Series, sessions: int) -> float | None:
+    if len(close) <= sessions:
+        return None
+    return float(close.iloc[-1] / close.iloc[-1 - sessions] - 1)
+
+
+def technical_snapshot(bars: pd.DataFrame, benchmark: pd.Series | None = None) -> dict:
+    """Trend, momentum, volume and range read-out for one symbol's daily bars.
+
+    `benchmark` is the market's daily close (ASPI for CSE, SPY for US, BTC for crypto),
+    indexed by date. Every field is None when there is not enough history for it.
+    """
+    import importlib.metadata  # noqa: F401 - pandas-ta-openbb reads it without importing it
+
+    import pandas_ta as ta
+
+    p = SNAPSHOT_PARAMS
+    if bars.empty:
+        return {"sessions": 0}
+    frame = bars.sort_values("timestamp").reset_index(drop=True)
+    close, high, low, volume = frame["close"], frame["high"], frame["low"], frame["volume"]
+    last = float(close.iloc[-1])
+
+    sma = {n: close.rolling(n).mean() for n in (p["sma_short"], p["sma_mid"], p["sma_long"])}
+    s20, s50, s200 = (_last(sma[p["sma_short"]]), _last(sma[p["sma_mid"]]), _last(sma[p["sma_long"]]))
+
+    if s50 is not None and s200 is not None:
+        trend = "bullish" if last > s50 > s200 else "bearish" if last < s50 < s200 else "neutral"
+    elif s20 is not None and s50 is not None:
+        trend = "bullish" if last > s20 > s50 else "bearish" if last < s20 < s50 else "neutral"
+    else:
+        trend = None
+
+    cross = None
+    if s200 is not None:
+        diff = (sma[p["sma_mid"]] - sma[p["sma_long"]]).dropna().tail(p["cross_lookback"] + 1)
+        signs = np.sign(diff.to_numpy())
+        if len(signs) > 1 and signs[0] != signs[-1] and signs[-1] != 0:
+            cross = "golden" if signs[-1] > 0 else "death"
+
+    indicators = compute_indicators(frame)
+
+    pct_b = None
+    if len(close) >= 20:
+        mid = close.rolling(20).mean().iloc[-1]
+        std = close.rolling(20).std(ddof=0).iloc[-1]
+        if std and np.isfinite(std):
+            pct_b = float((last - (mid - 2 * std)) / (4 * std))
+
+    adx = None
+    if len(close) > 2 * p["adx_length"]:
+        adx_frame = ta.adx(high, low, close, length=p["adx_length"])
+        if adx_frame is not None and not adx_frame.empty:
+            adx = _last(_column_by_prefix(adx_frame, "ADX_"))
+
+    obv_trend = None
+    if (volume > 0).any() and len(close) > p["obv_sessions"]:
+        obv = ta.obv(close, volume)
+        avg_volume = volume.tail(p["obv_sessions"]).mean()
+        if obv is not None and avg_volume > 0:
+            # OBV change over the window in units of average daily volume: +N means N days'
+            # worth of volume net-accumulated, so it is comparable across symbols.
+            obv_trend = float((obv.iloc[-1] - obv.iloc[-1 - p["obv_sessions"]]) / (avg_volume * p["obv_sessions"]))
+
+    window_52w = close.tail(p["high_52w_sessions"])
+    range_window = frame.tail(p["range_sessions"])
+    support, resistance = float(range_window["low"].min()), float(range_window["high"].max())
+
+    relative_strength = None
+    benchmark_return = None
+    own_return = _ret(close, p["rs_sessions"])
+    if benchmark is not None and not benchmark.empty and own_return is not None:
+        start_date = frame["timestamp"].iloc[-1 - p["rs_sessions"]]
+        end_date = frame["timestamp"].iloc[-1]
+        bench = benchmark.sort_index()
+        start_level = bench[bench.index <= start_date]
+        end_level = bench[bench.index <= end_date]
+        if not start_level.empty and not end_level.empty and start_level.index[-1] != end_level.index[-1]:
+            benchmark_return = float(end_level.iloc[-1] / start_level.iloc[-1] - 1)
+            relative_strength = own_return - benchmark_return
+
+    def r(value: float | None, digits: int = 4) -> float | None:
+        return round(value, digits) if value is not None and np.isfinite(value) else None
+
+    return {
+        "sessions": int(len(frame)),
+        "as_of": str(pd.Timestamp(frame["timestamp"].iloc[-1]).date()),
+        "close": r(last, 6),
+        "trend": trend,
+        "sma_20": r(s20, 6), "sma_50": r(s50, 6), "sma_200": r(s200, 6),
+        "price_vs_sma_50": r(last / s50 - 1) if s50 else None,
+        "price_vs_sma_200": r(last / s200 - 1) if s200 else None,
+        "ma_cross_recent": cross,
+        "rsi": r(_last(indicators["rsi"]), 2),
+        "macd_hist": r(_last(indicators["macd_hist"]), 6),
+        "mfi": r(_last(indicators["mfi"]), 2),
+        "atr_pct": r(_last(indicators["atr_pct"])),
+        "bollinger_pct_b": r(pct_b),
+        "adx": r(adx, 2),
+        "obv_trend": r(obv_trend),
+        "return_20d": r(_ret(close, 20)),
+        "return_63d": r(own_return),
+        "drawdown_52w": r(last / float(window_52w.max()) - 1),
+        "support": r(support, 6), "resistance": r(resistance, 6),
+        "dist_to_support": r(last / support - 1) if support else None,
+        "dist_to_resistance": r(resistance / last - 1) if last else None,
+        "benchmark_return_63d": r(benchmark_return),
+        "relative_strength_63d": r(relative_strength),
+    }

@@ -1,0 +1,62 @@
+[
+ {
+  "symbol": "ETHBTC",
+  "price": "0.03014000"
+ },
+ {
+  "symbol": "BTCUSDT",
+  "price": "82618.54000000"
+ },
+ {
+  "symbol": "ETHUSDT",
+  "price": "2490.38000000"
+ },
+ {
+  "symbol": "BNBUSDT",
+  "price": "743.95000000"
+ },
+ {
+  "symbol": "ADAUSDT",
+  "price": "0.24540000"
+ },
+ {
+  "symbol": "XRPUSDT",
+  "price": "1.40110000"
+ },
+ {
+  "symbol": "BTCUSDC",
+  "price": "82539.66000000"
+ },
+ {
+  "symbol": "LINKUSDT",
+  "price": "12.83400000"
+ },
+ {
+  "symbol": "DOGEUSDT",
+  "price": "0.08585000"
+ },
+ {
+  "symbol": "BTCTRY",
+  "price": "4064391.00000000"
+ },
+ {
+  "symbol": "BTCEUR",
+  "price": "73731.38000000"
+ },
+ {
+  "symbol": "SOLBTC",
+  "price": "0.00132260"
+ },
+ {
+  "symbol": "SOLUSDT",
+  "price": "109.32000000"
+ },
+ {
+  "symbol": "SOLETH",
+  "price": "0.04388000"
+ },
+ {
+  "symbol": "BTCFDUSD",
+  "price": "82794.77000000"
+ }
+]

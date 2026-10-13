@@ -276,8 +276,13 @@ def test_withdrawal_contract_field_names_are_frozen() -> None:
         "days_required", "feasible", "model_version", "fuzzy_rule_trace",
         "agent_reasoning_trace", "generated_at",
     }
+    # Additive, optional fields from the market-data phases. Consumers that bind to the
+    # frozen names above are unaffected; anything new must be listed here AND be optional.
+    additive = {"market_context", "currency", "cost_breakdown", "baseline_comparison", "effective_inputs"}
     actual = set(WithdrawalResponse.model_fields)
-    assert actual == expected, (
-        f"WithdrawalResponse contract changed. Added: {actual - expected}. "
+    assert actual == expected | additive, (
+        f"WithdrawalResponse contract changed. Added: {actual - expected - additive}. "
         f"Removed: {expected - actual}. This contract is frozen -- see service/contracts.py."
     )
+    for name in additive:
+        assert not WithdrawalResponse.model_fields[name].is_required(), f"{name} must stay optional"

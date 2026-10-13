@@ -1174,6 +1174,23 @@ wheels = [
 ]
 
 [[package]]
+name = "laya"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "safetensors" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/05/26/48881effdec3cd73ad4e919c38fbcee1ddb5efd732c5b65cbd8edda8e773/laya-0.4.1.tar.gz", hash = "sha256:3c56d346a2ca3835fd92d3f4bd7ec8cbe50ffe03dc5d53520dd2b72c9770dca0", size = 1073361, upload-time = "2026-10-08T17:29:22.678Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b8/f6/9e3f039d08319e153721210667548e2cac1679b56461c8b5e81acc93b4db/laya-0.4.1-py3-none-any.whl", hash = "sha256:5252730d8be604aecdc6c52adeb591e75d2b97ef3f52278cba9b37e403c784c7", size = 371890, upload-time = "2026-10-08T17:29:20.679Z" },
+]
+
+[[package]]
 name = "lxml"
 version = "6.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1743,6 +1760,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pymoo" },
+    { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "requests" },
@@ -1759,6 +1777,12 @@ dependencies = [
 [package.optional-dependencies]
 chronos = [
     { name = "chronos-forecasting" },
+]
+decision = [
+    { name = "laya" },
+]
+social = [
+    { name = "yt-dlp" },
 ]
 timesfm = [
     { name = "timesfm", extra = ["torch"] },
@@ -1783,6 +1807,7 @@ requires-dist = [
     { name = "confluent-kafka", specifier = ">=2.5" },
     { name = "deap", specifier = ">=1.4.1" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "laya", marker = "extra == 'decision'", specifier = ">=0.4.1" },
     { name = "mlflow", specifier = ">=2.16" },
     { name = "networkx", specifier = ">=3.0" },
     { name = "numpy", specifier = ">=2.1" },
@@ -1795,6 +1820,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.5" },
     { name = "pymoo", specifier = ">=0.6.1" },
+    { name = "pypdf", specifier = ">=6.20.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32" },
@@ -1806,8 +1832,9 @@ requires-dist = [
     { name = "transformers", specifier = ">=4.44,<6" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
     { name = "yfinance", specifier = ">=0.2.40" },
+    { name = "yt-dlp", marker = "extra == 'social'", specifier = ">=2025.1" },
 ]
-provides-extras = ["timesfm", "chronos"]
+provides-extras = ["timesfm", "chronos", "social", "decision"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2087,6 +2114,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc", size = 6851574, upload-time = "2026-01-21T03:57:59.36Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
+]
+
+[[package]]
+name = "pypdf"
+version = "6.20.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/7e/d08c72b29e89b1ad14acaae817685ca06bac93691bddfd4fac08a703e5b0/pypdf-6.20.0.tar.gz", hash = "sha256:72b1e897fef7f5bbed7f2a93881a4861d98dbf25ae39981c8a023583239edbda", size = 7072602, upload-time = "2026-10-09T10:49:39.165Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/18/42/a945f65cc61c739ec80f4112c4b78ed1791f25d33f45f19389c9c9e247e2/pypdf-6.20.0-py3-none-any.whl", hash = "sha256:f003fc2014814d264fe7dd3f9d435c158e23e1a85a2233f87a0a2d6d21c914ad", size = 401710, upload-time = "2026-10-09T10:49:36.882Z" },
 ]
 
 [[package]]
@@ -2949,6 +2985,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f5/ab/55578b5b7f0ccb4862dc0ee2b03defc09062fb51937e3c83a0bf61eafe02/yfinance-1.6.0.tar.gz", hash = "sha256:c32c45b42480d64981e89d65da3f480fd6910fe1972d7e78f1e2d91b45d9ee1b", size = 173489, upload-time = "2026-08-13T13:38:52.295Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9c/eb/7d0fefa48c2a6b1b192b08fc95af206e6e6d14359053670cb76b9ec1a817/yfinance-1.6.0-py3-none-any.whl", hash = "sha256:2ced6339a90e5721269a18d245757c7592163c897a7cd2b9a2dfd1d8fd30590e", size = 148022, upload-time = "2026-08-13T13:38:50.666Z" },
+]
+
+[[package]]
+name = "yt-dlp"
+version = "2026.8.19"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/e0/832fa4ca334b766a06933a196066edc3dba37cdb6f14cd98d59bcc69a4b4/yt_dlp-2026.8.19.tar.gz", hash = "sha256:9e213e48cea35c66b378e4447903f118f6392a5fa380a2b6d7070ec86f4e0af1", size = 3052025, upload-time = "2026-08-19T23:48:59.291Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/69/b2/8cd1613f56eed7ceb64fbd4df3f1c01246bfb098e6f398228bafda22b80b/yt_dlp-2026.8.19-py3-none-any.whl", hash = "sha256:1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf", size = 3185533, upload-time = "2026-08-19T23:48:56.925Z" },
 ]
 
 [[package]]

@@ -424,3 +424,51 @@ def test_ollama_malformed_reply_is_neutral_with_zero_confidence() -> None:
 
     assert polarity == 0.0
     assert confidence == 0.0
+
+
+def _ollama_replying(content: str):
+    from unittest.mock import MagicMock
+
+    def fake_client(**_):
+        client = MagicMock()
+        client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=content))]
+        )
+        return client
+
+    return fake_client
+
+
+def test_ollama_batch_scores_every_headline_in_one_call() -> None:
+    from features import sentiment as sent
+
+    reply = ('{"scores": [{"id": 1, "positive": 0.9, "negative": 0.05, "neutral": 0.05},'
+             ' {"id": 2, "positive": 0.1, "negative": 0.8, "neutral": 0.1}]}')
+    with patch("openai.OpenAI", side_effect=_ollama_replying(reply)):
+        results = sent._score_batch_with_ollama(["Great earnings", "Profit warning"], model="m", base_url="u")
+
+    # Same contract as the single-headline scorer.
+    assert results[0] == pytest.approx((0.85, 0.95))
+    assert results[1] == pytest.approx((-0.7, 0.9))
+
+
+def test_ollama_batch_with_a_missing_id_is_rejected() -> None:
+    """A partial reply must not be used: positions could shift and misattribute scores."""
+    from features import sentiment as sent
+
+    reply = '{"scores": [{"id": 1, "positive": 0.9, "negative": 0.05, "neutral": 0.05}]}'
+    with patch("openai.OpenAI", side_effect=_ollama_replying(reply)):
+        assert sent._score_batch_with_ollama(["a", "b"], model="m", base_url="u") is None
+
+
+def test_ollama_pending_falls_back_to_single_calls(monkeypatch) -> None:
+    from features import sentiment as sent
+
+    monkeypatch.setattr(sent, "_scoring_model", lambda: "m")
+    monkeypatch.setattr(sent, "_save_score_cache", lambda cache: None)
+    monkeypatch.setattr(sent, "_score_batch_with_ollama", lambda texts, **k: None)
+    monkeypatch.setattr(sent, "_score_one_with_ollama", lambda text, **k: (0.3, 0.6))
+
+    cache: dict[str, list[float]] = {}
+    sent._score_pending_with_ollama(["a", "b", "c"], ["h1", "h2", "h3"], [0, 1, 2], cache)
+    assert cache == {"h1": [0.3, 0.6], "h2": [0.3, 0.6], "h3": [0.3, 0.6]}
