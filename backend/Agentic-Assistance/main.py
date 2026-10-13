@@ -1,6 +1,8 @@
+from evidence_validator import validate_evidence_claims
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
 
 from langchain_core.messages import HumanMessage
 
@@ -132,6 +134,18 @@ def chat(request: ChatRequest):
                 }
             )
 
+
+    # ----------------------------------------------
+    # Evidence validation
+    # ----------------------------------------------
+
+    validation = validate_evidence_claims(
+        response_text,
+        evidence
+    )
+
+    response_text = validation["answer"]
+
     # ----------------------------------------------
     # Responsible AI
     # ----------------------------------------------
@@ -141,11 +155,20 @@ def chat(request: ChatRequest):
         response_text
     )
 
+
     # ----------------------------------------------
     # Return complete response
     # ----------------------------------------------
 
     return {
+
+        
+        "evidence_validation": {
+            "passed": validation["passed"],
+            "issues": validation["issues"],
+            "checks_applied": validation["checks_applied"]
+        },
+
 
         "answer": response_text,
 
