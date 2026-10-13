@@ -51,53 +51,43 @@ export function ChatScreen({ onNavigateToExplanation }: Props) {
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         toolsCalled: response.agent_execution?.tools_used || [],
         evidenceUsed: (response.evidence || []).map((e) => e.tool),
+        evidenceDetails: (response.evidence || []).map((e) => ({
+          tool: e.tool,
+          result:
+            typeof e.result === "string"
+              ? e.result
+              : JSON.stringify(e.result, null, 2),
+        })),
         hasWhyButton: true,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
-    } catch {
-      // Fallback to local research mock data if backend is offline
-      let assistantResponse: ChatMessage;
+    } catch (error) {
+      console.error("Assistant API request failed:", error);
 
-      if (text.toLowerCase().includes("risk") || text.toLowerCase().includes("portfolio")) {
-        assistantResponse = {
-          id: `ast_${Date.now()}`,
-          sender: "assistant",
-          text: "Your overall portfolio risk profile is moderate. However, recent transaction TX1001 flagged a localized spike due to non-standard transfer velocity and location telemetry.",
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          toolsCalled: ["get_portfolio_analysis", "get_fraud_analysis"],
-          evidenceUsed: ["Portfolio Telemetry", "SHAP Attribution"],
-          hasWhyButton: true,
-        };
-      } else if (text.toLowerCase().includes("evidence")) {
-        assistantResponse = {
-          id: `ast_${Date.now()}`,
-          sender: "assistant",
-          text: "The decision is backed by verified evidence: Fraud Analysis Model (Score 0.92), Blockchain Record AUDIT-2026-001 (Block 1847291), and SHAP feature attributions.",
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          toolsCalled: ["get_blockchain_audit", "get_fraud_analysis"],
-          evidenceUsed: ["Blockchain Audit", "SHAP Explanation"],
-          hasWhyButton: true,
-        };
-      } else {
-        assistantResponse = {
-          id: `ast_${Date.now()}`,
-          sender: "assistant",
-          text: "TX1001 was blocked because the transaction was classified as high risk. The strongest contributing factors were the unusually high transfer amount, unusual location, and use of a new device.",
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-          toolsCalled: ["get_fraud_analysis", "get_blockchain_audit"],
-          evidenceUsed: ["Fraud Analysis", "Blockchain Audit", "SHAP Explanation"],
-          hasWhyButton: true,
-        };
-      }
+      const errorMsg: ChatMessage = {
+        id: `err_${Date.now()}`,
+        sender: "assistant",
+        text: "I couldn't connect to the assistant backend. Please check that the Component 4 API is running on port 8003 and try again.",
+        timestamp: new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+        evidenceUsed: [],
+        evidenceDetails: [],
+        hasWhyButton: false,
+        isError: true,
+      };
 
-      setMessages((prev) => [...prev, assistantResponse]);
+
+      setMessages((prev) => [...prev, errorMsg]);
     } finally {
       setIsSimulatingResponse(false);
     }
   };
 
   return (
+
     <div className="flex flex-col gap-4">
       {/* Title & Subtitle Header */}
       <div className="rounded-xl border border-black/10 bg-white p-5 shadow-xs dark:border-white/15 dark:bg-neutral-900">
@@ -117,9 +107,8 @@ export function ChatScreen({ onNavigateToExplanation }: Props) {
         {messages.map((msg) => (
           <div
             key={msg.id}
-            className={`flex flex-col ${
-              msg.sender === "user" ? "items-end" : "items-start"
-            }`}
+            className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"
+              }`}
           >
             {/* Sender Label */}
             <div className="mb-1 flex items-center gap-1.5 text-xs text-neutral-400">
@@ -136,13 +125,38 @@ export function ChatScreen({ onNavigateToExplanation }: Props) {
 
             {/* Message Bubble */}
             <div
-              className={`max-w-2xl rounded-2xl p-4 text-sm leading-relaxed ${
-                msg.sender === "user"
-                  ? "bg-blue-600 text-white shadow-xs"
-                  : "border border-neutral-200 bg-neutral-50 text-neutral-900 shadow-2xs dark:border-neutral-800 dark:bg-neutral-800 dark:text-white"
-              }`}
+              className={`max-w-2xl rounded-2xl p-4 text-sm leading-relaxed ${msg.sender === "user"
+                ? "bg-blue-600 text-white shadow-xs"
+                : "border border-neutral-200 bg-neutral-50 text-neutral-900 shadow-2xs dark:border-neutral-800 dark:bg-neutral-800 dark:text-white"
+                }`}
             >
+
               {msg.text}
+
+              {msg.evidenceDetails && msg.evidenceDetails.length > 0 && (
+                <details className="mt-3 rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-700 dark:bg-neutral-900">
+                  <summary className="cursor-pointer text-xs font-semibold text-blue-700 dark:text-blue-300">
+                    View raw tool evidence ({msg.evidenceDetails.length})
+                  </summary>
+
+                  <div className="mt-3 space-y-3">
+                    {msg.evidenceDetails.map((item, index) => (
+                      <div key={`${item.tool}-${index}`}>
+                        <p className="mb-1 text-xs font-bold text-neutral-700 dark:text-neutral-200">
+                          {item.tool}
+                        </p>
+
+                        <pre className="whitespace-pre-wrap break-words text-xs leading-relaxed text-neutral-600 dark:text-neutral-300">
+                          {item.result}
+                        </pre>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+
+
+
 
               {/* Assistant Evidence & Tool Attachments */}
               {msg.sender === "assistant" && (
@@ -178,7 +192,7 @@ export function ChatScreen({ onNavigateToExplanation }: Props) {
                   {msg.hasWhyButton && (
                     <div className="mt-3 flex items-center justify-between">
                       <span className="text-xs text-neutral-400 italic">
-                        SLM generated natural explanation grounded in SHAP attributions
+                        LLM-generated explanation grounded in available tool evidence
                       </span>
                       <button
                         onClick={onNavigateToExplanation}
@@ -193,33 +207,38 @@ export function ChatScreen({ onNavigateToExplanation }: Props) {
               )}
             </div>
           </div>
-        ))}
+        ))
+        }
 
-        {isSimulatingResponse && (
-          <div className="flex items-center gap-2 text-xs text-neutral-500">
-            <BotIcon className="size-4 animate-bounce text-blue-600" />
-            <span>Agentic LLM is analyzing evidence and calling tools...</span>
-          </div>
-        )}
-      </div>
+        {
+          isSimulatingResponse && (
+            <div className="flex items-center gap-2 text-xs text-neutral-500">
+              <BotIcon className="size-4 animate-bounce text-blue-600" />
+              <span>Agentic LLM is analyzing evidence and calling tools...</span>
+            </div>
+          )
+        }
+      </div >
 
       {/* Suggested Questions */}
-      <div className="flex flex-wrap items-center gap-2">
+      < div className="flex flex-wrap items-center gap-2" >
         <span className="text-xs font-semibold text-neutral-500">Suggested:</span>
-        {SUGGESTED_QUESTIONS.map((q) => (
-          <button
-            key={q}
-            onClick={() => handleSendMessage(q)}
-            className="flex items-center gap-1 rounded-full border border-blue-200/80 bg-white px-3 py-1.5 text-xs font-medium text-blue-700 transition hover:border-blue-400 hover:bg-blue-50 dark:border-blue-900/50 dark:bg-neutral-900 dark:text-blue-300 dark:hover:bg-neutral-800"
-          >
-            <SparklesIcon className="size-3 text-blue-500" />
-            <span>{q}</span>
-          </button>
-        ))}
-      </div>
+        {
+          SUGGESTED_QUESTIONS.map((q) => (
+            <button
+              key={q}
+              onClick={() => handleSendMessage(q)}
+              className="flex items-center gap-1 rounded-full border border-blue-200/80 bg-white px-3 py-1.5 text-xs font-medium text-blue-700 transition hover:border-blue-400 hover:bg-blue-50 dark:border-blue-900/50 dark:bg-neutral-900 dark:text-blue-300 dark:hover:bg-neutral-800"
+            >
+              <SparklesIcon className="size-3 text-blue-500" />
+              <span>{q}</span>
+            </button>
+          ))
+        }
+      </div >
 
       {/* Chat Input Box */}
-      <div className="flex items-center gap-2 rounded-xl border border-black/15 bg-white p-2 shadow-xs dark:border-white/20 dark:bg-neutral-900">
+      < div className="flex items-center gap-2 rounded-xl border border-black/15 bg-white p-2 shadow-xs dark:border-white/20 dark:bg-neutral-900" >
         <input
           type="text"
           value={inputText}
@@ -235,7 +254,7 @@ export function ChatScreen({ onNavigateToExplanation }: Props) {
         >
           Send
         </button>
-      </div>
-    </div>
+      </div >
+    </div >
   );
 }

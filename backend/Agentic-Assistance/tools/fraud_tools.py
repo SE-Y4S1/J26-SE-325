@@ -1,7 +1,9 @@
+
 import json
 from pathlib import Path
 
 from langchain_core.tools import tool
+from xai.shap_explainer import explain_transaction
 
 
 DATA_FILE = (
@@ -19,55 +21,97 @@ def load_data():
 @tool
 def get_fraud_analysis(transaction_id: str = "TX1001") -> str:
     """
-    Retrieve fraud detection information for a transaction.
+    Retrieve mock transaction information and a SHAP explanation
+    from the local prototype model.
 
-    IMPORTANT:
-    If the user asks why a transaction was blocked,
-    suspicious, flagged, or detected as fraudulent,
-    ALWAYS call this tool.
-
-    If the user does not provide a transaction ID,
-    use the default mock transaction ID TX1001.
-
-    Do not simply tell the user that the tool exists.
-    Actually call the tool and use its returned information.
+    Use this tool when explaining a transaction's fraud risk.
+    If no ID is supplied, use TX1001.
     """
 
     data = load_data()
-
     transaction = data["transactions"].get(transaction_id)
 
     if transaction is None:
         return f"No transaction was found for ID {transaction_id}."
 
-    reasons = "\n".join(
-        f"- {reason}" for reason in transaction["reasons"]
+    reasons = transaction.get("reasons", [])
+
+    # These feature values are inferred from mock reason labels.
+    # They are NOT verified transaction telemetry.
+    reason_text = " ".join(reasons).lower()
+
+    new_device = int(
+        "new device" in reason_text
+        or "unfamiliar device" in reason_text
+    )
+
+    unusual_location = int(
+        "unusual location" in reason_text
+        or "unfamiliar location" in reason_text
+    )
+
+    amount_lkr = float(transaction["amount_lkr"])
+
+    # Explain using the local synthetic prototype model.
+    shap_result = explain_transaction(
+        new_device=new_device,
+        unusual_location=unusual_location,
+        amount_lkr=amount_lkr,
+    )
+
+    reasons_text = "\n".join(
+        f"- {reason}" for reason in reasons
+    ) or "- No contributing factors provided"
+
+    shap_lines = "\n".join(
+        (
+            f"- {item['feature']}: "
+            f"SHAP value = {item['shap_value']:.6f}; "
+            f"{item['impact']}"
+        )
+        for item in shap_result["shap_explanation"]
     )
 
     return f"""
-FRAUD ANALYSIS
+FRAUD ANALYSIS — MOCK TRANSACTION
 
 Transaction ID:
 {transaction_id}
 
 Transaction Amount:
-LKR {transaction["amount_lkr"]:,}
+LKR {amount_lkr:,.2f}
 
-Fraud Score:
+Recorded Fraud Score:
 {transaction["fraud_score"]}
 
-Risk Level:
+Recorded Risk Level:
 {transaction["risk_level"]}
 
-Status:
+Recorded Status:
 {transaction["status"]}
 
-CONTRIBUTING FACTORS:
+RECORDED CONTRIBUTING FACTORS:
+{reasons_text}
 
-{reasons}
+LOCAL SHAP PROTOTYPE — NOT THE TEAM MODEL
 
-MODEL INTERPRETATION:
+Prototype prediction:
+{shap_result["prediction"]}
 
-The combination of the above factors increased
-the transaction's fraud risk score.
+Prototype fraud probability:
+{shap_result["fraud_probability"]:.4f}
+
+Prototype input features:
+- New device: {new_device}
+- Unusual location: {unusual_location}
+- Amount (LKR): {amount_lkr:,.2f}
+
+SHAP CONTRIBUTIONS:
+{shap_lines}
+
+LIMITATION:
+The SHAP values explain a locally trained synthetic Random Forest,
+not the model that produced the recorded fraud score above.
+Device and location inputs were inferred from mock reason labels.
+These results are prototype evidence, not verified production output.
 """
