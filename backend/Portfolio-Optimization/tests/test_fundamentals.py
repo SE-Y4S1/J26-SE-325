@@ -433,3 +433,12 @@ def test_checkpoint_resumes_and_skips_torn_lines(tmp_path) -> None:
     resumed = Checkpoint(tmp_path)
     assert resumed.done == {"cse:A:1", "cse:A:2"}
     assert [r["report_id"] for r in resumed.rows()] == ["1"]
+
+
+def test_piotroski_zero_denominator_drops_signal_not_crash():
+    from fundamentals.ratios import piotroski
+
+    cur = {"net_profit": 1.0, "total_assets": 10.0, "gross_profit": 1.0, "revenue": 5.0}
+    cmp_ = {"net_profit": 1.0, "total_assets": 10.0, "gross_profit": 0.0, "revenue": 0.0}
+    _, _, signals = piotroski(cur, cmp_, 1.0)
+    assert "margin_improving" not in signals
