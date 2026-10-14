@@ -152,7 +152,10 @@ def train_head(features: pd.DataFrame, horizon: int, out: Path, *, walk_forward_
     # Holdout: walk-forward base + head over the full history, scored only after the cutoff.
     metrics: dict[str, float] = {}
     rows = []
-    for symbol, group in features.groupby("symbol", sort=False):
+    groups = features.groupby("symbol", sort=False)
+    for i, (symbol, group) in enumerate(groups, 1):
+        if i % 25 == 0:  # the first full run went silent here for ~1h; show it is moving
+            logger.info("h=%d holdout: %d/%d symbols", horizon, i, groups.ngroups)
         try:
             decomposed = model.decompose(group, horizon=horizon)
         except Exception as exc:  # noqa: BLE001
