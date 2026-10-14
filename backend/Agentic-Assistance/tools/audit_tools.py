@@ -55,5 +55,6 @@ Record Status:
 {audit["status"]}
 
 The audit record indicates that the decision
-was recorded and can be independently verified.
+was recorded in mock ledger data. Independent blockchain verification
+is not established.
 """

@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useState } from "react";
-import { TabType } from "@/components/assistant/types";
+import { TabType, ChatMessage } from "@/components/assistant/types";
+import { MOCK_INITIAL_MESSAGES } from "@/components/assistant/mockData";
 import { AssistantHeader } from "@/components/assistant/AssistantHeader";
 import { AssistantSidebar } from "@/components/assistant/AssistantSidebar";
 import { ResearchBanner } from "@/components/assistant/ResearchBanner";
@@ -12,6 +13,8 @@ import { ResponsibleAIScreen } from "@/components/assistant/ResponsibleAIScreen"
 
 export default function AssistantPage() {
   const [activeTab, setActiveTab] = useState<TabType>("assistant");
+  const [messages, setMessages] = useState<ChatMessage[]>(MOCK_INITIAL_MESSAGES);
+  const [latestEvidence, setLatestEvidence] = useState<Array<{ tool: string; result: string }>>([]);
 
   return (
     <div className="flex flex-col gap-2">
@@ -33,7 +36,10 @@ export default function AssistantPage() {
         <main className="flex-1">
           {activeTab === "assistant" && (
             <ChatScreen
+              messages={messages}
+              setMessages={setMessages}
               onNavigateToExplanation={() => setActiveTab("explanation")}
+              onEvidenceReceived={(evidence) => setLatestEvidence(evidence)}
             />
           )}
 
@@ -43,7 +49,9 @@ export default function AssistantPage() {
             />
           )}
 
-          {activeTab === "trust-panel" && <TrustPanelScreen />}
+          {activeTab === "trust-panel" && (
+            <TrustPanelScreen latestEvidence={latestEvidence} />
+          )}
 
           {(activeTab === "responsible-ai" || activeTab === "settings") && (
             <ResponsibleAIScreen />
