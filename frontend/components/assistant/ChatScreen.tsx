@@ -1,12 +1,22 @@
 "use client";
 
 import React, { useState } from "react";
-import { ChatMessage, TabType } from "./types";
+import { ChatMessage } from "./types";
 import { MOCK_INITIAL_MESSAGES, SUGGESTED_QUESTIONS } from "./mockData";
 import { AgentWorkflowPanel } from "./AgentWorkflowPanel";
-import { BotIcon, SparklesIcon, ChevronRightIcon, WrenchIcon, ShieldIcon } from "./icons";
+import { BotIcon, SparklesIcon, ChevronRightIcon, WrenchIcon } from "./icons";
 
 import { request } from "@/lib/api/client";
+
+function getTimestamp(): string {
+  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+let msgSeq = 0;
+function createMessageId(prefix: string): string {
+  msgSeq += 1;
+  return `${prefix}_${Date.now()}_${msgSeq}`;
+}
 
 interface Props {
   onNavigateToExplanation: () => void;
@@ -32,10 +42,10 @@ export function ChatScreen({
     if (!text.trim() || isSimulatingResponse) return;
 
     const userMsg: ChatMessage = {
-      id: `usr_${Date.now()}`,
+      id: createMessageId("usr"),
       sender: "user",
       text: text,
-      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      timestamp: getTimestamp(),
     };
 
     setMessages((prev) => [...prev, userMsg]);
@@ -64,15 +74,19 @@ export function ChatScreen({
 
       onEvidenceReceived?.(evidenceDetails);
 
+      const toolsCalled = response.agent_execution?.tools_used || [];
+      const evidenceUsed = (response.evidence || []).map((e) => e.tool);
+      const hasToolsOrEvidence = toolsCalled.length > 0 || evidenceUsed.length > 0;
+
       const assistantMsg: ChatMessage = {
-        id: `ast_${Date.now()}`,
+        id: createMessageId("ast"),
         sender: "assistant",
         text: response.answer || "No response received.",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        toolsCalled: response.agent_execution?.tools_used || [],
-        evidenceUsed: (response.evidence || []).map((e) => e.tool),
+        timestamp: getTimestamp(),
+        toolsCalled: toolsCalled,
+        evidenceUsed: evidenceUsed,
         evidenceDetails: evidenceDetails,
-        hasWhyButton: true,
+        hasWhyButton: hasToolsOrEvidence,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
@@ -80,19 +94,15 @@ export function ChatScreen({
       console.error("Assistant API request failed:", error);
 
       const errorMsg: ChatMessage = {
-        id: `err_${Date.now()}`,
+        id: createMessageId("err"),
         sender: "assistant",
         text: "I couldn't connect to the assistant backend. Please check that the Component 4 API is running on port 8003 and try again.",
-        timestamp: new Date().toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
+        timestamp: getTimestamp(),
         evidenceUsed: [],
         evidenceDetails: [],
         hasWhyButton: false,
         isError: true,
       };
-
 
       setMessages((prev) => [...prev, errorMsg]);
     } finally {
@@ -173,34 +183,37 @@ export function ChatScreen({
 
 
               {/* Assistant Evidence & Tool Attachments */}
-              {msg.sender === "assistant" && (
-                <div className="mt-3.5 border-t border-neutral-200/80 pt-3 dark:border-neutral-700">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    {/* Evidence Badges */}
-                    {msg.evidenceUsed && (
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-xs font-semibold text-neutral-500">
-                          Evidence used:
-                        </span>
-                        {msg.evidenceUsed.map((ev) => (
-                          <span
-                            key={ev}
-                            className="rounded-md bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700 border border-blue-200/60 dark:bg-blue-950/60 dark:text-blue-300 dark:border-blue-900/60"
-                          >
-                            ✓ {ev}
+              {msg.sender === "assistant" &&
+                (msg.hasWhyButton ||
+                  (msg.evidenceUsed && msg.evidenceUsed.length > 0) ||
+                  (msg.toolsCalled && msg.toolsCalled.length > 0)) && (
+                  <div className="mt-3.5 border-t border-neutral-200/80 pt-3 dark:border-neutral-700">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      {/* Evidence Badges */}
+                      {msg.evidenceUsed && msg.evidenceUsed.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-xs font-semibold text-neutral-500">
+                            Evidence used:
                           </span>
-                        ))}
-                      </div>
-                    )}
+                          {msg.evidenceUsed.map((ev) => (
+                            <span
+                              key={ev}
+                              className="rounded-md bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700 border border-blue-200/60 dark:bg-blue-950/60 dark:text-blue-300 dark:border-blue-900/60"
+                            >
+                              ✓ {ev}
+                            </span>
+                          ))}
+                        </div>
+                      )}
 
-                    {/* Tools Called Badge */}
-                    {msg.toolsCalled && (
-                      <span className="flex items-center gap-1 rounded-full bg-neutral-200/70 px-2.5 py-0.5 text-[11px] font-bold text-neutral-700 dark:bg-neutral-700 dark:text-neutral-200">
-                        <WrenchIcon className="size-3" />
-                        {msg.toolsCalled.length} tools called
-                      </span>
-                    )}
-                  </div>
+                      {/* Tools Called Badge */}
+                      {msg.toolsCalled && msg.toolsCalled.length > 0 && (
+                        <span className="flex items-center gap-1 rounded-full bg-neutral-200/70 px-2.5 py-0.5 text-[11px] font-bold text-neutral-700 dark:bg-neutral-700 dark:text-neutral-200">
+                          <WrenchIcon className="size-3" />
+                          {msg.toolsCalled.length} tools called
+                        </span>
+                      )}
+                    </div>
 
                   {/* View Why? Button */}
                   {msg.hasWhyButton && (

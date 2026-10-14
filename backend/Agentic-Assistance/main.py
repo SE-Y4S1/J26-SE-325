@@ -1,3 +1,14 @@
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load trusted configuration from repository root .env if not already set in environment
+for env_candidate in [
+    Path(__file__).resolve().parent / ".env",
+    Path(__file__).resolve().parents[2] / ".env",
+]:
+    if env_candidate.is_file():
+        load_dotenv(env_candidate, override=False)
+
 from evidence_validator import validate_evidence_claims
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
