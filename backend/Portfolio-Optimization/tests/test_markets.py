@@ -83,6 +83,22 @@ def test_cse_catalogue_carries_the_chart_security_id(monkeypatch) -> None:
     assert {"COMB.N0000", "COMB.X0000"} <= securities.keys()
 
 
+def test_cse_catalogue_falls_back_before_the_open(monkeypatch) -> None:
+    """tradeSummary is empty before 09:30 Colombo; a pre-market Colab run died on it."""
+    def fake(provider, method, url, **kwargs):  # noqa: ANN001, ANN202, ARG001
+        if url.endswith("tradeSummary"):
+            return {"reqTradeSummery": []}
+        assert url.endswith("allSecurityCode") and method == "GET"
+        return [{"id": 297, "name": "JKH", "symbol": "JKH.N0000", "active": 1},
+                {"id": 1, "name": "GONE", "symbol": "GONE.N0000", "active": 0}]
+
+    monkeypatch.setattr(cse, "request_json", fake)
+    securities = {s["symbol"]: s for s in cse.list_securities()}
+    assert set(securities) == {"JKH.N0000"}
+    assert securities["JKH.N0000"]["provider_id"] == "297"
+    assert securities["JKH.N0000"]["last_price"] is None
+
+
 def test_cse_chart_dates_are_colombo_trading_days(cse_bars) -> None:
     assert len(cse_bars) == 241
     assert cse_bars["timestamp"].is_monotonic_increasing

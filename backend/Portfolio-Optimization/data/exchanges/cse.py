@@ -67,6 +67,11 @@ def list_securities() -> list[dict[str, Any]]:
     payload = _post("tradeSummary")
     rows = payload.get("reqTradeSummery") if isinstance(payload, dict) else None
     if not rows:
+        # tradeSummary is emptied before the 09:30 open, so a pre-market run got nothing.
+        # allSecurityCode lists every security at any hour (same ids), without prices.
+        codes = request_json(PROVIDER, "GET", BASE_URL + "allSecurityCode")
+        rows = [r for r in codes or [] if r.get("active", 1)] if isinstance(codes, list) else None
+    if not rows:
         raise UpstreamError(PROVIDER, "tradeSummary returned no securities")
 
     securities = []
