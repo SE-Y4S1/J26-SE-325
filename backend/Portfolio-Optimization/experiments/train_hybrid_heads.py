@@ -51,7 +51,7 @@ _STABLE = {"USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP", "EUR", "USD1", "PYUSD
 def _binance_top(limit: int) -> list[str]:
     from data.http import request_json
 
-    rows = request_json("binance", "GET", "https://api.binance.com/api/v3/ticker/24hr")
+    rows = request_json("binance", "GET", "https://data-api.binance.vision/api/v3/ticker/24hr")
     usdt = [r for r in rows if r["symbol"].endswith("USDT") and r["symbol"][:-4] not in _STABLE]
     usdt.sort(key=lambda r: float(r.get("quoteVolume") or 0), reverse=True)
     return [r["symbol"] for r in usdt[:limit]]

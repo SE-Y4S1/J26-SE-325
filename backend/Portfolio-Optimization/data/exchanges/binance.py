@@ -26,7 +26,9 @@ from data.schema import AssetClass
 logger = logging.getLogger(__name__)
 
 PROVIDER = "binance"
-BASE_URL = "https://api.binance.com/api/v3/"
+# Public market-data mirror: same endpoints and payloads, but no HTTP 451 geo-block,
+# which api.binance.com returns to US-hosted runtimes (Colab included).
+BASE_URL = "https://data-api.binance.vision/api/v3/"
 KLINES_LIMIT = 1000
 
 USD_STABLECOINS = ("USDT", "USDC", "FDUSD", "BUSD", "TUSD", "DAI", "USDP")
