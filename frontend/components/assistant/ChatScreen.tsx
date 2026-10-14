@@ -10,10 +10,20 @@ import { request } from "@/lib/api/client";
 
 interface Props {
   onNavigateToExplanation: () => void;
+  onEvidenceReceived?: (evidence: Array<{ tool: string; result: string }>) => void;
+  messages?: ChatMessage[];
+  setMessages?: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
 }
 
-export function ChatScreen({ onNavigateToExplanation }: Props) {
-  const [messages, setMessages] = useState<ChatMessage[]>(MOCK_INITIAL_MESSAGES);
+export function ChatScreen({
+  onNavigateToExplanation,
+  onEvidenceReceived,
+  messages: externalMessages,
+  setMessages: externalSetMessages,
+}: Props) {
+  const [internalMessages, setInternalMessages] = useState<ChatMessage[]>(MOCK_INITIAL_MESSAGES);
+  const messages = externalMessages ?? internalMessages;
+  const setMessages = externalSetMessages ?? setInternalMessages;
   const [inputText, setInputText] = useState("");
   const [isSimulatingResponse, setIsSimulatingResponse] = useState(false);
 
@@ -44,6 +54,16 @@ export function ChatScreen({ onNavigateToExplanation }: Props) {
         auth: false,
       });
 
+      const evidenceDetails = (response.evidence || []).map((e) => ({
+        tool: e.tool,
+        result:
+          typeof e.result === "string"
+            ? e.result
+            : JSON.stringify(e.result, null, 2),
+      }));
+
+      onEvidenceReceived?.(evidenceDetails);
+
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
         sender: "assistant",
@@ -51,13 +71,7 @@ export function ChatScreen({ onNavigateToExplanation }: Props) {
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         toolsCalled: response.agent_execution?.tools_used || [],
         evidenceUsed: (response.evidence || []).map((e) => e.tool),
-        evidenceDetails: (response.evidence || []).map((e) => ({
-          tool: e.tool,
-          result:
-            typeof e.result === "string"
-              ? e.result
-              : JSON.stringify(e.result, null, 2),
-        })),
+        evidenceDetails: evidenceDetails,
         hasWhyButton: true,
       };
 

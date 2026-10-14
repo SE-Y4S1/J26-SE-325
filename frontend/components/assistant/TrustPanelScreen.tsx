@@ -5,10 +5,85 @@ import { MOCK_TRANSACTION } from "./mockData";
 import { TrustActionState } from "./types";
 import { ShieldIcon, CheckCircleIcon, LockIcon, AlertTriangleIcon, UndoIcon, SparklesIcon } from "./icons";
 
-export function TrustPanelScreen() {
+interface TrustPanelScreenProps {
+  latestEvidence?: Array<{ tool: string; result: string }>;
+}
+
+interface ParsedEvidenceData {
+  transactionId?: string;
+  amount?: number;
+  currency?: string;
+  fraudScore?: number;
+  status?: string;
+  riskLevel?: string;
+  auditId?: string;
+  blockNumber?: number;
+  recordStatus?: string;
+  hasFraudEvidence: boolean;
+  hasAuditEvidence: boolean;
+}
+
+function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string }> = []): ParsedEvidenceData {
+  const fraudItem = evidenceList.find((e) => e.tool === "get_fraud_analysis");
+  const auditItem = evidenceList.find((e) => e.tool === "get_blockchain_audit");
+
+  const parsed: ParsedEvidenceData = {
+    hasFraudEvidence: !!fraudItem,
+    hasAuditEvidence: !!auditItem,
+  };
+
+  if (fraudItem?.result) {
+    const text = fraudItem.result;
+    const txIdMatch = text.match(/Transaction ID:\s*([A-Za-z0-9_-]+)/i);
+    if (txIdMatch) parsed.transactionId = txIdMatch[1];
+
+    const amountMatch = text.match(/Transaction Amount:\s*([A-Za-z]+)?\s*([0-9,]+(?:\.[0-9]+)?)/i);
+    if (amountMatch) {
+      if (amountMatch[1]) parsed.currency = amountMatch[1];
+      parsed.amount = parseFloat(amountMatch[2].replace(/,/g, ""));
+    }
+
+    const scoreMatch = text.match(/Recorded Fraud Score:\s*([0-9.]+)/i);
+    if (scoreMatch) parsed.fraudScore = parseFloat(scoreMatch[1]);
+
+    const statusMatch = text.match(/Recorded Status:\s*([A-Za-z0-9_-]+)/i);
+    if (statusMatch) parsed.status = statusMatch[1];
+
+    const riskMatch = text.match(/Recorded Risk Level:\s*([A-Za-z0-9_-]+)/i);
+    if (riskMatch) parsed.riskLevel = riskMatch[1];
+  }
+
+  if (auditItem?.result) {
+    const text = auditItem.result;
+    const auditIdMatch = text.match(/Audit ID:\s*([A-Za-z0-9_-]+)/i);
+    if (auditIdMatch) parsed.auditId = auditIdMatch[1];
+
+    const blockMatch = text.match(/Block Number:\s*([0-9]+)/i);
+    if (blockMatch) parsed.blockNumber = parseInt(blockMatch[1], 10);
+
+    const statusMatch = text.match(/Record Status:\s*([A-Za-z0-9_-]+)/i);
+    if (statusMatch) parsed.recordStatus = statusMatch[1];
+  }
+
+  return parsed;
+}
+
+export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps) {
   const [actionState, setActionState] = useState<TrustActionState>("pending");
   const [showMoreExplanation, setShowMoreExplanation] = useState(false);
   const tx = MOCK_TRANSACTION;
+
+  const parsed = parseLatestEvidence(latestEvidence);
+  const hasLiveEvidence = parsed.hasFraudEvidence || parsed.hasAuditEvidence;
+
+  const displayTxId = parsed.transactionId ?? tx.id;
+  const displayAmount = parsed.amount ?? tx.amount;
+  const displayCurrency = parsed.currency ?? tx.currency;
+  const displayStatus = parsed.status ?? tx.status;
+  const displayFraudScore = parsed.fraudScore ?? tx.fraudScore;
+  const displayAuditId = parsed.auditId ?? tx.blockchainAudit.auditId;
+  const displayBlockNumber = parsed.blockNumber ?? tx.blockchainAudit.blockNumber;
+  const displayRecordStatus = parsed.recordStatus ?? tx.blockchainAudit.recordStatus;
 
   return (
     <div className="flex flex-col gap-6">
@@ -28,12 +103,23 @@ export function TrustPanelScreen() {
 
       {/* AI Decision Card */}
       <div className="rounded-xl border border-black/10 bg-white p-5 shadow-xs dark:border-white/15 dark:bg-neutral-900">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-base font-semibold text-neutral-900 dark:text-white">
-            AI Decision Summary
-          </h3>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h3 className="text-base font-semibold text-neutral-900 dark:text-white">
+              AI Decision Summary
+            </h3>
+            {hasLiveEvidence ? (
+              <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-[11px] font-semibold text-blue-800 dark:bg-blue-950 dark:text-blue-300">
+                Active Session Backend Evidence
+              </span>
+            ) : (
+              <span className="rounded-full bg-neutral-100 px-2.5 py-0.5 text-[11px] font-medium text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
+                Mock Baseline
+              </span>
+            )}
+          </div>
           <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700 dark:bg-red-950 dark:text-red-300">
-            {tx.status}
+            {displayStatus}
           </span>
         </div>
 
@@ -42,47 +128,73 @@ export function TrustPanelScreen() {
             <div>
               <p className="text-xs font-semibold text-neutral-500">Target Transaction</p>
               <p className="text-lg font-bold text-neutral-900 dark:text-white">
-                Transaction {tx.id} — {tx.currency} {tx.amount.toLocaleString()}
+                Transaction {displayTxId} — {displayCurrency} {displayAmount.toLocaleString()}
               </p>
             </div>
             <div className="text-right">
               <span className="text-xs text-neutral-500">Decision</span>
-              <p className="text-base font-bold text-red-600 dark:text-red-400">BLOCKED</p>
+              <p className="text-base font-bold text-red-600 dark:text-red-400">{displayStatus}</p>
             </div>
           </div>
 
           <p className="mt-3 text-sm text-neutral-700 dark:text-neutral-300">
             <span className="font-semibold text-neutral-900 dark:text-white">Explanation:</span>{" "}
-            &quot;The transaction was classified as high risk based on the model evidence.&quot;
+            The available mock transaction record reports a HIGH risk level and BLOCKED status. The recorded risk factors are high transfer amount, unusual location, and new device. The production model&apos;s reasoning has not been independently established.
           </p>
 
           <div className="mt-4 flex flex-col gap-2 border-t border-neutral-200/80 pt-3 dark:border-neutral-700">
             <p className="text-xs font-bold uppercase tracking-wider text-neutral-500">
-              Verified Evidence Checklist
+              Available Evidence Checklist
             </p>
             <div className="flex flex-col gap-1.5 text-xs text-neutral-800 dark:text-neutral-200">
               <div className="flex items-center gap-2">
-                <CheckCircleIcon className="size-4 text-emerald-500" />
+                <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <circle cx="12" cy="12" r="8" />
+                </svg>
                 <span>
-                  Recorded fraud score: {tx.fraudScore} (verification and probability calibration not established)
+                  Recorded fraud score: {displayFraudScore} (verification and probability calibration not established)
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <CheckCircleIcon className="size-4 text-emerald-500" />
+                <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <circle cx="12" cy="12" r="8" />
+                </svg>
                 <span>
                   Blockchain audit record returned (Audit ID:{" "}
                   <code className="rounded bg-neutral-200 px-1 py-0.5 font-mono text-[11px] dark:bg-neutral-700">
-                    {tx.blockchainAudit.auditId}
+                    {displayAuditId}
                   </code>
-                  , Block: #{tx.blockchainAudit.blockNumber}, Status: {tx.blockchainAudit.recordStatus})
+                  , Block: #{displayBlockNumber}, Status: {displayRecordStatus})
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <CheckCircleIcon className="size-4 text-emerald-500" />
+                <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <circle cx="12" cy="12" r="8" />
+                </svg>
                 <span>SHAP explanation available (3 primary features computed)</span>
               </div>
             </div>
           </div>
+
+          {hasLiveEvidence && latestEvidence.length > 0 && (
+            <details className="mt-4 rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-700 dark:bg-neutral-900">
+              <summary className="cursor-pointer text-xs font-semibold text-blue-700 dark:text-blue-300">
+                View raw backend tool evidence from chat session ({latestEvidence.length})
+              </summary>
+              <div className="mt-3 space-y-3">
+                {latestEvidence.map((item, index) => (
+                  <div key={`${item.tool}-${index}`}>
+                    <p className="mb-1 text-xs font-bold text-neutral-700 dark:text-neutral-200">
+                      {item.tool}
+                    </p>
+                    <pre className="whitespace-pre-wrap break-words rounded bg-neutral-50 p-2 font-mono text-xs leading-relaxed text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">
+                      {item.result}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       </div>
 

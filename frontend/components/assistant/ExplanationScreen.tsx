@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import { MOCK_TRANSACTION } from "./mockData";
-import { BarChartIcon, CheckCircleIcon, ShieldIcon, SparklesIcon, ChevronRightIcon } from "./icons";
+import { BarChartIcon, CheckCircleIcon, SparklesIcon, ChevronRightIcon } from "./icons";
 
 interface Props {
   onNavigateToTrustPanel: () => void;
@@ -58,9 +58,12 @@ export function ExplanationScreen({ onNavigateToTrustPanel }: Props) {
             <p className="text-base font-bold text-red-600 dark:text-red-400">{tx.riskLevel}</p>
           </div>
           <div>
-            <span className="text-xs text-neutral-500">Fraud Score</span>
+            <span className="text-xs text-neutral-500">Recorded Fraud Score</span>
             <p className="text-base font-bold text-red-600 dark:text-red-400">
-              {(tx.fraudScore * 100).toFixed(0)}%
+              {tx.fraudScore}
+            </p>
+            <p className="mt-0.5 text-[11px] text-neutral-400">
+              Probability calibration not established.
             </p>
           </div>
         </div>
@@ -74,7 +77,7 @@ export function ExplanationScreen({ onNavigateToTrustPanel }: Props) {
               Why did the model consider this high risk?
             </h3>
             <p className="text-xs text-neutral-500">
-              Quantified quantitative contributions computed via Kernel SHAP attributions
+              Local synthetic Random Forest prototype — SHAP attributions
             </p>
           </div>
           <span className="w-fit rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-700 dark:bg-blue-950 dark:text-blue-300">
@@ -126,8 +129,8 @@ export function ExplanationScreen({ onNavigateToTrustPanel }: Props) {
           })}
         </div>
 
-        <p className="mt-3 text-xs italic text-neutral-400">
-          * SHAP values represent individual feature attributions relative to the baseline expectation score.
+        <p className="mt-3 text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
+          These SHAP values explain the local synthetic prototype, not necessarily the model responsible for the recorded fraud score. Device and location inputs were inferred from mock reason labels and are not independently verified real-world observations.
         </p>
       </div>
 
@@ -139,11 +142,11 @@ export function ExplanationScreen({ onNavigateToTrustPanel }: Props) {
             <span>Simple explanation</span>
           </div>
           <span className="rounded-full bg-blue-600 px-2.5 py-0.5 text-[11px] font-bold text-white shadow-2xs">
-            Grounded in SHAP evidence
+            Grounded in tool evidence
           </span>
         </div>
         <p className="text-sm font-medium leading-relaxed text-neutral-800 dark:text-neutral-200">
-          "The transaction was classified as high risk mainly because of the unusually high transfer amount. The unusual location and new device also increased the estimated risk."
+          Recorded contributing factors in the transaction record are high transfer amount, unusual location, and new device. In the local synthetic prototype, transaction amount is the strongest contributing feature, followed by unusual location and new device inputs inferred from mock reason labels. The reasoning of the production model responsible for the recorded fraud score is not established by the available evidence.
         </p>
 
         {/* Evidence Sources & Next Action */}
