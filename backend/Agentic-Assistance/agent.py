@@ -1,3 +1,4 @@
+import re
 from typing import Annotated
 
 from typing_extensions import TypedDict
@@ -10,6 +11,45 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from tools import tools
+
+
+# --------------------------------------------------
+# INTENT ROUTING
+# --------------------------------------------------
+
+def is_greeting_or_general(text: str) -> bool:
+    """
+    Determine if a user query is a greeting or general capability inquiry
+    without specific financial analysis requests.
+    """
+    clean = text.strip().lower()
+
+    # Specific financial keywords that require tools
+    financial_keywords = [
+        "tx", "transaction", "portfolio", "holding", "holdings", "audit", "blockchain",
+        "fraud", "blocked", "flagged", "suspicious", "lkr", "usd", "eur",
+        "transfer", "balance", "stock", "asset", "crypto", "token", "score",
+        "shap", "ledger", "smart contract", "why was", "verify", "allocation",
+        "diversification", "liquidity", "invest", "investment", "risk score"
+    ]
+
+    # If any specific financial keyword is present, it is not a pure greeting
+    if any(re.search(rf"\b{re.escape(kw)}\b", clean) for kw in financial_keywords):
+        return False
+
+    # Check for greeting or capability patterns
+    greeting_patterns = [
+        r"^(?:hello|hi|hey|greetings|good\s+(?:morning|afternoon|evening|day))(?:\s*[,.!?]|\s*$|\s+there)",
+        r"(?:what\s+can\s+you\s+(?:do|help(?:\s+me)?\s+(?:with|on)))",
+        r"(?:who\s+are\s+you)",
+        r"(?:how\s+(?:can|do)\s+you\s+help)",
+        r"(?:what\s+(?:are\s+your|services|features)\s+(?:capabilities|features|services)?)",
+        r"(?:tell\s+me\s+about\s+(?:yourself|what\s+you\s+can\s+do))",
+        r"(?:explain\s+what\s+you\s+can\s+(?:do|help))",
+        r"^(?:help|help\s+me|can\s+you\s+help\s+me)(?:\s*[,.!?]|\s*$)",
+    ]
+
+    return any(re.search(pattern, clean) for pattern in greeting_patterns)
 
 
 # --------------------------------------------------
@@ -52,6 +92,20 @@ the result to the user.
 You are NOT a financial advisor.
 
 --------------------------------------------------
+GREETINGS AND CAPABILITY INQUIRIES
+--------------------------------------------------
+
+If the user sends a greeting (such as "Hello", "Hi", "Good morning")
+or asks about your general capabilities (such as "What can you help me with?",
+"What can you do?", "How do you work?"):
+- DO NOT CALL ANY TOOLS.
+- Do NOT invoke get_fraud_analysis, get_portfolio_analysis, or get_blockchain_audit.
+- Provide a normal, friendly greeting and describe your capabilities:
+  1. Explaining fraud decisions, recorded risk scores, and contributing factors.
+  2. Analyzing portfolio allocation, diversification, and liquidity risk.
+  3. Verifying blockchain audit records and transaction ledger status.
+
+--------------------------------------------------
 TOOL USAGE RULES
 --------------------------------------------------
 
@@ -61,11 +115,12 @@ You have access to these tools:
 2. get_portfolio_analysis
 3. get_blockchain_audit
 
-IMPORTANT:
+MINIMAL INVOCATION RULE:
+For specific financial questions, invoke ONLY the tools needed to answer the user's intent:
 
 When a user asks about a blocked, suspicious,
 flagged, or potentially fraudulent transaction,
-you MUST call:
+call ONLY:
 
 get_fraud_analysis
 
@@ -76,18 +131,17 @@ TX1001
 
 When a user asks about portfolio risk,
 performance, diversification, allocation,
-or liquidity, call:
+or liquidity, call ONLY:
 
 get_portfolio_analysis
 
 When a user asks about blockchain records,
 audit history, verification, or recorded decisions,
-call:
+call ONLY:
 
 get_blockchain_audit
 
-If a question requires multiple types of information,
-you may call multiple tools.
+Call multiple tools ONLY if the question explicitly asks for multiple types of information (e.g. asking for both fraud analysis and blockchain audit verification).
 
 NEVER tell the user to call a tool themselves.
 
@@ -230,7 +284,15 @@ def call_llm(state: AgentState):
         *state["messages"]
     ]
 
-    response = llm_with_tools.invoke(messages)
+    latest_msg = state["messages"][-1] if state.get("messages") else None
+    latest_content = getattr(latest_msg, "content", "") if latest_msg else ""
+
+    # Route pure greetings or general capability inquiries to base LLM without tool binding
+    # to guarantee that no financial tools (fraud, portfolio, blockchain) are invoked.
+    if isinstance(latest_content, str) and is_greeting_or_general(latest_content):
+        response = llm.invoke(messages)
+    else:
+        response = llm_with_tools.invoke(messages)
 
     return {
         "messages": [response]

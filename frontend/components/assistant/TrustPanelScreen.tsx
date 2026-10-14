@@ -16,20 +16,48 @@ interface ParsedEvidenceData {
   fraudScore?: number;
   status?: string;
   riskLevel?: string;
+  factors?: string[];
   auditId?: string;
-  blockNumber?: number;
+  blockNumber?: number | string;
   recordStatus?: string;
+  auditIsMockLedger?: boolean;
   hasFraudEvidence: boolean;
   hasAuditEvidence: boolean;
+  hasShap: boolean;
+  provenanceType: "live" | "fallback" | "baseline";
+  provenanceLabel: string;
 }
 
 function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string }> = []): ParsedEvidenceData {
   const fraudItem = evidenceList.find((e) => e.tool === "get_fraud_analysis");
   const auditItem = evidenceList.find((e) => e.tool === "get_blockchain_audit");
 
+  const isFraudLive = fraudItem?.result ? /LIVE COMPONENT 2/i.test(fraudItem.result) : false;
+  const isAuditLive = auditItem?.result ? /Live Component 3/i.test(auditItem.result) : false;
+  const hasLive = isFraudLive || isAuditLive;
+  const hasFallback =
+    (fraudItem?.result && /FALLBACK MOCK DATA/i.test(fraudItem.result)) ||
+    (auditItem?.result && /FALLBACK DATA/i.test(auditItem.result));
+
+  const provenanceType: "live" | "fallback" | "baseline" = hasLive
+    ? "live"
+    : hasFallback
+    ? "fallback"
+    : "baseline";
+
+  const provenanceLabel =
+    provenanceType === "live"
+      ? "Active Session: Live Service Evidence"
+      : provenanceType === "fallback"
+      ? "Active Session: Fallback Mock Data"
+      : "Mock Baseline (No Active Session Evidence)";
+
   const parsed: ParsedEvidenceData = {
-    hasFraudEvidence: !!fraudItem,
-    hasAuditEvidence: !!auditItem,
+    hasFraudEvidence: !!(fraudItem?.result && !fraudItem.result.includes("No transaction was found")),
+    hasAuditEvidence: !!(auditItem?.result && !auditItem.result.includes("No audit record found")),
+    hasShap: false,
+    provenanceType,
+    provenanceLabel,
   };
 
   if (fraudItem?.result) {
@@ -51,18 +79,40 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
 
     const riskMatch = text.match(/Recorded Risk Level:\s*([A-Za-z0-9_-]+)/i);
     if (riskMatch) parsed.riskLevel = riskMatch[1];
+
+    const factorsMatch = text.match(
+      /RECORDED CONTRIBUTING FACTORS:\s*([\s\S]*?)(?=(?:COMPONENT 2|LOCAL SHAP|TRANSACTION TELEMETRY|LIMITATION|$))/i
+    );
+    if (factorsMatch?.[1]) {
+      const items: string[] = [];
+      for (const line of factorsMatch[1].split("\n")) {
+        const m = line.match(/^\s*-\s*(.+)/);
+        if (m && m[1].trim()) items.push(m[1].trim());
+      }
+      if (items.length > 0) parsed.factors = items;
+    }
+
+    parsed.hasShap = /SHAP (?:CONTRIBUTIONS|EXPLANATION)/i.test(text);
   }
 
   if (auditItem?.result) {
     const text = auditItem.result;
+    const txIdMatch = text.match(/Transaction ID:\s*([A-Za-z0-9_-]+)/i);
+    if (txIdMatch && !parsed.transactionId) parsed.transactionId = txIdMatch[1];
+
     const auditIdMatch = text.match(/Audit ID:\s*([A-Za-z0-9_-]+)/i);
     if (auditIdMatch) parsed.auditId = auditIdMatch[1];
 
-    const blockMatch = text.match(/Block Number:\s*([0-9]+)/i);
-    if (blockMatch) parsed.blockNumber = parseInt(blockMatch[1], 10);
+    const blockMatch = text.match(/Block Number:\s*([0-9]+|Simulated Ledger)/i);
+    if (blockMatch) {
+      const num = parseInt(blockMatch[1], 10);
+      parsed.blockNumber = isNaN(num) ? blockMatch[1] : num;
+    }
 
     const statusMatch = text.match(/Record Status:\s*([A-Za-z0-9_-]+)/i);
     if (statusMatch) parsed.recordStatus = statusMatch[1];
+
+    parsed.auditIsMockLedger = /Simulated Ledger|mock/i.test(text);
   }
 
   return parsed;
@@ -74,16 +124,13 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
   const tx = MOCK_TRANSACTION;
 
   const parsed = parseLatestEvidence(latestEvidence);
-  const hasLiveEvidence = parsed.hasFraudEvidence || parsed.hasAuditEvidence;
+  // Session policy: Active session evidence is valid only when tools returned results in this response.
+  const hasLiveEvidence = latestEvidence.length > 0 && (parsed.hasFraudEvidence || parsed.hasAuditEvidence);
 
-  const displayTxId = parsed.transactionId ?? tx.id;
-  const displayAmount = parsed.amount ?? tx.amount;
-  const displayCurrency = parsed.currency ?? tx.currency;
-  const displayStatus = parsed.status ?? tx.status;
-  const displayFraudScore = parsed.fraudScore ?? tx.fraudScore;
-  const displayAuditId = parsed.auditId ?? tx.blockchainAudit.auditId;
-  const displayBlockNumber = parsed.blockNumber ?? tx.blockchainAudit.blockNumber;
-  const displayRecordStatus = parsed.recordStatus ?? tx.blockchainAudit.recordStatus;
+  const displayTxId = parsed.transactionId ?? (hasLiveEvidence ? "TX1001" : tx.id);
+  const displayAmount = parsed.amount ?? (hasLiveEvidence ? undefined : tx.amount);
+  const displayCurrency = parsed.currency ?? (hasLiveEvidence ? "LKR" : tx.currency);
+  const displayStatus = parsed.status ?? (hasLiveEvidence ? (parsed.recordStatus ?? "RECORDED") : tx.status);
 
   return (
     <div className="flex flex-col gap-6">
@@ -109,12 +156,18 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
               AI Decision Summary
             </h3>
             {hasLiveEvidence ? (
-              <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-[11px] font-semibold text-blue-800 dark:bg-blue-950 dark:text-blue-300">
-                Active Session Backend Evidence
+              <span
+                className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                  parsed.provenanceType === "live"
+                    ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                    : "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300"
+                }`}
+              >
+                {parsed.provenanceLabel}
               </span>
             ) : (
               <span className="rounded-full bg-neutral-100 px-2.5 py-0.5 text-[11px] font-medium text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400">
-                Mock Baseline
+                Mock Baseline (No Active Session Evidence)
               </span>
             )}
           </div>
@@ -128,7 +181,8 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
             <div>
               <p className="text-xs font-semibold text-neutral-500">Target Transaction</p>
               <p className="text-lg font-bold text-neutral-900 dark:text-white">
-                Transaction {displayTxId} — {displayCurrency} {displayAmount.toLocaleString()}
+                Transaction {displayTxId}
+                {displayAmount != null && ` — ${displayCurrency} ${displayAmount.toLocaleString()}`}
               </p>
             </div>
             <div className="text-right">
@@ -139,7 +193,19 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
 
           <p className="mt-3 text-sm text-neutral-700 dark:text-neutral-300">
             <span className="font-semibold text-neutral-900 dark:text-white">Explanation:</span>{" "}
-            The available mock transaction record reports a HIGH risk level and BLOCKED status. The recorded risk factors are high transfer amount, unusual location, and new device. The production model&apos;s reasoning has not been independently established.
+            {hasLiveEvidence ? (
+              parsed.hasFraudEvidence ? (
+                parsed.provenanceType === "live" ? (
+                  <>Component 2 gateway audit trail reports status <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> with risk score <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore?.toFixed(4) ?? "N/A"}</span>. The recorded decision factor is {parsed.factors?.[0] || "recorded dual-stream signals"}. The production model&apos;s internal reasoning has not been independently established.</>
+                ) : (
+                  <>The available mock transaction record reports a <span className="font-semibold text-neutral-900 dark:text-white">{parsed.riskLevel || "HIGH"}</span> risk level and <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> status. The recorded risk factors are {parsed.factors?.join(", ") || "high transfer amount, unusual location, and new device"}. The production model&apos;s reasoning has not been independently established.</>
+                )
+              ) : (
+                <>Blockchain audit record for transaction {displayTxId} was retrieved from Component 3 bridge. Status: <span className="font-semibold text-neutral-900 dark:text-white">{parsed.recordStatus || "RECORDED"}</span>.</>
+              )
+            ) : (
+              <>The static mock baseline record reports a HIGH risk level and BLOCKED status for illustration. Active session backend tools have not been invoked yet.</>
+            )}
           </p>
 
           <div className="mt-4 flex flex-col gap-2 border-t border-neutral-200/80 pt-3 dark:border-neutral-700">
@@ -147,32 +213,103 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
               Available Evidence Checklist
             </p>
             <div className="flex flex-col gap-1.5 text-xs text-neutral-800 dark:text-neutral-200">
-              <div className="flex items-center gap-2">
-                <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <circle cx="12" cy="12" r="8" />
-                </svg>
-                <span>
-                  Recorded fraud score: {displayFraudScore} (verification and probability calibration not established)
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <circle cx="12" cy="12" r="8" />
-                </svg>
-                <span>
-                  Blockchain audit record returned (Audit ID:{" "}
-                  <code className="rounded bg-neutral-200 px-1 py-0.5 font-mono text-[11px] dark:bg-neutral-700">
-                    {displayAuditId}
-                  </code>
-                  , Block: #{displayBlockNumber}, Status: {displayRecordStatus})
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <circle cx="12" cy="12" r="8" />
-                </svg>
-                <span>SHAP explanation available (3 primary features computed)</span>
-              </div>
+              {/* Row 1: Fraud score evidence */}
+              {hasLiveEvidence ? (
+                parsed.hasFraudEvidence ? (
+                  <div className="flex items-center gap-2">
+                    <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                    <span>
+                      Recorded fraud score: {parsed.fraudScore ?? "N/A"} (verification and probability calibration not established)
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                    <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <circle cx="12" cy="12" r="8" />
+                    </svg>
+                    <span>Recorded fraud score: Not evaluated in this response</span>
+                  </div>
+                )
+              ) : (
+                <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                  <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <circle cx="12" cy="12" r="8" />
+                  </svg>
+                  <span>Mock baseline fraud score: {tx.fraudScore} (verification and probability calibration not established)</span>
+                </div>
+              )}
+
+              {/* Row 2: Blockchain audit evidence */}
+              {hasLiveEvidence ? (
+                parsed.hasAuditEvidence ? (
+                  <div className="flex items-center gap-2">
+                    <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                    <span>
+                      Blockchain audit record returned (Audit ID:{" "}
+                      <code className="rounded bg-neutral-200 px-1 py-0.5 font-mono text-[11px] dark:bg-neutral-700">
+                        {parsed.auditId || "RECORDED"}
+                      </code>
+                      {parsed.blockNumber != null && `, Block: #${parsed.blockNumber}`}
+                      {parsed.recordStatus && `, Status: ${parsed.recordStatus}`}
+                      {parsed.auditIsMockLedger && " — simulated ledger"}
+                      )
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                    <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <circle cx="12" cy="12" r="8" />
+                    </svg>
+                    <span>
+                      Blockchain audit record: Not requested or provided in this response (audit status unverified)
+                    </span>
+                  </div>
+                )
+              ) : (
+                <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                  <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <circle cx="12" cy="12" r="8" />
+                  </svg>
+                  <span>
+                    Mock baseline audit record (Audit ID:{" "}
+                    <code className="rounded bg-neutral-200 px-1 py-0.5 font-mono text-[11px] dark:bg-neutral-700">
+                      {tx.blockchainAudit.auditId}
+                    </code>
+                    , Block: #{tx.blockchainAudit.blockNumber}, Status: {tx.blockchainAudit.recordStatus} — unverified baseline)
+                  </span>
+                </div>
+              )}
+
+              {/* Row 3: Model attribution evidence */}
+              {hasLiveEvidence ? (
+                parsed.hasShap ? (
+                  <div className="flex items-center gap-2">
+                    <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                    <span>SHAP explanation available (local synthetic prototype model attributions)</span>
+                  </div>
+                ) : parsed.provenanceType === "live" ? (
+                  <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                    <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <circle cx="12" cy="12" r="8" />
+                    </svg>
+                    <span>SHAP explanation: Not computed for live Component 2 gateway decision (telemetry not retained)</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                    <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <circle cx="12" cy="12" r="8" />
+                    </svg>
+                    <span>SHAP explanation: Not evaluated in this response</span>
+                  </div>
+                )
+              ) : (
+                <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                  <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <circle cx="12" cy="12" r="8" />
+                  </svg>
+                  <span>Mock baseline SHAP explanation (3 primary features computed on local prototype)</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -282,10 +419,18 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
           <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50/80 p-4 text-xs dark:border-blue-900 dark:bg-blue-950/40">
             <div className="flex items-center gap-2 font-bold text-blue-900 dark:text-blue-200">
               <SparklesIcon className="size-4 text-blue-600" />
-              <span>Expanded Model Attribution Breakdown</span>
+              <span>Expanded Model Attribution & Governance Disclosures</span>
             </div>
             <p className="mt-2 text-neutral-700 dark:text-neutral-300 leading-relaxed">
-              The local synthetic Random Forest prototype produced the following SHAP attributions: transaction amount (+0.193289), unusual location (+0.153450), and new device (+0.130761). These values explain the local prototype&apos;s output, not necessarily the model responsible for the recorded fraud score. The device and location inputs were inferred from mock reason labels and are not independently verified real-world observations.
+              {parsed.provenanceType === "live" ? (
+                <>
+                  This decision was evaluated by Component 2&apos;s real-time dual-stream fraud engine. Component 4&apos;s local synthetic Random Forest prototype was NOT used for this live decision, and prototype SHAP values do not explain Component 2&apos;s production model. The local prototype&apos;s predicted probability is an output of a local synthetic prototype, not a calibrated probability or independent confirmation of the original decision. Probability calibration has not been established.
+                </>
+              ) : (
+                <>
+                  The local synthetic Random Forest prototype produced the following SHAP attributions: transaction amount (+0.193289), unusual location (+0.153450), and new device (+0.130761). These values explain the local prototype&apos;s output, not Component 2&apos;s production model. The local prototype&apos;s predicted probability is not a calibrated probability or independent confirmation of the original fraud decision. Device and location inputs were inferred from mock reason labels and are not independently verified real-world observations. Probability calibration has not been established.
+                </>
+              )}
             </p>
           </div>
         )}

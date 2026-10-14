@@ -46,6 +46,7 @@ export default function AssistantPage() {
           {activeTab === "explanation" && (
             <ExplanationScreen
               onNavigateToTrustPanel={() => setActiveTab("trust-panel")}
+              latestEvidence={latestEvidence}
             />
           )}
 
