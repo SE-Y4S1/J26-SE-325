@@ -53,7 +53,7 @@ export function TrustPanelScreen() {
 
           <p className="mt-3 text-sm text-neutral-700 dark:text-neutral-300">
             <span className="font-semibold text-neutral-900 dark:text-white">Explanation:</span>{" "}
-            "The transaction was classified as high risk based on the model evidence."
+            &quot;The transaction was classified as high risk based on the model evidence.&quot;
           </p>
 
           <div className="mt-4 flex flex-col gap-2 border-t border-neutral-200/80 pt-3 dark:border-neutral-700">
@@ -63,12 +63,14 @@ export function TrustPanelScreen() {
             <div className="flex flex-col gap-1.5 text-xs text-neutral-800 dark:text-neutral-200">
               <div className="flex items-center gap-2">
                 <CheckCircleIcon className="size-4 text-emerald-500" />
-                <span>Fraud analysis verified (Model Score: {(tx.fraudScore * 100).toFixed(0)}%)</span>
+                <span>
+                  Recorded fraud score: {tx.fraudScore} (verification and probability calibration not established)
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <CheckCircleIcon className="size-4 text-emerald-500" />
                 <span>
-                  Blockchain audit verified (Audit ID:{" "}
+                  Blockchain audit record returned (Audit ID:{" "}
                   <code className="rounded bg-neutral-200 px-1 py-0.5 font-mono text-[11px] dark:bg-neutral-700">
                     {tx.blockchainAudit.auditId}
                   </code>
@@ -91,7 +93,7 @@ export function TrustPanelScreen() {
             How was this decision explained?
           </h4>
           <p className="mt-2 text-xs leading-relaxed text-neutral-700 dark:text-neutral-300">
-            Using model attribution evidence and verified transaction context aggregated through LangGraph tool execution.
+            Explanation uses available tool evidence and model-attribution outputs. Some evidence is mock data, and the local prototype explanation may not represent the model behind the recorded fraud score.
           </p>
         </div>
 
@@ -108,24 +110,32 @@ export function TrustPanelScreen() {
       {/* Responsible AI Status Checks */}
       <div className="rounded-xl border border-black/10 bg-white p-4 shadow-xs dark:border-white/15 dark:bg-neutral-900">
         <h4 className="mb-3 text-xs font-bold uppercase tracking-wider text-neutral-500">
-          Responsible AI Automated Governance Status
+          Responsible AI Governance Checklist
         </h4>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50/60 p-2.5 text-xs font-semibold text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-300">
-            <CheckCircleIcon className="size-4 text-emerald-600" />
-            <span>✓ Privacy check</span>
+          <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50/60 p-2.5 text-xs font-medium text-neutral-700 dark:border-neutral-800 dark:bg-neutral-800/50 dark:text-neutral-300">
+            <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <circle cx="12" cy="12" r="8" />
+            </svg>
+            <span>Privacy review</span>
           </div>
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50/60 p-2.5 text-xs font-semibold text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-300">
-            <CheckCircleIcon className="size-4 text-emerald-600" />
-            <span>✓ Safety check</span>
+          <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50/60 p-2.5 text-xs font-medium text-neutral-700 dark:border-neutral-800 dark:bg-neutral-800/50 dark:text-neutral-300">
+            <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <circle cx="12" cy="12" r="8" />
+            </svg>
+            <span>Safety review</span>
           </div>
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50/60 p-2.5 text-xs font-semibold text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-300">
-            <CheckCircleIcon className="size-4 text-emerald-600" />
-            <span>✓ Evidence grounding</span>
+          <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50/60 p-2.5 text-xs font-medium text-neutral-700 dark:border-neutral-800 dark:bg-neutral-800/50 dark:text-neutral-300">
+            <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <circle cx="12" cy="12" r="8" />
+            </svg>
+            <span>Evidence grounding review</span>
           </div>
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50/60 p-2.5 text-xs font-semibold text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-300">
-            <CheckCircleIcon className="size-4 text-emerald-600" />
-            <span>✓ AI disclosure</span>
+          <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-neutral-50/60 p-2.5 text-xs font-medium text-neutral-700 dark:border-neutral-800 dark:bg-neutral-800/50 dark:text-neutral-300">
+            <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <circle cx="12" cy="12" r="8" />
+            </svg>
+            <span>AI disclosure review</span>
           </div>
         </div>
       </div>
@@ -145,14 +155,14 @@ export function TrustPanelScreen() {
         {actionState === "confirmed" && (
           <div className="mb-4 flex items-center gap-2 rounded-lg bg-emerald-100 p-3 text-xs font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
             <CheckCircleIcon className="size-4" />
-            <span>Decision acknowledged — Action recorded in governance log</span>
+            <span>Decision acknowledged locally. No governance log entry was created.</span>
           </div>
         )}
 
         {actionState === "rejected" && (
           <div className="mb-4 flex items-center gap-2 rounded-lg bg-red-100 p-3 text-xs font-bold text-red-800 dark:bg-red-950 dark:text-red-200">
             <AlertTriangleIcon className="size-4" />
-            <span>Action rejected by user — Override requested for secondary review</span>
+            <span>Rejection recorded in this session only. No secondary review was requested.</span>
           </div>
         )}
 
@@ -163,7 +173,7 @@ export function TrustPanelScreen() {
               <span>Expanded Model Attribution Breakdown</span>
             </div>
             <p className="mt-2 text-neutral-700 dark:text-neutral-300 leading-relaxed">
-              The model evaluated transfer velocity (+$0.1933 SHAP), IP geo-location deviation (+$0.1535 SHAP), and hardware token fingerprint mismatch (+$0.1308 SHAP). Blockchain ledger audit record AUDIT-2026-001 confirms zero prior trust score in this target subnet.
+              The local synthetic Random Forest prototype produced the following SHAP attributions: transaction amount (+0.193289), unusual location (+0.153450), and new device (+0.130761). These values explain the local prototype&apos;s output, not necessarily the model responsible for the recorded fraud score. The device and location inputs were inferred from mock reason labels and are not independently verified real-world observations.
             </p>
           </div>
         )}
