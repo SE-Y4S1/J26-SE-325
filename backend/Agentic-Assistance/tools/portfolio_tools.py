@@ -182,44 +182,9 @@ def query_live_portfolio_service(
     headers = {"Accept": "application/json"}
     headers.update(get_auth_header(user_id=resolved_user))
 
-    # Case 1: Explicit numeric portfolio_id was provided
-    if portfolio_id is not None and str(portfolio_id).strip().isdigit():
-        target_p_id = str(portfolio_id).strip()
-        url = f"{base_url}/portfolios/{target_p_id}"
-        status_code, data, err = _http_get(url, headers=headers, timeout=timeout)
-        if status_code == 200 and isinstance(data, dict):
-            # Verify ownership if user_id present in response
-            p_user = data.get("user_id")
-            if p_user is not None and str(p_user) != resolved_user:
-                return {
-                    "available": True,
-                    "status_code": 404,
-                    "data": None,
-                    "resolved_user_id": resolved_user,
-                    "portfolio_id": target_p_id,
-                    "empty_list": False,
-                    "error": f"Portfolio {target_p_id} not owned by user {resolved_user}",
-                }
-            return {
-                "available": True,
-                "status_code": 200,
-                "data": data,
-                "resolved_user_id": resolved_user,
-                "portfolio_id": target_p_id,
-                "empty_list": False,
-                "error": None,
-            }
-        return {
-            "available": status_code is not None,
-            "status_code": status_code,
-            "data": data,
-            "resolved_user_id": resolved_user,
-            "portfolio_id": target_p_id,
-            "empty_list": False,
-            "error": err,
-        }
+    target_p_id = str(portfolio_id).strip() if (portfolio_id is not None and str(portfolio_id).strip().isdigit()) else None
 
-    # Case 2: Standard user portfolio lookup via GET /portfolios
+    # Always query GET /portfolios first to retrieve the user's registered portfolio list
     list_url = f"{base_url}/portfolios"
     status_code, data, err = _http_get(list_url, headers=headers, timeout=timeout)
 
@@ -229,7 +194,7 @@ def query_live_portfolio_service(
             "status_code": status_code,
             "data": data,
             "resolved_user_id": resolved_user,
-            "portfolio_id": None,
+            "portfolio_id": target_p_id,
             "empty_list": False,
             "error": err or f"HTTP {status_code}",
         }
@@ -242,24 +207,39 @@ def query_live_portfolio_service(
                 "status_code": 200,
                 "data": None,
                 "resolved_user_id": resolved_user,
-                "portfolio_id": None,
+                "portfolio_id": target_p_id,
                 "empty_list": True,
                 "error": None,
             }
 
-        # Select first portfolio ID and retrieve details
-        selected_p = data[0]
-        selected_id = selected_p.get("id") if isinstance(selected_p, dict) else None
-        if selected_id is None:
-            return {
-                "available": True,
-                "status_code": 200,
-                "data": None,
-                "resolved_user_id": resolved_user,
-                "portfolio_id": None,
-                "empty_list": True,
-                "error": "Unexpected portfolio list item format",
-            }
+        # Portfolios exist. Select target or first available portfolio.
+        if target_p_id is not None:
+            # Check if target_p_id appears in the authenticated user's portfolio list
+            matching_p = next((p for p in data if isinstance(p, dict) and str(p.get("id")) == target_p_id), None)
+            if matching_p is None:
+                return {
+                    "available": True,
+                    "status_code": 404,
+                    "data": None,
+                    "resolved_user_id": resolved_user,
+                    "portfolio_id": target_p_id,
+                    "empty_list": False,
+                    "error": f"Portfolio {target_p_id} not owned by user {resolved_user}",
+                }
+            selected_id = target_p_id
+        else:
+            selected_p = data[0]
+            selected_id = selected_p.get("id") if isinstance(selected_p, dict) else None
+            if selected_id is None:
+                return {
+                    "available": True,
+                    "status_code": 200,
+                    "data": None,
+                    "resolved_user_id": resolved_user,
+                    "portfolio_id": None,
+                    "empty_list": True,
+                    "error": "Unexpected portfolio list item format",
+                }
 
         detail_url = f"{base_url}/portfolios/{selected_id}"
         detail_status, detail_data, detail_err = _http_get(detail_url, headers=headers, timeout=timeout)
@@ -285,7 +265,7 @@ def query_live_portfolio_service(
 
     # Safe handling: if endpoint returned a portfolio dict directly (e.g. single-response mock)
     if isinstance(data, dict):
-        p_id = str(data.get("id", "1"))
+        p_id = str(data.get("id", target_p_id or "1"))
         return {
             "available": True,
             "status_code": 200,
@@ -301,7 +281,7 @@ def query_live_portfolio_service(
         "status_code": 200,
         "data": None,
         "resolved_user_id": resolved_user,
-        "portfolio_id": None,
+        "portfolio_id": target_p_id,
         "empty_list": False,
         "error": err or "Unexpected response format from portfolio endpoint",
     }
@@ -315,9 +295,11 @@ def get_portfolio_analysis(
     """
     Analyze the user's investment portfolio.
 
-    Use this tool when the user asks about:
-    portfolio performance, portfolio risk, diversification,
-    asset allocation, liquidity, or investment recommendations.
+    Parameters:
+    - user_id: Authenticated user ID (default is '1').
+    - portfolio_id: Optional specific portfolio ID. Only provide this if the user
+      explicitly asked for a specific portfolio number in their message.
+      Do not provide a default portfolio ID for general portfolio queries.
     """
     mock_data = load_mock_data()
     mock_portfolio = mock_data.get("portfolio")

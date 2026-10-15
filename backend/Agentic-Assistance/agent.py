@@ -263,11 +263,12 @@ or liquidity, call ONLY:
 
 get_portfolio_analysis
 
-If the user does not specify a user ID or portfolio ID,
+If the user does not specify a user ID,
 call get_portfolio_analysis with the default user ID:
 
 1
 
+Do not pass a portfolio_id argument unless the user explicitly requested a specific portfolio number in their message.
 Do not invent placeholder strings such as "your_user_id" or "USER001".
 
 When a user asks about blockchain records,

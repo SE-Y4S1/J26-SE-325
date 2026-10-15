@@ -376,48 +376,79 @@ class TestPortfolioAuthAndIntegration(unittest.TestCase):
             self.assertIn("Active live portfolio record retrieved (0 holdings recorded)", output)
             self.assertNotIn("FALLBACK DATA", output)
 
-    def test_explicit_numeric_portfolio_id_direct_lookup(self):
-        """Explicit numeric portfolio_id queries GET /portfolios/{portfolio_id} directly."""
-        portfolio_detail_json = json.dumps({
-            "id": 12,
-            "user_id": 1,
-            "name": "Direct Special Fund",
-            "base_currency": "USD",
-            "total_value": 25000.0,
-            "holdings": [],
-        }).encode("utf-8")
-
+    def test_llm_supplied_portfolio_id_with_empty_portfolio_list(self):
+        """LLM passing portfolio_id='1' when user has no portfolios returns clean empty-list fallback without calling /portfolios/1."""
         mock_resp = MagicMock()
         mock_resp.status = 200
-        mock_resp.read.return_value = portfolio_detail_json
+        mock_resp.read.return_value = json.dumps([]).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
 
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            output = get_portfolio_analysis.invoke({"user_id": "1", "portfolio_id": "12"})
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+            output = get_portfolio_analysis.invoke({"user_id": "1", "portfolio_id": "1"})
+
+            # Verify the only HTTP call was to /portfolios, not /portfolios/1
+            self.assertEqual(mock_urlopen.call_count, 1)
+            req = mock_urlopen.call_args[0][0]
+            req_url = getattr(req, "full_url", str(req))
+            self.assertTrue(req_url.endswith("/portfolios"))
+            self.assertFalse(req_url.endswith("/portfolios/1"))
+
+            self.assertIn("PORTFOLIO ANALYSIS — FALLBACK DATA", output)
+            self.assertIn("Empty portfolio list", output)
+            self.assertIn("Live holdings: Unverified (No live portfolio registered on platform)", output)
+            self.assertIn("Resolved User Identity:\n1", output)
+
+    def test_valid_portfolio_selection_from_portfolio_list(self):
+        """Explicit portfolio_id matching user's owned portfolios retrieves details successfully."""
+        portfolio_list_json = json.dumps([
+            {"id": 3, "name": "Income Fund", "base_currency": "USD"},
+            {"id": 7, "name": "Growth Fund", "base_currency": "USD"},
+        ]).encode("utf-8")
+        portfolio_detail_json = json.dumps({
+            "id": 7,
+            "user_id": 1,
+            "name": "Growth Fund",
+            "base_currency": "USD",
+            "total_value": 75000.0,
+            "holdings": [{"symbol": "GOOGL", "quantity": 500.0, "current_price": 150.0}],
+        }).encode("utf-8")
+
+        def fake_urlopen(req, timeout=1.5):
+            url = getattr(req, "full_url", str(req))
+            resp = MagicMock()
+            resp.status = 200
+            if "/portfolios/7" in url:
+                resp.read.return_value = portfolio_detail_json
+            else:
+                resp.read.return_value = portfolio_list_json
+            resp.__enter__.return_value = resp
+            return resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            output = get_portfolio_analysis.invoke({"user_id": "1", "portfolio_id": "7"})
 
             self.assertIn("PORTFOLIO ANALYSIS — LIVE PLATFORM RECORD", output)
-            self.assertIn("Portfolio ID:\n12", output)
-            self.assertIn("Direct Special Fund", output)
+            self.assertIn("Portfolio ID:\n7", output)
+            self.assertIn("Growth Fund", output)
+            self.assertIn("GOOGL", output)
+            self.assertNotIn("FALLBACK DATA", output)
 
     def test_explicit_portfolio_id_cross_user_forbidden(self):
-        """Accessing portfolio owned by a different user returns not owned fallback."""
-        portfolio_detail_json = json.dumps({
-            "id": 99,
-            "user_id": 2,  # Owned by user 2, but caller is user 1
-            "name": "User 2 Fund",
-            "base_currency": "USD",
-            "total_value": 50000.0,
-            "holdings": [],
-        }).encode("utf-8")
+        """Explicit portfolio_id not present in user's portfolio list is rejected as not owned."""
+        portfolio_list_json = json.dumps([
+            {"id": 3, "name": "User 1 Fund", "base_currency": "USD"}
+        ]).encode("utf-8")
 
         mock_resp = MagicMock()
         mock_resp.status = 200
-        mock_resp.read.return_value = portfolio_detail_json
+        mock_resp.read.return_value = portfolio_list_json
         mock_resp.__enter__.return_value = mock_resp
 
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
             output = get_portfolio_analysis.invoke({"user_id": "1", "portfolio_id": "99"})
 
+            # Verify only GET /portfolios was called, not /portfolios/99
+            self.assertEqual(mock_urlopen.call_count, 1)
             self.assertIn("FALLBACK DATA", output)
             self.assertIn("Portfolio 99 not owned by user 1", output)
 
