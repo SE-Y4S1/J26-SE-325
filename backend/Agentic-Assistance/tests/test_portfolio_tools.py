@@ -104,11 +104,12 @@ class TestPortfolioAuthAndIntegration(unittest.TestCase):
             output = get_portfolio_analysis.invoke({"user_id": "1"})
 
             self.assertIn("PORTFOLIO ANALYSIS — FALLBACK DATA", output)
+            self.assertIn("STATUS:\nNO LIVE PORTFOLIO RECORD RETRIEVED", output)
             self.assertIn("FALLBACK NOTICE:", output)
             self.assertIn("Platform service authentication required", output)
             self.assertIn("HTTP 401: Unauthorized", output)
-            self.assertIn("Total Portfolio Value:", output)
             self.assertIn("LKR 1,000,000", output)
+            self.assertIn("Mock Baseline Demonstration Only", output)
 
     def test_expired_token_handled_gracefully(self):
         """Expired token returning 401 is trapped cleanly without crashing the agent."""
@@ -124,6 +125,7 @@ class TestPortfolioAuthAndIntegration(unittest.TestCase):
             output = get_portfolio_analysis.invoke({"user_id": "1"})
 
             self.assertIn("FALLBACK DATA", output)
+            self.assertIn("STATUS:\nNO LIVE PORTFOLIO RECORD RETRIEVED", output)
             self.assertIn("FALLBACK NOTICE:", output)
             self.assertIn("Platform service authentication required", output)
 
@@ -141,8 +143,36 @@ class TestPortfolioAuthAndIntegration(unittest.TestCase):
             output = get_portfolio_analysis.invoke({"user_id": "1"})
 
             self.assertIn("PORTFOLIO ANALYSIS — FALLBACK DATA", output)
+            self.assertIn("STATUS:\nNO LIVE PORTFOLIO RECORD RETRIEVED", output)
             self.assertIn("FALLBACK NOTICE:", output)
             self.assertIn("Portfolio not found on platform service", output)
+            self.assertIn("NOT the user's actual portfolio", output)
+            self.assertIn("synthetic baseline estimates for demonstration only", output)
+            self.assertIn("Live holdings: 0 verified assets on platform", output)
+            self.assertIn("Live market value: Unverified (No live portfolio record)", output)
+
+    def test_fallback_labels_all_synthetic_metrics_as_mock_baseline(self):
+        """All metrics and allocations in fallback must be explicitly marked as illustrative mock examples."""
+        mock_err = urllib.error.HTTPError(
+            url="http://localhost:8100/portfolios/1",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=MagicMock(read=lambda: b'{"detail":"Portfolio not found"}'),
+        )
+
+        with patch("urllib.request.urlopen", side_effect=mock_err):
+            output = get_portfolio_analysis.invoke({"user_id": "USER001"})
+
+            self.assertIn("ILLUSTRATIVE MOCK BASELINE ESTIMATES (NOT ACTUAL USER PORTFOLIO):", output)
+            self.assertIn("Illustrative Baseline Valuation: LKR 1,000,000 (Mock Baseline Demonstration Only)", output)
+            self.assertIn("Illustrative Expected Annual Return: 11.8% (Synthetic Estimate)", output)
+            self.assertIn("Illustrative Risk Score: 38/100 (Synthetic Estimate)", output)
+            self.assertIn("Illustrative Diversification Score: 74/100 (Synthetic Estimate)", output)
+            self.assertIn("Illustrative Liquidity: High (Synthetic Estimate)", output)
+            self.assertIn("ILLUSTRATIVE CURRENT ALLOCATION (Mock Baseline Example Only):", output)
+            self.assertIn("ILLUSTRATIVE OBSERVATIONS (Sample Demonstration Only):", output)
+            self.assertIn("Do not describe these synthetic metrics, asset allocations, or observations as the user's actual portfolio.", output)
 
     def test_live_portfolio_success_mapping(self):
         """Successful 200 response from platform maps live holdings and valuations accurately."""
@@ -191,8 +221,42 @@ class TestPortfolioAuthAndIntegration(unittest.TestCase):
             output = get_portfolio_analysis.invoke({"user_id": "1"})
 
             self.assertIn("PORTFOLIO ANALYSIS — FALLBACK DATA", output)
+            self.assertIn("STATUS:\nNO LIVE PORTFOLIO RECORD RETRIEVED", output)
             self.assertIn("FALLBACK NOTICE:", output)
             self.assertIn("Request timed out", output)
+
+    def test_evidence_validator_enforces_portfolio_fallback_notice(self):
+        """Validator requires portfolio fallback responses to begin with a notice and avoid actual ownership claims."""
+        from evidence_validator import validate_evidence_claims
+
+        mock_err = urllib.error.HTTPError(
+            url="http://localhost:8100/portfolios/1",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=MagicMock(read=lambda: b'{"detail":"Portfolio not found"}'),
+        )
+        with patch("urllib.request.urlopen", side_effect=mock_err):
+            tool_output = get_portfolio_analysis.invoke({"user_id": "1"})
+
+        evidence = [{"tool": "get_portfolio_analysis", "result": tool_output}]
+
+        # Case A: LLM claims user actually has LKR 1,000,000 without starting notice
+        bad_answer = "Your portfolio is valued at LKR 1,000,000 with an expected return of 12%."
+        val_bad = validate_evidence_claims(bad_answer, evidence)
+        self.assertFalse(val_bad["passed"])
+        self.assertIn("Fallback portfolio described as actual user portfolio", val_bad["issues"])
+        self.assertTrue(val_bad["answer"].startswith("Notice: No live portfolio was retrieved for this account from the platform service"))
+
+        # Case B: LLM provides properly grounded response starting with clear notice
+        good_answer = (
+            "Notice: No live portfolio record was retrieved from the platform service for your account. "
+            "The following figures are illustrative mock baseline examples for demonstration only: "
+            "Illustrative valuation of LKR 1,000,000 with synthetic expected annual return of 12%."
+        )
+        val_good = validate_evidence_claims(good_answer, evidence)
+        self.assertTrue(val_good["passed"])
+        self.assertEqual(len(val_good["issues"]), 0)
 
 
 if __name__ == "__main__":

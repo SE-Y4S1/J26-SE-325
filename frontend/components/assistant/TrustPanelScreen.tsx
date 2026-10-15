@@ -14,6 +14,7 @@ interface ParsedEvidenceData {
   amount?: number;
   currency?: string;
   fraudScore?: number;
+  prototypeProbability?: number;
   status?: string;
   riskLevel?: string;
   factors?: string[];
@@ -32,18 +33,37 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
   const fraudItem = evidenceList.find((e) => e.tool === "get_fraud_analysis");
   const auditItem = evidenceList.find((e) => e.tool === "get_blockchain_audit");
 
-  const isFraudLive = fraudItem?.result ? /LIVE COMPONENT 2/i.test(fraudItem.result) : false;
-  const isAuditLive = auditItem?.result ? /Live Component 3/i.test(auditItem.result) : false;
-  const hasLive = isFraudLive || isAuditLive;
-  const hasFallback =
-    (fraudItem?.result && /FALLBACK MOCK DATA/i.test(fraudItem.result)) ||
-    (auditItem?.result && /FALLBACK DATA/i.test(auditItem.result));
+  const isFraudFallback = fraudItem?.result
+    ? /FALLBACK MOCK DATA|Local mock baseline|FALLBACK NOTICE|NOT a live lookup result/i.test(fraudItem.result)
+    : false;
+  const isFraudLive =
+    !isFraudFallback &&
+    Boolean(
+      fraudItem?.result &&
+      (/LIVE COMPONENT 2 AUDIT RECORD/i.test(fraudItem.result) ||
+       /Live Component 2 Gateway Audit Log/i.test(fraudItem.result))
+    );
 
-  const provenanceType: "live" | "fallback" | "baseline" = hasLive
-    ? "live"
-    : hasFallback
-    ? "fallback"
-    : "baseline";
+  const isAuditFallback = auditItem?.result
+    ? /FALLBACK DATA|Local mock baseline|NOT_FOUND_ON_LIVE_BRIDGE/i.test(auditItem.result)
+    : false;
+  const isAuditLive =
+    !isAuditFallback &&
+    Boolean(
+      auditItem?.result &&
+      (/LIVE SERVICE VERIFICATION|Live Component 3|CONFIGURED BLOCKCHAIN|SIMULATED LEDGER/i.test(auditItem.result))
+    );
+
+  let provenanceType: "live" | "fallback" | "baseline" = "baseline";
+  if (fraudItem && auditItem) {
+    provenanceType = isFraudLive && isAuditLive ? "live" : "fallback";
+  } else if (fraudItem) {
+    provenanceType = isFraudLive ? "live" : "fallback";
+  } else if (auditItem) {
+    provenanceType = isAuditLive ? "live" : "fallback";
+  } else {
+    provenanceType = "baseline";
+  }
 
   const provenanceLabel =
     provenanceType === "live"
@@ -73,6 +93,9 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
 
     const scoreMatch = text.match(/Recorded Fraud Score:\s*([0-9.]+)/i);
     if (scoreMatch) parsed.fraudScore = parseFloat(scoreMatch[1]);
+
+    const protoProbMatch = text.match(/Prototype fraud probability:\s*([0-9.]+)/i);
+    if (protoProbMatch) parsed.prototypeProbability = parseFloat(protoProbMatch[1]);
 
     const statusMatch = text.match(/Recorded Status:\s*([A-Za-z0-9_-]+)/i);
     if (statusMatch) parsed.status = statusMatch[1];
@@ -198,7 +221,7 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
                 parsed.provenanceType === "live" ? (
                   <>Component 2 gateway audit trail reports status <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> with risk score <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore?.toFixed(4) ?? "N/A"}</span>. The recorded decision factor is {parsed.factors?.[0] || "recorded dual-stream signals"}. The production model&apos;s internal reasoning has not been independently established.</>
                 ) : (
-                  <>The available mock transaction record reports a <span className="font-semibold text-neutral-900 dark:text-white">{parsed.riskLevel || "HIGH"}</span> risk level and <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> status. The recorded risk factors are {parsed.factors?.join(", ") || "high transfer amount, unusual location, and new device"}. The production model&apos;s reasoning has not been independently established.</>
+                  <>The available mock transaction record lists a recorded fraud score of <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"}</span>, <span className="font-semibold text-neutral-900 dark:text-white">{parsed.riskLevel || "HIGH"}</span> risk level, and <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> status based on stated risk factors ({parsed.factors?.join(", ") || "high transfer amount, unusual location, and new device"}). Separately, the local synthetic Random Forest prototype provides illustrative SHAP attributions (uncalibrated probability {parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}, distinct from recorded score {parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"}). Device and location features were inferred from mock labels and do not explain Component 2&apos;s production model. Component 2&apos;s live gateway was not reached for this decision.</>
                 )
               ) : (
                 <>Blockchain audit record for transaction {displayTxId} was retrieved from Component 3 bridge. Status: <span className="font-semibold text-neutral-900 dark:text-white">{parsed.recordStatus || "RECORDED"}</span>.</>
@@ -219,7 +242,9 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
                   <div className="flex items-center gap-2">
                     <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
                     <span>
-                      Recorded fraud score: {parsed.fraudScore ?? "N/A"} (verification and probability calibration not established)
+                      {parsed.provenanceType === "live"
+                        ? `Live gateway fraud score: ${parsed.fraudScore?.toFixed(4) ?? "N/A"} (verification and probability calibration not established)`
+                        : `Recorded mock fraud score: ${parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"} (distinct from prototype prob ${parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}; calibration not established)`}
                     </span>
                   </div>
                 ) : (
@@ -285,7 +310,11 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
                 parsed.hasShap ? (
                   <div className="flex items-center gap-2">
                     <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
-                    <span>SHAP explanation available (local synthetic prototype model attributions)</span>
+                    <span>
+                      {parsed.provenanceType === "live"
+                        ? "SHAP explanation: Not computed for live Component 2 gateway decision (telemetry not retained)"
+                        : `SHAP explanation available (local synthetic Random Forest prototype, prob ${parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}; does not explain production model)`}
+                    </span>
                   </div>
                 ) : parsed.provenanceType === "live" ? (
                   <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
@@ -342,7 +371,7 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
             How was this decision explained?
           </h4>
           <p className="mt-2 text-xs leading-relaxed text-neutral-700 dark:text-neutral-300">
-            Explanation uses available tool evidence and model-attribution outputs. Some evidence is mock data, and the local prototype explanation may not represent the model behind the recorded fraud score.
+            Explanation uses available tool evidence and model-attribution outputs. When fallback mock data is returned, recorded decisions list mock risk factors, while the local synthetic Random Forest provides separate illustrative SHAP attributions that do not explain Component 2&apos;s production model.
           </p>
         </div>
 

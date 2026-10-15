@@ -246,46 +246,45 @@ Optimization metrics (such as expected annual return and risk scores) require ru
         reason = live_res.get("error") or "Live platform service unreachable"
 
     if mock_portfolio:
-        alloc_lines = "\n".join(f"{k}: {v}%" for k, v in mock_allocation.items())
+        alloc_lines = "\n".join(f"- {k}: {v}% (Mock Baseline)" for k, v in mock_allocation.items())
         return f"""
-PORTFOLIO ANALYSIS — FALLBACK DATA
+PORTFOLIO ANALYSIS — FALLBACK DATA (NO LIVE RECORD RETRIEVED)
 
 Data Source:
 Local mock baseline (live platform service at {PLATFORM_SERVICE_URL}: {reason}).
 
+STATUS:
+NO LIVE PORTFOLIO RECORD RETRIEVED for user ID '{user_id}'.
+Platform service note: {reason}.
+
+FALLBACK NOTICE:
+No live portfolio was retrieved for user '{user_id}' from the platform service ({reason}).
+This record is NOT the user's actual portfolio. All metrics, valuations, and allocations below are synthetic baseline estimates for demonstration only. The user does NOT have a verified balance of LKR {mock_portfolio.get("total_value_lkr", 0):,} or active live holdings on record.
+
 User ID:
 {user_id}
 
-Total Portfolio Value:
-LKR {mock_portfolio.get("total_value_lkr", 0):,}
+ILLUSTRATIVE MOCK BASELINE ESTIMATES (NOT ACTUAL USER PORTFOLIO):
+- Illustrative Baseline Valuation: LKR {mock_portfolio.get("total_value_lkr", 0):,} (Mock Baseline Demonstration Only)
+- Illustrative Expected Annual Return: {mock_portfolio.get("expected_annual_return", 0)}% (Synthetic Estimate)
+- Illustrative Risk Score: {mock_portfolio.get("risk_score", 0)}/100 (Synthetic Estimate)
+- Illustrative Risk Level: {mock_portfolio.get("risk_level", "Unknown")} (Synthetic Estimate)
+- Illustrative Diversification Score: {mock_portfolio.get("diversification_score", 0)}/100 (Synthetic Estimate)
+- Illustrative Liquidity: {mock_portfolio.get("liquidity", "Unknown")} (Synthetic Estimate)
 
-Expected Annual Return:
-{mock_portfolio.get("expected_annual_return", 0)}%
-
-Risk Score:
-{mock_portfolio.get("risk_score", 0)}/100
-
-Risk Level:
-{mock_portfolio.get("risk_level", "Unknown")}
-
-Diversification Score:
-{mock_portfolio.get("diversification_score", 0)}/100
-
-Liquidity:
-{mock_portfolio.get("liquidity", "Unknown")}
-
-CURRENT ALLOCATION (Mock Baseline):
+ILLUSTRATIVE CURRENT ALLOCATION (Mock Baseline Example Only):
 {alloc_lines}
 
-OBSERVATIONS:
-- Technology exposure is relatively high.
-- Portfolio diversification is moderate.
-- Liquidity is currently high.
-- Overall portfolio risk is moderate.
+ILLUSTRATIVE OBSERVATIONS (Sample Demonstration Only):
+- Technology exposure is relatively high in this mock baseline example.
+- Portfolio diversification is moderate in this mock baseline example.
+- Liquidity is rated high in this mock baseline example.
+- Overall portfolio risk is rated moderate in this mock baseline example.
 
-FALLBACK NOTICE:
-This record is local mock baseline data because live portfolio data was unavailable ({reason}).
-This is NOT a live lookup result. All metrics and allocations above are synthetic baseline estimates.
+IMPORTANT DISCLAIMER:
+Do not describe these synthetic metrics, asset allocations, or observations as the user's actual portfolio.
+Live holdings: 0 verified assets on platform.
+Live market value: Unverified (No live portfolio record).
 """
 
     return f"""
@@ -297,4 +296,4 @@ User ID:
 STATUS:
 The live platform portfolio service at {PLATFORM_SERVICE_URL} was unreachable ({reason}).
 No fallback mock baseline is available.
-"""
+"""
