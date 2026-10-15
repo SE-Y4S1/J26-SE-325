@@ -28,6 +28,7 @@ if PARENT_DIR not in sys.path:
 
 from tools.portfolio_tools import (
     DEFAULT_PORTFOLIO_ID,
+    DEFAULT_USER_ID,
     EXAMPLE_SECRET,
     MIN_SECRET_LENGTH,
     PLATFORM_ALGORITHM,
@@ -36,6 +37,7 @@ from tools.portfolio_tools import (
     get_auth_header,
     get_portfolio_analysis,
     query_live_portfolio_service,
+    resolve_user_id,
     validate_platform_secret,
 )
 
@@ -148,8 +150,9 @@ class TestPortfolioAuthAndIntegration(unittest.TestCase):
             self.assertIn("Portfolio not found on platform service", output)
             self.assertIn("NOT the user's actual portfolio", output)
             self.assertIn("synthetic baseline estimates for demonstration only", output)
-            self.assertIn("Live holdings: 0 verified assets on platform", output)
+            self.assertIn("Live holdings: Unverified", output)
             self.assertIn("Live market value: Unverified (No live portfolio record)", output)
+            self.assertIn("Resolved User Identity:\n1", output)
 
     def test_fallback_labels_all_synthetic_metrics_as_mock_baseline(self):
         """All metrics and allocations in fallback must be explicitly marked as illustrative mock examples."""
@@ -173,6 +176,7 @@ class TestPortfolioAuthAndIntegration(unittest.TestCase):
             self.assertIn("ILLUSTRATIVE CURRENT ALLOCATION (Mock Baseline Example Only):", output)
             self.assertIn("ILLUSTRATIVE OBSERVATIONS (Sample Demonstration Only):", output)
             self.assertIn("Do not describe these synthetic metrics, asset allocations, or observations as the user's actual portfolio.", output)
+            self.assertIn("Resolved User Identity:\n1 (Requested: 'USER001')", output)
 
     def test_live_portfolio_success_mapping(self):
         """Successful 200 response from platform maps live holdings and valuations accurately."""
@@ -257,6 +261,178 @@ class TestPortfolioAuthAndIntegration(unittest.TestCase):
         val_good = validate_evidence_claims(good_answer, evidence)
         self.assertTrue(val_good["passed"])
         self.assertEqual(len(val_good["issues"]), 0)
+
+    def test_placeholder_user_id_resolution(self):
+        """Placeholders like 'your_user_id' and 'USER001' resolve to configured default user ID."""
+        self.assertEqual(resolve_user_id("your_user_id"), "1")
+        self.assertEqual(resolve_user_id("USER001"), "1")
+        self.assertEqual(resolve_user_id("user_id"), "1")
+        self.assertEqual(resolve_user_id(""), "1")
+        self.assertEqual(resolve_user_id(None), "1")
+        self.assertEqual(resolve_user_id("not_a_number"), "1")
+        self.assertEqual(resolve_user_id("42"), "42")
+
+    def test_jwt_subject_selection_with_placeholders(self):
+        """Tokens minted for placeholder user IDs use resolved default user ID as subject."""
+        with patch.dict(os.environ, {"JWT_SECRET": VALID_TEST_SECRET, "PORTFOLIO_AUTH_TOKEN": ""}):
+            header = get_auth_header("your_user_id")
+            token = header["Authorization"].split(" ")[1]
+            decoded = jwt.decode(token, VALID_TEST_SECRET, algorithms=[PLATFORM_ALGORITHM], issuer=PLATFORM_ISSUER)
+            self.assertEqual(decoded["sub"], "1")
+
+            header_2 = get_auth_header("USER001")
+            token_2 = header_2["Authorization"].split(" ")[1]
+            decoded_2 = jwt.decode(token_2, VALID_TEST_SECRET, algorithms=[PLATFORM_ALGORITHM], issuer=PLATFORM_ISSUER)
+            self.assertEqual(decoded_2["sub"], "1")
+
+    def test_empty_portfolio_list_fallback(self):
+        """Empty list [] from GET /portfolios triggers clean fallback and does not claim zero holdings."""
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps([]).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            output = get_portfolio_analysis.invoke({"user_id": "your_user_id"})
+
+            self.assertIn("PORTFOLIO ANALYSIS — FALLBACK DATA", output)
+            self.assertIn("Empty portfolio list", output)
+            self.assertIn("Live holdings: Unverified (No live portfolio registered on platform)", output)
+            self.assertNotIn("Live holdings: 0 verified assets", output)
+            self.assertIn("Resolved User Identity:\n1 (Requested: 'your_user_id')", output)
+            self.assertIn("Illustrative Baseline Valuation: LKR 1,000,000 (Mock Baseline Demonstration Only)", output)
+
+    def test_portfolio_list_retrieval_and_detail_fetch(self):
+        """Non-empty list from GET /portfolios selects the portfolio ID and fetches detailed record."""
+        portfolio_list_json = json.dumps([{"id": 5, "name": "Tech Growth", "base_currency": "USD"}]).encode("utf-8")
+        portfolio_detail_json = json.dumps({
+            "id": 5,
+            "user_id": 1,
+            "name": "Tech Growth",
+            "base_currency": "USD",
+            "total_value": 120000.0,
+            "holdings": [
+                {
+                    "symbol": "NVDA",
+                    "quantity": 1000.0,
+                    "current_price": 120.0,
+                    "cost_basis": 90.0,
+                    "avg_daily_volume": 50000000.0,
+                }
+            ],
+        }).encode("utf-8")
+
+        def fake_urlopen(req, timeout=1.5):
+            url = getattr(req, "full_url", str(req))
+            resp = MagicMock()
+            resp.status = 200
+            if "/portfolios/5" in url:
+                resp.read.return_value = portfolio_detail_json
+            else:
+                resp.read.return_value = portfolio_list_json
+            resp.__enter__.return_value = resp
+            return resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            output = get_portfolio_analysis.invoke({"user_id": "1"})
+
+            self.assertIn("PORTFOLIO ANALYSIS — LIVE PLATFORM RECORD", output)
+            self.assertIn("Portfolio ID:\n5", output)
+            self.assertIn("Tech Growth", output)
+            self.assertIn("NVDA", output)
+            self.assertIn("USD 120,000.00", output)
+            self.assertNotIn("FALLBACK DATA", output)
+
+    def test_existing_portfolio_with_zero_holdings(self):
+        """Active portfolio with empty holdings is reported as live record with 0 positions, not fallback."""
+        portfolio_list_json = json.dumps([{"id": 8, "name": "Empty Cash Fund", "base_currency": "USD"}]).encode("utf-8")
+        portfolio_detail_json = json.dumps({
+            "id": 8,
+            "user_id": 1,
+            "name": "Empty Cash Fund",
+            "base_currency": "USD",
+            "total_value": 0.0,
+            "holdings": [],
+        }).encode("utf-8")
+
+        def fake_urlopen(req, timeout=1.5):
+            url = getattr(req, "full_url", str(req))
+            resp = MagicMock()
+            resp.status = 200
+            if "/portfolios/8" in url:
+                resp.read.return_value = portfolio_detail_json
+            else:
+                resp.read.return_value = portfolio_list_json
+            resp.__enter__.return_value = resp
+            return resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            output = get_portfolio_analysis.invoke({"user_id": "1"})
+
+            self.assertIn("PORTFOLIO ANALYSIS — LIVE PLATFORM RECORD", output)
+            self.assertIn("Portfolio ID:\n8", output)
+            self.assertIn("Holding Count:\n0", output)
+            self.assertIn("Live API confirms 0 active positions", output)
+            self.assertIn("Active live portfolio record retrieved (0 holdings recorded)", output)
+            self.assertNotIn("FALLBACK DATA", output)
+
+    def test_explicit_numeric_portfolio_id_direct_lookup(self):
+        """Explicit numeric portfolio_id queries GET /portfolios/{portfolio_id} directly."""
+        portfolio_detail_json = json.dumps({
+            "id": 12,
+            "user_id": 1,
+            "name": "Direct Special Fund",
+            "base_currency": "USD",
+            "total_value": 25000.0,
+            "holdings": [],
+        }).encode("utf-8")
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = portfolio_detail_json
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            output = get_portfolio_analysis.invoke({"user_id": "1", "portfolio_id": "12"})
+
+            self.assertIn("PORTFOLIO ANALYSIS — LIVE PLATFORM RECORD", output)
+            self.assertIn("Portfolio ID:\n12", output)
+            self.assertIn("Direct Special Fund", output)
+
+    def test_explicit_portfolio_id_cross_user_forbidden(self):
+        """Accessing portfolio owned by a different user returns not owned fallback."""
+        portfolio_detail_json = json.dumps({
+            "id": 99,
+            "user_id": 2,  # Owned by user 2, but caller is user 1
+            "name": "User 2 Fund",
+            "base_currency": "USD",
+            "total_value": 50000.0,
+            "holdings": [],
+        }).encode("utf-8")
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = portfolio_detail_json
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            output = get_portfolio_analysis.invoke({"user_id": "1", "portfolio_id": "99"})
+
+            self.assertIn("FALLBACK DATA", output)
+            self.assertIn("Portfolio 99 not owned by user 1", output)
+
+    def test_malformed_json_fallback(self):
+        """Platform returning malformed JSON is caught safely as fallback."""
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b"<!DOCTYPE html><html><body>Error</body></html>"
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            output = get_portfolio_analysis.invoke({"user_id": "1"})
+
+            self.assertIn("FALLBACK DATA", output)
+            self.assertIn("Malformed JSON", output)
 
 
 if __name__ == "__main__":

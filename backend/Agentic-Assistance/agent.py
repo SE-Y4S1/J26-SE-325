@@ -1,3 +1,4 @@
+import os
 import re
 from typing import Annotated
 
@@ -164,8 +165,11 @@ class AgentState(TypedDict):
 # LOCAL LLM
 # --------------------------------------------------
 
+OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+
 llm = ChatOllama(
-    model="llama3.2:3b",
+    model=os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
+    base_url=OLLAMA_URL,
     temperature=0.1,
 )
 
@@ -259,6 +263,13 @@ or liquidity, call ONLY:
 
 get_portfolio_analysis
 
+If the user does not specify a user ID or portfolio ID,
+call get_portfolio_analysis with the default user ID:
+
+1
+
+Do not invent placeholder strings such as "your_user_id" or "USER001".
+
 When a user asks about blockchain records,
 audit history, verification, or recorded decisions,
 call ONLY:
@@ -324,7 +335,7 @@ SHAP EVIDENCE ACCURACY — CRITICAL:
    - When live portfolio data is UNAVAILABLE (portfolio not found, unauthenticated, or service unreachable):
      a. You MUST BEGIN your response with a clear notice that no live portfolio was retrieved for the user from the platform service (e.g. "Notice: No live portfolio record was retrieved for your account from the platform service...").
      b. NEVER describe fallback portfolio metrics, valuations (such as LKR 1,000,000), or allocations as the user's actual portfolio, balance, or investments.
-     c. Explicitly state that the user has zero verified live holdings on record.
+     c. Do not claim that the user has zero holdings unless the live API response explicitly confirms an active portfolio with zero holdings. If no live portfolio record was retrieved (or the portfolio list is empty), state that live holdings are unverified.
      d. Either omit the synthetic metrics entirely, or clearly label every mentioned metric, return estimate, risk score, diversification score, liquidity rating, and allocation as an illustrative mock baseline example for demonstration only.
 
 8. Explain uncertainty and limitations in clear language. If the evidence is insufficient to support a conclusion, say so explicitly.

@@ -17,10 +17,10 @@ DATA_FILE = (
 )
 
 # Load trusted configuration from repository root .env if not already set in environment
-for env_candidate in [
-    Path(__file__).resolve().parents[1] / ".env",  # backend/Agentic-Assistance/.env
-    Path(__file__).resolve().parents[3] / ".env",  # repository root .env
-]:
+env_candidates = [Path(__file__).resolve().parents[1] / ".env"]
+if len(Path(__file__).resolve().parents) > 3:
+    env_candidates.append(Path(__file__).resolve().parents[3] / ".env")
+for env_candidate in env_candidates:
     if env_candidate.is_file():
         load_dotenv(env_candidate, override=False)
 
@@ -31,12 +31,40 @@ PLATFORM_SERVICE_URL = os.getenv(
 
 PORTFOLIO_TIMEOUT_SECONDS = float(os.getenv("PORTFOLIO_SERVICE_TIMEOUT", "1.5"))
 DEFAULT_PORTFOLIO_ID = os.getenv("PORTFOLIO_ID", "1")
+DEFAULT_USER_ID = os.getenv("PLATFORM_USER_ID", os.getenv("DEFAULT_USER_ID", "1"))
 
 # Platform validation invariants (matching backend/Platform/auth/security.py)
 PLATFORM_ISSUER = "j26-se-325-platform"
 PLATFORM_ALGORITHM = "HS256"
 EXAMPLE_SECRET = "change-me-to-a-long-random-string"
 MIN_SECRET_LENGTH = 32
+
+KNOWN_PLACEHOLDERS = {
+    "your_user_id",
+    "user001",
+    "user_id",
+    "your_id",
+    "default",
+    "placeholder",
+    "none",
+    "null",
+}
+
+
+def resolve_user_id(candidate: str | None) -> str:
+    """
+    Resolve user identifier to a valid numeric user ID string.
+    If the candidate is missing, a known placeholder ('your_user_id', 'USER001'),
+    or non-numeric, falls back to the configured default user ID.
+    """
+    if not candidate:
+        return DEFAULT_USER_ID
+    clean = str(candidate).strip()
+    if clean.lower() in KNOWN_PLACEHOLDERS:
+        return DEFAULT_USER_ID
+    if clean.isdigit() and int(clean) > 0:
+        return clean
+    return DEFAULT_USER_ID
 
 
 def validate_platform_secret(secret: str | None) -> bool:
@@ -82,7 +110,7 @@ def get_auth_header(user_id: str = "1") -> dict:
         import jwt
 
         # Platform requires subject to be a numeric string representing an integer user id
-        numeric_sub = str(int(user_id)) if str(user_id).isdigit() else "1"
+        numeric_sub = resolve_user_id(user_id)
         now = datetime.now(timezone.utc)
         payload = {
             "sub": numeric_sub,
@@ -96,22 +124,11 @@ def get_auth_header(user_id: str = "1") -> dict:
         return {}
 
 
-def query_live_portfolio_service(
-    portfolio_identifier: str = DEFAULT_PORTFOLIO_ID,
-    base_url: str = PLATFORM_SERVICE_URL,
-    timeout: float = PORTFOLIO_TIMEOUT_SECONDS,
-) -> dict:
+def _http_get(url: str, headers: dict, timeout: float) -> tuple[int | None, object, str | None]:
     """
-    Query the platform service for read-only portfolio holdings.
+    Safely execute an HTTP GET request returning (status_code, parsed_json, error_message).
     """
-    target_id = portfolio_identifier if str(portfolio_identifier).isdigit() else DEFAULT_PORTFOLIO_ID
-    url = f"{base_url}/portfolios/{target_id}"
-
-    headers = {"Accept": "application/json"}
-    headers.update(get_auth_header(user_id=target_id))
-
     req = urllib.request.Request(url, headers=headers)
-
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
             status_code = getattr(response, "status", 200)
@@ -119,49 +136,182 @@ def query_live_portfolio_service(
             text = raw_bytes.decode("utf-8")
             try:
                 data = json.loads(text)
-                return {
-                    "available": True,
-                    "status_code": status_code,
-                    "data": data,
-                    "error": None,
-                }
+                return status_code, data, None
             except json.JSONDecodeError:
-                return {
-                    "available": True,
-                    "status_code": status_code,
-                    "data": None,
-                    "error": "Malformed JSON returned by platform service",
-                }
+                return status_code, None, "Malformed JSON returned by platform service"
     except urllib.error.HTTPError as err:
         try:
             error_body = err.read().decode("utf-8")
             data = json.loads(error_body)
         except Exception:
             data = None
+        return err.code, data, f"HTTP {err.code}: {err.reason}"
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as err:
+        return None, None, f"Service unavailable ({err})"
+    except Exception as err:
+        return None, None, f"Unexpected error querying portfolio service ({err})"
+
+
+def query_live_portfolio_service(
+    portfolio_identifier: str | None = None,
+    user_id: str | None = None,
+    portfolio_id: str | int | None = None,
+    base_url: str = PLATFORM_SERVICE_URL,
+    timeout: float = PORTFOLIO_TIMEOUT_SECONDS,
+) -> dict:
+    """
+    Query the platform service for read-only portfolio holdings.
+
+    1. Resolves authenticated user identity (defaulting invalid placeholders to DEFAULT_USER_ID).
+    2. If explicit numeric portfolio_id is provided, queries GET /portfolios/{portfolio_id}
+       and ensures ownership.
+    3. Otherwise, queries GET /portfolios to retrieve the caller's portfolio list.
+       - If empty, returns clear no-live-portfolio result.
+       - If non-empty, selects the first portfolio ID and queries its details.
+    """
+    # Disambiguate legacy portfolio_identifier if passed positionally or by keyword
+    if user_id is None and portfolio_identifier is not None:
+        clean_id = str(portfolio_identifier).strip()
+        if clean_id.lower() in KNOWN_PLACEHOLDERS or not clean_id.isdigit():
+            user_id = clean_id
+        elif portfolio_id is None:
+            user_id = DEFAULT_USER_ID
+            portfolio_id = clean_id
+
+    resolved_user = resolve_user_id(user_id)
+    headers = {"Accept": "application/json"}
+    headers.update(get_auth_header(user_id=resolved_user))
+
+    # Case 1: Explicit numeric portfolio_id was provided
+    if portfolio_id is not None and str(portfolio_id).strip().isdigit():
+        target_p_id = str(portfolio_id).strip()
+        url = f"{base_url}/portfolios/{target_p_id}"
+        status_code, data, err = _http_get(url, headers=headers, timeout=timeout)
+        if status_code == 200 and isinstance(data, dict):
+            # Verify ownership if user_id present in response
+            p_user = data.get("user_id")
+            if p_user is not None and str(p_user) != resolved_user:
+                return {
+                    "available": True,
+                    "status_code": 404,
+                    "data": None,
+                    "resolved_user_id": resolved_user,
+                    "portfolio_id": target_p_id,
+                    "empty_list": False,
+                    "error": f"Portfolio {target_p_id} not owned by user {resolved_user}",
+                }
+            return {
+                "available": True,
+                "status_code": 200,
+                "data": data,
+                "resolved_user_id": resolved_user,
+                "portfolio_id": target_p_id,
+                "empty_list": False,
+                "error": None,
+            }
+        return {
+            "available": status_code is not None,
+            "status_code": status_code,
+            "data": data,
+            "resolved_user_id": resolved_user,
+            "portfolio_id": target_p_id,
+            "empty_list": False,
+            "error": err,
+        }
+
+    # Case 2: Standard user portfolio lookup via GET /portfolios
+    list_url = f"{base_url}/portfolios"
+    status_code, data, err = _http_get(list_url, headers=headers, timeout=timeout)
+
+    if status_code != 200:
+        return {
+            "available": status_code is not None,
+            "status_code": status_code,
+            "data": data,
+            "resolved_user_id": resolved_user,
+            "portfolio_id": None,
+            "empty_list": False,
+            "error": err or f"HTTP {status_code}",
+        }
+
+    # If platform returns a list
+    if isinstance(data, list):
+        if len(data) == 0:
+            return {
+                "available": True,
+                "status_code": 200,
+                "data": None,
+                "resolved_user_id": resolved_user,
+                "portfolio_id": None,
+                "empty_list": True,
+                "error": None,
+            }
+
+        # Select first portfolio ID and retrieve details
+        selected_p = data[0]
+        selected_id = selected_p.get("id") if isinstance(selected_p, dict) else None
+        if selected_id is None:
+            return {
+                "available": True,
+                "status_code": 200,
+                "data": None,
+                "resolved_user_id": resolved_user,
+                "portfolio_id": None,
+                "empty_list": True,
+                "error": "Unexpected portfolio list item format",
+            }
+
+        detail_url = f"{base_url}/portfolios/{selected_id}"
+        detail_status, detail_data, detail_err = _http_get(detail_url, headers=headers, timeout=timeout)
+        if detail_status == 200 and isinstance(detail_data, dict):
+            return {
+                "available": True,
+                "status_code": 200,
+                "data": detail_data,
+                "resolved_user_id": resolved_user,
+                "portfolio_id": str(selected_id),
+                "empty_list": False,
+                "error": None,
+            }
+        return {
+            "available": detail_status is not None,
+            "status_code": detail_status,
+            "data": detail_data,
+            "resolved_user_id": resolved_user,
+            "portfolio_id": str(selected_id),
+            "empty_list": False,
+            "error": detail_err,
+        }
+
+    # Safe handling: if endpoint returned a portfolio dict directly (e.g. single-response mock)
+    if isinstance(data, dict):
+        p_id = str(data.get("id", "1"))
         return {
             "available": True,
-            "status_code": err.code,
+            "status_code": 200,
             "data": data,
-            "error": f"HTTP {err.code}: {err.reason}",
+            "resolved_user_id": resolved_user,
+            "portfolio_id": p_id,
+            "empty_list": False,
+            "error": None,
         }
-    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as err:
-        return {
-            "available": False,
-            "status_code": None,
-            "data": None,
-            "error": f"Service unavailable ({err})",
-        }
-    except Exception as err:
-        return {
-            "available": False,
-            "status_code": None,
-            "data": None,
-            "error": f"Unexpected error querying portfolio service ({err})",
-        }
+
+    return {
+        "available": True,
+        "status_code": 200,
+        "data": None,
+        "resolved_user_id": resolved_user,
+        "portfolio_id": None,
+        "empty_list": False,
+        "error": err or "Unexpected response format from portfolio endpoint",
+    }
 
 
 @tool
-def get_portfolio_analysis(user_id: str = "USER001") -> str:
+def get_portfolio_analysis(
+    user_id: str = "1",
+    portfolio_id: str | None = None,
+) -> str:
     """
     Analyze the user's investment portfolio.
 
@@ -169,38 +319,49 @@ def get_portfolio_analysis(user_id: str = "USER001") -> str:
     portfolio performance, portfolio risk, diversification,
     asset allocation, liquidity, or investment recommendations.
     """
-
     mock_data = load_mock_data()
     mock_portfolio = mock_data.get("portfolio")
     mock_allocation = mock_portfolio.get("allocation", {}) if mock_portfolio else {}
 
-    live_res = query_live_portfolio_service(portfolio_identifier=user_id)
+    user_id_param = str(user_id) if user_id is not None else DEFAULT_USER_ID
+    resolved_user = resolve_user_id(user_id_param)
+
+    live_res = query_live_portfolio_service(user_id=user_id_param, portfolio_id=portfolio_id)
 
     # 1. LIVE SERVICE RETURNED A VALID PORTFOLIO RECORD
-    if live_res["available"] and live_res["status_code"] == 200 and isinstance(live_res["data"], dict):
+    if live_res["available"] and live_res["status_code"] == 200 and isinstance(live_res.get("data"), dict):
         p = live_res["data"]
-        p_id = p.get("id", "N/A")
+        p_id = live_res.get("portfolio_id") or p.get("id", "N/A")
         name = p.get("name", "Unnamed Portfolio")
         currency = p.get("base_currency", "USD")
         total_value = float(p.get("total_value", 0.0))
         holdings = p.get("holdings", [])
 
-        holdings_lines = []
-        for h in holdings:
-            sym = h.get("symbol", "UNKNOWN")
-            qty = float(h.get("quantity", 0.0))
-            price = float(h.get("current_price", 0.0))
-            val = qty * price
-            wt = (val / total_value * 100.0) if total_value > 0 else 0.0
-            cost = h.get("cost_basis")
-            cost_str = f"Cost Basis: {currency} {float(cost):,.2f}; " if cost is not None else ""
-            adv = h.get("avg_daily_volume")
-            adv_str = f"ADV: {float(adv):,.0f}" if adv is not None else ""
-            holdings_lines.append(
-                f"- {sym}: {qty:,.2f} units @ {currency} {price:,.2f} = {currency} {val:,.2f} ({wt:.1f}% of portfolio); {cost_str}{adv_str}".strip()
-            )
-
-        holdings_text = "\n".join(holdings_lines) if holdings_lines else "- No holdings recorded"
+        if holdings:
+            holdings_lines = []
+            for h in holdings:
+                sym = h.get("symbol", "UNKNOWN")
+                qty = float(h.get("quantity", 0.0))
+                price = float(h.get("current_price", 0.0))
+                val = qty * price
+                wt = (val / total_value * 100.0) if total_value > 0 else 0.0
+                cost = h.get("cost_basis")
+                cost_str = f"Cost Basis: {currency} {float(cost):,.2f}; " if cost is not None else ""
+                adv = h.get("avg_daily_volume")
+                adv_str = f"ADV: {float(adv):,.0f}" if adv is not None else ""
+                holdings_lines.append(
+                    f"- {sym}: {qty:,.2f} units @ {currency} {price:,.2f} = {currency} {val:,.2f} ({wt:.1f}% of portfolio); {cost_str}{adv_str}".strip()
+                )
+            holdings_text = "\n".join(holdings_lines)
+            observations_text = f"""- Live holdings and asset valuations retrieved directly from the platform portfolio store.
+- Total recorded market value: {currency} {total_value:,.2f}.
+- Largest recorded positions: {', '.join(h.get('symbol', '') for h in holdings[:3]) or 'None'}."""
+            lookup_status = "Active live portfolio record retrieved from platform service."
+        else:
+            holdings_text = "- No holdings recorded in this portfolio. Live API confirms 0 active positions."
+            observations_text = f"""- Active portfolio record exists on the platform, but currently contains 0 assets/holdings.
+- Total recorded market value: {currency} 0.00."""
+            lookup_status = "Active live portfolio record retrieved (0 holdings recorded)."
 
         return f"""
 PORTFOLIO ANALYSIS — LIVE PLATFORM RECORD
@@ -208,8 +369,14 @@ PORTFOLIO ANALYSIS — LIVE PLATFORM RECORD
 Data Source:
 Live platform portfolio store ({PLATFORM_SERVICE_URL}).
 
+Resolved User ID:
+{resolved_user}
+
 Portfolio ID:
 {p_id}
+
+Live Lookup Status:
+{lookup_status}
 
 Portfolio Name:
 {name}
@@ -227,23 +394,42 @@ RECORDED HOLDINGS:
 {holdings_text}
 
 OBSERVATIONS:
-- Live holdings and asset valuations retrieved directly from the platform portfolio store.
-- Total recorded market value: {currency} {total_value:,.2f}.
-- Largest recorded positions: {', '.join(h.get('symbol', '') for h in holdings[:3]) or 'None'}.
+{observations_text}
 
 METRIC NOTICE:
 The platform portfolio service stores live asset holdings and valuation.
 Optimization metrics (such as expected annual return and risk scores) require running Component 1's analytical models and are not stored in the base portfolio record.
 """
 
-    # 2. FALLBACK HANDLING (NOT FOUND, UNAUTHENTICATED, TIMED OUT, OR OFFLINE)
+    # 2. FALLBACK HANDLING (NOT FOUND, EMPTY LIST, UNAUTHENTICATED, TIMED OUT, OR OFFLINE)
     status_code = live_res.get("status_code")
-    if status_code == 404:
-        reason = f"Portfolio not found on platform service ({PLATFORM_SERVICE_URL})"
+    empty_list = live_res.get("empty_list", False)
+
+    if empty_list:
+        reason = f"No portfolios registered for user on platform service ({PLATFORM_SERVICE_URL})"
+        lookup_status = "Empty portfolio list (User has no portfolios on platform)"
+        holdings_disclosure = "Live holdings: Unverified (No live portfolio registered on platform)"
+        holdings_note = f"No live portfolio was retrieved for user '{resolved_user}' from the platform service (account has no registered portfolios)"
+    elif status_code == 404:
+        err_msg = live_res.get("error")
+        if err_msg and not err_msg.startswith("HTTP 404"):
+            reason = err_msg
+            lookup_status = err_msg
+        else:
+            reason = f"Portfolio not found on platform service ({PLATFORM_SERVICE_URL})"
+            lookup_status = "Portfolio not found on platform service"
+        holdings_disclosure = "Live holdings: Unverified (No live portfolio record retrieved)"
+        holdings_note = f"No live portfolio was retrieved for user '{resolved_user}' from the platform service"
     elif status_code in (401, 403):
         reason = f"Platform service authentication required ({live_res.get('error')})"
+        lookup_status = f"Platform service authentication required ({live_res.get('error')})"
+        holdings_disclosure = "Live holdings: Unverified (Authentication required)"
+        holdings_note = f"Platform authentication required for user '{resolved_user}'"
     else:
         reason = live_res.get("error") or "Live platform service unreachable"
+        lookup_status = f"Service unavailable ({live_res.get('error')})"
+        holdings_disclosure = "Live holdings: Unverified (Service unreachable)"
+        holdings_note = f"Platform service unreachable for user '{resolved_user}'"
 
     if mock_portfolio:
         alloc_lines = "\n".join(f"- {k}: {v}% (Mock Baseline)" for k, v in mock_allocation.items())
@@ -254,15 +440,21 @@ Data Source:
 Local mock baseline (live platform service at {PLATFORM_SERVICE_URL}: {reason}).
 
 STATUS:
-NO LIVE PORTFOLIO RECORD RETRIEVED for user ID '{user_id}'.
+NO LIVE PORTFOLIO RECORD RETRIEVED for user ID '{resolved_user}'.
 Platform service note: {reason}.
 
+Live Lookup Status:
+{lookup_status}
+
+Resolved User Identity:
+{resolved_user} (Requested: '{user_id_param}')
+
 FALLBACK NOTICE:
-No live portfolio was retrieved for user '{user_id}' from the platform service ({reason}).
+{holdings_note} ({reason}).
 This record is NOT the user's actual portfolio. All metrics, valuations, and allocations below are synthetic baseline estimates for demonstration only. The user does NOT have a verified balance of LKR {mock_portfolio.get("total_value_lkr", 0):,} or active live holdings on record.
 
 User ID:
-{user_id}
+{resolved_user}
 
 ILLUSTRATIVE MOCK BASELINE ESTIMATES (NOT ACTUAL USER PORTFOLIO):
 - Illustrative Baseline Valuation: LKR {mock_portfolio.get("total_value_lkr", 0):,} (Mock Baseline Demonstration Only)
@@ -283,7 +475,7 @@ ILLUSTRATIVE OBSERVATIONS (Sample Demonstration Only):
 
 IMPORTANT DISCLAIMER:
 Do not describe these synthetic metrics, asset allocations, or observations as the user's actual portfolio.
-Live holdings: 0 verified assets on platform.
+{holdings_disclosure}.
 Live market value: Unverified (No live portfolio record).
 """
 
@@ -291,7 +483,13 @@ Live market value: Unverified (No live portfolio record).
 PORTFOLIO ANALYSIS — SERVICE UNAVAILABLE
 
 User ID:
-{user_id}
+{resolved_user}
+
+Resolved User Identity:
+{resolved_user} (Requested: '{user_id_param}')
+
+Live Lookup Status:
+{lookup_status}
 
 STATUS:
 The live platform portfolio service at {PLATFORM_SERVICE_URL} was unreachable ({reason}).
