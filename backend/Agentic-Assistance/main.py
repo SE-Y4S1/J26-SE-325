@@ -2,10 +2,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Load trusted configuration from repository root .env if not already set in environment
-for env_candidate in [
-    Path(__file__).resolve().parent / ".env",
-    Path(__file__).resolve().parents[2] / ".env",
-]:
+env_candidates = [Path(__file__).resolve().parent / ".env"]
+if len(Path(__file__).resolve().parents) > 2:
+    env_candidates.append(Path(__file__).resolve().parents[2] / ".env")
+for env_candidate in env_candidates:
     if env_candidate.is_file():
         load_dotenv(env_candidate, override=False)
 
