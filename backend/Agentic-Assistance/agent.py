@@ -52,6 +52,106 @@ def is_greeting_or_general(text: str) -> bool:
     return any(re.search(pattern, clean) for pattern in greeting_patterns)
 
 
+def is_arithmetic_query(text: str) -> bool:
+    """
+    Determine if a user query is a simple arithmetic calculation or math question.
+    """
+    clean = text.strip().lower()
+
+    # If query explicitly targets specific financial entities, it is not a pure arithmetic question.
+    if re.search(r"\b(?:tx\d*|transaction|portfolio|fraud|blockchain|audit)\b", clean):
+        return False
+
+    arithmetic_patterns = [
+        # Match math expressions like "what is 2 + 2", "what is 2 +2", "calculate 15 * 4", "100 / 5", "50 - 25"
+        r"(?:what\s+(?:is|\'s)|calculate|solve|evaluate|compute|how\s+much\s+is)?\s*\(?\s*-?\d+(?:\.\d+)?\s*\)?\s*(?:[\+\-\*\/\^%x×÷]|plus|minus|times|divided\s+by|multiplied\s+by)\s*\(?\s*-?\d+",
+        # Pure math equation e.g. "2+2", "2 + 2 = ?"
+        r"^\s*\(?\s*-?\d+(?:\.\d+)?\s*\)?\s*(?:[\+\-\*\/\^%x×÷]|plus|minus|times|divided\s+by|multiplied\s+by)\s*\(?\s*-?\d+(?:\.\d+)?\s*\)?(?:\s*=\s*\??)?\s*$",
+        # Word-based math queries e.g. "what is 5 times 6", "10 plus 20"
+        r"\b(?:what\s+(?:is|\'s)|calculate|solve|compute)\s+\d+(?:\.\d+)?\s+(?:plus|minus|times|divided\s+by|multiplied\s+by)\s+\d+",
+        # Functions like "sum of 4 and 5", "product of 3 and 7", "square root of 144"
+        r"\b(?:sum|difference|product|quotient|square\s+root)\s+of\s+\d+",
+    ]
+
+    return any(re.search(pattern, clean) for pattern in arithmetic_patterns)
+
+
+def has_financial_intent(text: str) -> bool:
+    """
+    Determine whether a user query has genuine financial intent requiring financial tools
+    (fraud analysis, portfolio analysis, or blockchain audit verification).
+    """
+    clean = text.strip().lower()
+
+    # Specific financial and domain-specific terms
+    financial_keywords = [
+        # Explicit transaction and entity references
+        r"\btx\d*\b",
+        r"\btransactions?\b",
+        r"\btransfers?\b",
+        r"\bpayments?\b",
+        r"\bchargebacks?\b",
+        # Fraud, scams, and risk metrics
+        r"\bfraud(?:ulent)?\b",
+        r"\bscams?\b",
+        r"\brisk\s*score\b",
+        r"\bfraud\s*score\b",
+        r"\bfraud\s*risk\b",
+        r"\bshap\b",
+        r"\bsuspicious\s*(?:activity|transaction|charge|transfer|payment|login)\b",
+        # Blocked / flagged / declined in financial context
+        r"\b(?:blocked|flagged|declined|rejected)\s+(?:transaction|tx\d*|transfer|payment|card|account|withdrawal|charge)\b",
+        r"\b(?:transaction|tx\d*|transfer|payment|card|account|withdrawal|charge)\s+(?:was\s+|is\s+|got\s+)?(?:blocked|flagged|declined|rejected)\b",
+        r"\bwhy\s+was\s+(?:my\s+|the\s+)?(?:transaction|tx\d*|transfer|payment|card|account|charge)\s+(?:blocked|flagged|declined|rejected)\b",
+        # Portfolio, assets, holdings
+        r"\bportfolios?\b",
+        r"\bholdings?\b",
+        r"\basset\s*allocations?\b",
+        r"\ballocations?\b",
+        r"\bdiversif\w+\b",
+        r"\bliquidity(?:\s*risk)?\b",
+        r"\brebalanc\w+\b",
+        r"\binvestments?\b",
+        # Blockchain, audit, ledger
+        r"\bblockchains?\b",
+        r"\baudits?\b",
+        r"\bledgers?\b",
+        r"\bsmart\s*contracts?\b",
+        r"\bblock\s*numbers?\b",
+        r"\btx_hash\b",
+        r"\b(crypto|cryptocurrency|token|tokens|lkr|usd|eur|gbp)\b",
+    ]
+
+    return any(re.search(pattern, clean) for pattern in financial_keywords)
+
+
+def should_route_to_financial_tools(text: str) -> bool:
+    """
+    Determine if a user query requires financial tools (fraud, portfolio, blockchain audit).
+
+    Returns False for:
+    - Greetings and general capability inquiries
+    - Simple arithmetic and math questions
+    - General knowledge and non-financial questions
+    - Ambiguous queries lacking financial context
+
+    Returns True only when the query exhibits clear financial intent
+    matching one of our financial domains (fraud/transactions, portfolio, blockchain audit).
+    """
+    clean = text.strip().lower()
+
+    # Greetings and capability inquiries never invoke financial tools
+    if is_greeting_or_general(clean):
+        return False
+
+    # Simple arithmetic never invokes financial tools
+    if is_arithmetic_query(clean):
+        return False
+
+    # Only route to tools if there is clear financial intent
+    return has_financial_intent(clean)
+
+
 # --------------------------------------------------
 # STATE
 # --------------------------------------------------
@@ -104,6 +204,30 @@ or asks about your general capabilities (such as "What can you help me with?",
   1. Explaining fraud decisions, recorded risk scores, and contributing factors.
   2. Analyzing portfolio allocation, diversification, and liquidity risk.
   3. Verifying blockchain audit records and transaction ledger status.
+
+--------------------------------------------------
+NON-FINANCIAL AND GENERAL QUESTIONS
+--------------------------------------------------
+
+If the user asks a question unrelated to finance, such as simple arithmetic
+(e.g., "what is 2 + 2", "what is 2 +2", "calculate 15 * 4"), general knowledge (e.g.,
+"what is the capital of France?"), definitions, or casual conversation:
+- DO NOT CALL ANY TOOLS.
+- Do NOT invoke get_fraud_analysis, get_portfolio_analysis, or get_blockchain_audit.
+- Provide a direct, correct, and concise answer without inventing transactions,
+  mock records, or unnecessary financial disclaimers.
+
+--------------------------------------------------
+AMBIGUOUS OR UNCLEAR QUESTIONS
+--------------------------------------------------
+
+If the user's question is ambiguous, lacks context, or does not clearly specify
+a transaction, portfolio, or audit record to inspect (e.g., "Can you check it?",
+"Why did this occur?", "What happened?"):
+- DO NOT invent a transaction or make assumptions.
+- DO NOT call any financial tools.
+- Politely ask the user to clarify their request or provide the transaction ID
+  (e.g., TX1001), portfolio query, or blockchain record they would like to analyze.
 
 --------------------------------------------------
 TOOL USAGE RULES
@@ -195,7 +319,13 @@ SHAP EVIDENCE ACCURACY — CRITICAL:
 
 6. Never invent causes, financial misconduct, transaction details, model behavior, or verification results that are not supported by the available evidence.
 
-7. For portfolio analysis, identify mock portfolio figures as illustrative, not as verified information about a real user's holdings. Do not present mock metrics as personalized investment advice.
+7. For portfolio analysis:
+   - When live portfolio data is returned: explain the retrieved live holdings, quantities, and valuations as recorded in the platform store. Disclose that optimization metrics require Component 1 analytical modeling.
+   - When live portfolio data is UNAVAILABLE (portfolio not found, unauthenticated, or service unreachable):
+     a. You MUST BEGIN your response with a clear notice that no live portfolio was retrieved for the user from the platform service (e.g. "Notice: No live portfolio record was retrieved for your account from the platform service...").
+     b. NEVER describe fallback portfolio metrics, valuations (such as LKR 1,000,000), or allocations as the user's actual portfolio, balance, or investments.
+     c. Explicitly state that the user has zero verified live holdings on record.
+     d. Either omit the synthetic metrics entirely, or clearly label every mentioned metric, return estimate, risk score, diversification score, liquidity rating, and allocation as an illustrative mock baseline example for demonstration only.
 
 8. Explain uncertainty and limitations in clear language. If the evidence is insufficient to support a conclusion, say so explicitly.
 
@@ -232,6 +362,12 @@ These rules take priority over examples or general explanations elsewhere in thi
 22. REQUIRED FINAL CHECK: Before responding, check every statement about probabilities, model identity, training data, and verification against the returned tool evidence. Remove any unsupported claim.
 
 23. WHEN UNCERTAIN: State what is known, what is unknown, and why. Do not fill gaps with plausible-sounding assumptions.
+
+24. PORTFOLIO FALLBACK: When platform portfolio lookup returns fallback mock data or indicates no live record was retrieved:
+    - Begin your response immediately with a clear notice stating that no live portfolio record was retrieved.
+    - Never state or imply that the user holds LKR 1,000,000, 40% equity, or any real balance.
+    - Qualify every single synthetic metric as an illustrative mock example.
+    - State that the user has zero live holdings on record.
 --------------------------------------------------
 RESPONSIBLE FINANCE
 --------------------------------------------------
@@ -285,14 +421,31 @@ def call_llm(state: AgentState):
     ]
 
     latest_msg = state["messages"][-1] if state.get("messages") else None
-    latest_content = getattr(latest_msg, "content", "") if latest_msg else ""
 
-    # Route pure greetings or general capability inquiries to base LLM without tool binding
-    # to guarantee that no financial tools (fraud, portfolio, blockchain) are invoked.
-    if isinstance(latest_content, str) and is_greeting_or_general(latest_content):
-        response = llm.invoke(messages)
-    else:
+    # If the latest message is a tool response, continue tool-enabled workflow
+    # to allow multi-tool calls or final explanation generation.
+    if getattr(latest_msg, "type", None) == "tool":
         response = llm_with_tools.invoke(messages)
+        return {
+            "messages": [response]
+        }
+
+    latest_content = getattr(latest_msg, "content", "") if latest_msg else ""
+    if isinstance(latest_content, list):
+        latest_text = " ".join(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in latest_content
+        )
+    else:
+        latest_text = str(latest_content)
+
+    # Route to financial tools ONLY when there is clear financial intent.
+    # Non-financial questions (including arithmetic and general knowledge),
+    # greetings, and ambiguous queries route to base LLM without tool binding.
+    if should_route_to_financial_tools(latest_text):
+        response = llm_with_tools.invoke(messages)
+    else:
+        response = llm.invoke(messages)
 
     return {
         "messages": [response]

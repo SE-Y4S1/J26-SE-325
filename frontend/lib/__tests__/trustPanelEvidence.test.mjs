@@ -7,14 +7,37 @@ function parseLatestEvidence(evidenceList = []) {
   const fraudItem = evidenceList.find((e) => e.tool === "get_fraud_analysis");
   const auditItem = evidenceList.find((e) => e.tool === "get_blockchain_audit");
 
-  const isFraudLive = fraudItem?.result ? /LIVE COMPONENT 2/i.test(fraudItem.result) : false;
-  const isAuditLive = auditItem?.result ? /Live Component 3/i.test(auditItem.result) : false;
-  const hasLive = isFraudLive || isAuditLive;
-  const hasFallback =
-    (fraudItem?.result && /FALLBACK MOCK DATA/i.test(fraudItem.result)) ||
-    (auditItem?.result && /FALLBACK DATA/i.test(auditItem.result));
+  const isFraudFallback = fraudItem?.result
+    ? /FALLBACK MOCK DATA|Local mock baseline|FALLBACK NOTICE|NOT a live lookup result/i.test(fraudItem.result)
+    : false;
+  const isFraudLive =
+    !isFraudFallback &&
+    Boolean(
+      fraudItem?.result &&
+      (/LIVE COMPONENT 2 AUDIT RECORD/i.test(fraudItem.result) ||
+       /Live Component 2 Gateway Audit Log/i.test(fraudItem.result))
+    );
 
-  const provenanceType = hasLive ? "live" : hasFallback ? "fallback" : "baseline";
+  const isAuditFallback = auditItem?.result
+    ? /FALLBACK DATA|Local mock baseline|NOT_FOUND_ON_LIVE_BRIDGE/i.test(auditItem.result)
+    : false;
+  const isAuditLive =
+    !isAuditFallback &&
+    Boolean(
+      auditItem?.result &&
+      (/LIVE SERVICE VERIFICATION|Live Component 3|CONFIGURED BLOCKCHAIN|SIMULATED LEDGER/i.test(auditItem.result))
+    );
+
+  let provenanceType = "baseline";
+  if (fraudItem && auditItem) {
+    provenanceType = isFraudLive && isAuditLive ? "live" : "fallback";
+  } else if (fraudItem) {
+    provenanceType = isFraudLive ? "live" : "fallback";
+  } else if (auditItem) {
+    provenanceType = isAuditLive ? "live" : "fallback";
+  } else {
+    provenanceType = "baseline";
+  }
 
   const provenanceLabel =
     provenanceType === "live"
@@ -44,6 +67,9 @@ function parseLatestEvidence(evidenceList = []) {
 
     const scoreMatch = text.match(/Recorded Fraud Score:\s*([0-9.]+)/i);
     if (scoreMatch) parsed.fraudScore = parseFloat(scoreMatch[1]);
+
+    const protoProbMatch = text.match(/Prototype fraud probability:\s*([0-9.]+)/i);
+    if (protoProbMatch) parsed.prototypeProbability = parseFloat(protoProbMatch[1]);
 
     const statusMatch = text.match(/Recorded Status:\s*([A-Za-z0-9_-]+)/i);
     if (statusMatch) parsed.status = statusMatch[1];
@@ -174,4 +200,136 @@ test("4. Evidence freshness: per-response replacement prevents retaining stale e
   let turn3Parsed = parseLatestEvidence(sessionEvidence);
   assert.equal(turn3Parsed.hasAuditEvidence, true);
   assert.equal(turn3Parsed.hasFraudEvidence, false, "Turn 3 must not retain Turn 1 fraud evidence");
+});
+
+test("5. Fallback fraud evidence with live service notice must NEVER produce a live service badge", () => {
+  const fallbackEvidence = [
+    {
+      tool: "get_fraud_analysis",
+      result: `
+FRAUD ANALYSIS — FALLBACK MOCK DATA
+
+Data Source:
+Local mock baseline (mock_financial_data.json).
+Live service status (http://localhost:8001): Component 2 service at http://localhost:8001 timed out.
+
+FALLBACK NOTICE:
+This is FALLBACK MOCK DATA because the live Component 2 service did not provide a record for TX1001.
+Reason: Component 2 service at http://localhost:8001 timed out.
+This record is NOT a live lookup result from Component 2.
+
+Transaction ID:
+TX1001
+
+Transaction Amount:
+LKR 250,000.00
+
+Recorded Fraud Score:
+0.92
+
+Recorded Risk Level:
+HIGH
+
+Recorded Status:
+BLOCKED
+
+RECORDED CONTRIBUTING FACTORS:
+- New device
+- Unusual location
+
+LOCAL SHAP PROTOTYPE — NOT THE TEAM MODEL
+
+Prototype prediction:
+1
+
+Prototype fraud probability:
+1.0000
+
+Prototype input features:
+- New device: 1
+- Unusual location: 1
+- Amount (LKR): 250,000.00
+
+SHAP CONTRIBUTIONS:
+- amount_thousands: SHAP value = 0.193289; increases fraud risk
+- unusual_location: SHAP value = 0.153450; increases fraud risk
+- new_device: SHAP value = 0.130761; increases fraud risk
+
+LIMITATION:
+The SHAP values explain a locally trained synthetic Random Forest prototype,
+not the production model or Component 2 engine.
+Device and location inputs were inferred from mock reason labels.
+These results are prototype evidence, not verified production output.
+Probability calibration not established.
+      `,
+    },
+  ];
+
+  const parsed = parseLatestEvidence(fallbackEvidence);
+  assert.equal(parsed.hasFraudEvidence, true);
+  assert.equal(parsed.provenanceType, "fallback", "Fallback evidence must NEVER be classified as live");
+  assert.notEqual(parsed.provenanceType, "live");
+  assert.equal(parsed.provenanceLabel, "Active Session: Fallback Mock Data");
+  assert.notEqual(parsed.provenanceLabel, "Active Session: Live Service Evidence");
+  assert.equal(parsed.transactionId, "TX1001");
+  assert.equal(parsed.fraudScore, 0.92);
+  assert.equal(parsed.prototypeProbability, 1.0);
+  assert.equal(parsed.status, "BLOCKED");
+  assert.equal(parsed.riskLevel, "HIGH");
+  assert.equal(parsed.hasShap, true);
+});
+
+test("6. Truly live Component 2 gateway evidence produces live badge", () => {
+  const liveEvidence = [
+    {
+      tool: "get_fraud_analysis",
+      result: `
+FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD
+
+Data Source:
+Live Component 2 Gateway Audit Log (http://localhost:8001/audit).
+This record is live governance evidence from Component 2's real-time fraud engine.
+
+Transaction ID:
+TX2002
+
+Recorded Fraud Score:
+0.9412
+
+Recorded Risk Level:
+HIGH
+
+Recorded Status:
+BLOCK
+
+RECORDED CONTRIBUTING FACTORS:
+- velocity_anomaly
+      `,
+    },
+  ];
+
+  const parsed = parseLatestEvidence(liveEvidence);
+  assert.equal(parsed.hasFraudEvidence, true);
+  assert.equal(parsed.provenanceType, "live");
+  assert.equal(parsed.provenanceLabel, "Active Session: Live Service Evidence");
+  assert.equal(parsed.transactionId, "TX2002");
+  assert.equal(parsed.fraudScore, 0.9412);
+  assert.equal(parsed.status, "BLOCK");
+});
+
+test("7. Mixed fallback fraud and live audit evidence does NOT label session as live service evidence", () => {
+  const mixedEvidence = [
+    {
+      tool: "get_fraud_analysis",
+      result: "FRAUD ANALYSIS — FALLBACK MOCK DATA\nTransaction ID: TX1001\nRecorded Fraud Score: 0.92\nRecorded Status: BLOCKED",
+    },
+    {
+      tool: "get_blockchain_audit",
+      result: "BLOCKCHAIN AUDIT RECORD — LIVE SERVICE VERIFICATION\nTransaction ID: TX1001\nAudit ID: AUDIT-001\nRecord Status: VERIFIED",
+    },
+  ];
+
+  const parsed = parseLatestEvidence(mixedEvidence);
+  assert.equal(parsed.provenanceType, "fallback", "Mixed evidence with fallback fraud must not be labeled live");
+  assert.equal(parsed.provenanceLabel, "Active Session: Fallback Mock Data");
 });
