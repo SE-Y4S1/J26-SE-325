@@ -30,7 +30,12 @@ def query_live_audit_service(transaction_id: str, base_url: str = AUDIT_SERVICE_
     Query the live blockchain audit service for transaction verification.
     Returns a dict with query status and payload/error details.
     """
-    quoted_id = urllib.parse.quote(str(transaction_id), safe="")
+    clean_id = (
+        str(transaction_id).strip().strip("'\"")
+        if transaction_id and str(transaction_id).strip().lower() not in ("none", "null", "")
+        else "TX1001"
+    )
+    quoted_id = urllib.parse.quote(clean_id, safe="")
     url = f"{base_url}/api/audit/{quoted_id}/verify"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
 
@@ -85,28 +90,36 @@ def query_live_audit_service(transaction_id: str, base_url: str = AUDIT_SERVICE_
 @tool
 def get_blockchain_audit(transaction_id: str = "TX1001") -> str:
     """
-    Retrieve audit information for a financial transaction.
+    Retrieve and verify blockchain audit information for a financial transaction.
 
-    Use this tool when the user asks about:
-    blockchain records, audit history, transaction verification,
-    or recorded financial decisions.
+    Parameters:
+    - transaction_id: Transaction identifier to verify on the blockchain audit bridge
+      (e.g., 'PP1-DEMO-001', 'TX1001'). If the user mentions a specific transaction ID in their
+      message, pass that exact transaction ID. If no transaction ID is mentioned, use 'TX1001'.
     """
+    target_id = (
+        str(transaction_id).strip().strip("'\"")
+        if transaction_id and str(transaction_id).strip().lower() not in ("none", "null", "")
+        else "TX1001"
+    )
 
     mock_data = load_data()
-    mock_audit = mock_data.get("audit", {}).get(transaction_id)
+    mock_audit = mock_data.get("audit", {}).get(target_id)
 
-    live_res = query_live_audit_service(transaction_id)
+    live_res = query_live_audit_service(target_id)
 
-    # 1. LIVE SERVICE RETURNED A VALID RESPONSE
-    if live_res["available"] and live_res["data"] is not None:
-        payload = live_res["data"]
-        verified = bool(payload.get("verified", False))
-        status = str(payload.get("status", "UNKNOWN")).strip().upper()
-        details = payload.get("details") or {}
-        message = str(payload.get("message", ""))
+    status_code = live_res.get("status_code")
+    is_404 = status_code == 404
+    payload = live_res.get("data") if isinstance(live_res.get("data"), dict) else {}
+    verified = bool(payload.get("verified", False))
+    status = str(payload.get("status", "NOT_FOUND" if is_404 else "UNKNOWN")).strip().upper()
+    details = payload.get("details") or {}
+    message = str(payload.get("message", ""))
 
+    # 1. LIVE SERVICE RETURNED A VALID RESPONSE (OR EXPLICIT 404 NOT FOUND)
+    if is_404 or (live_res.get("available") and live_res.get("data") is not None):
         # Case 1A: Record Not Found on Live Bridge
-        if status == "NOT_FOUND" or (not verified and "not found" in message.lower()):
+        if is_404 or status == "NOT_FOUND" or (not verified and "not found" in message.lower()):
             if mock_audit:
                 return f"""
 BLOCKCHAIN AUDIT RECORD — FALLBACK DATA
@@ -115,10 +128,10 @@ Data Source:
 Local mock baseline (live audit service responded: record not found).
 
 Transaction ID:
-{transaction_id}
+{target_id}
 
 Audit ID:
-{mock_audit.get("audit_id", f"AUDIT-{transaction_id}")}
+{mock_audit.get("audit_id", f"AUDIT-{target_id}")}
 
 Decision:
 {mock_audit.get("decision", "RECORDED_BLOCKED")}
@@ -133,20 +146,20 @@ Record Status:
 NOT_FOUND_ON_LIVE_BRIDGE
 
 FALLBACK NOTICE:
-The live audit bridge at {AUDIT_SERVICE_URL} was queried, but no audit record was found for {transaction_id}.
+The live audit bridge at {AUDIT_SERVICE_URL} was queried, but no audit record was found for {target_id}.
 The record above is local mock baseline data and is NOT a live lookup result. Independent blockchain verification is not established.
 """
             return f"""
 BLOCKCHAIN AUDIT RECORD — NOT FOUND
 
 Transaction ID:
-{transaction_id}
+{target_id}
 
 Record Status:
 NOT_FOUND
 
 STATUS:
-The live audit service at {AUDIT_SERVICE_URL} confirmed that no audit record exists for transaction {transaction_id}.
+The live audit service at {AUDIT_SERVICE_URL} confirmed that no audit record exists for transaction {target_id}.
 No fallback mock baseline is available for this transaction ID.
 """
 
@@ -161,7 +174,7 @@ No fallback mock baseline is available for this transaction ID.
 
             decision = str(canonical.get("finalDecision") or canonical.get("aiDecision") or on_chain.get("decision") or "UNKNOWN")
             timestamp = str(canonical.get("timestamp") or on_chain.get("timestamp") or "N/A")
-            audit_id = str(on_chain.get("blockchainTxId") or details.get("blockchainTransactionId") or f"AUDIT-{transaction_id}")
+            audit_id = str(on_chain.get("blockchainTxId") or details.get("blockchainTransactionId") or f"AUDIT-{target_id}")
             block_number = on_chain.get("blockNumber") or details.get("blockNumber") or 0
 
             return f"""
@@ -171,7 +184,7 @@ Data Source:
 Live audit bridge ({AUDIT_SERVICE_URL}).
 
 Transaction ID:
-{transaction_id}
+{target_id}
 
 Audit ID:
 {audit_id}
@@ -189,7 +202,7 @@ Record Status:
 INTEGRITY_FAILED
 
 INTEGRITY ALERT:
-Cryptographic integrity verification failed for transaction {transaction_id}.
+Cryptographic integrity verification failed for transaction {target_id}.
 The calculated SHA-256 hash does not match the blockchain commitment.
 Tampering Detected: {is_tampered}
 Stored Off-Chain Hash: {stored_hash}
@@ -207,7 +220,7 @@ Blockchain Hash: {blockchain_hash}
 
             decision = str(on_chain.get("decision") or canonical.get("finalDecision") or canonical.get("aiDecision") or "VERIFIED")
             timestamp = str(canonical.get("timestamp") or on_chain.get("timestamp") or "N/A")
-            audit_id = str(on_chain.get("blockchainTxId") or details.get("blockchainTransactionId") or f"AUDIT-{transaction_id}")
+            audit_id = str(on_chain.get("blockchainTxId") or details.get("blockchainTransactionId") or f"AUDIT-{target_id}")
             block_number = on_chain.get("blockNumber") or details.get("blockNumber") or 1
 
             if is_mock:
@@ -218,7 +231,7 @@ Data Source:
 Live audit service ({AUDIT_SERVICE_URL}) — Simulated/Mock Ledger Adapter.
 
 Transaction ID:
-{transaction_id}
+{target_id}
 
 Audit ID:
 {audit_id}
@@ -254,7 +267,7 @@ Data Source:
 Live audit service ({AUDIT_SERVICE_URL}) — Configured Blockchain ({network}).
 
 Transaction ID:
-{transaction_id}
+{target_id}
 
 Audit ID:
 {audit_id}
@@ -293,10 +306,10 @@ Data Source:
 Local mock baseline (live audit service at {AUDIT_SERVICE_URL} was unavailable: {reason}).
 
 Transaction ID:
-{transaction_id}
+{target_id}
 
 Audit ID:
-{mock_audit.get("audit_id", f"AUDIT-{transaction_id}")}
+{mock_audit.get("audit_id", f"AUDIT-{target_id}")}
 
 Decision:
 {mock_audit.get("decision", "RECORDED_BLOCKED")}
@@ -319,12 +332,12 @@ This is NOT a live lookup result. Independent blockchain verification is not est
 BLOCKCHAIN AUDIT RECORD — SERVICE UNAVAILABLE
 
 Transaction ID:
-{transaction_id}
+{target_id}
 
 Record Status:
 UNAVAILABLE
 
 STATUS:
 The live blockchain audit service at {AUDIT_SERVICE_URL} was unreachable ({reason}).
-No fallback mock baseline is available for transaction ID {transaction_id}.
+No fallback mock baseline is available for transaction ID {target_id}.
 """

@@ -7,6 +7,7 @@ import urllib.request
 from pathlib import Path
 
 from langchain_core.tools import tool
+from preferences_context import get_current_preferences
 from xai.shap_explainer import explain_transaction
 
 
@@ -128,6 +129,8 @@ def get_fraud_analysis(transaction_id: str = "TX1001") -> str:
     Use this tool when explaining a transaction's fraud risk.
     If no ID is supplied, use TX1001.
     """
+    prefs = get_current_preferences()
+    explanation_enabled = prefs.get("explanation_enabled", True)
     target_id = str(transaction_id).strip() if transaction_id else "TX1001"
 
     # Query Component 2's live audit service (safe read-only GET /audit)
@@ -226,25 +229,58 @@ MODEL PROVENANCE & EXPLANATION NOTICE:
 
     amount_lkr = float(transaction.get("amount_lkr", 0.0))
 
-    # Explain using the local synthetic prototype model
-    shap_result = explain_transaction(
-        new_device=new_device,
-        unusual_location=unusual_location,
-        amount_lkr=amount_lkr,
-    )
-
     reasons_text = "\n".join(
         f"- {reason}" for reason in reasons
     ) or "- No contributing factors provided"
 
-    shap_lines = "\n".join(
-        (
-            f"- {item['feature']}: "
-            f"SHAP value = {item['shap_value']:.6f}; "
-            f"{item['impact']}"
+    if explanation_enabled:
+        # Explain using the local synthetic prototype model
+        shap_result = explain_transaction(
+            new_device=new_device,
+            unusual_location=unusual_location,
+            amount_lkr=amount_lkr,
         )
-        for item in shap_result["shap_explanation"]
-    )
+
+        shap_lines = "\n".join(
+            (
+                f"- {item['feature']}: "
+                f"SHAP value = {item['shap_value']:.6f}; "
+                f"{item['impact']}"
+            )
+            for item in shap_result["shap_explanation"]
+        )
+
+        shap_section = f"""LOCAL SHAP PROTOTYPE — NOT THE TEAM MODEL
+
+Prototype prediction:
+{shap_result["prediction"]}
+
+Prototype fraud probability:
+{shap_result["fraud_probability"]:.4f}
+
+Prototype input features:
+- New device: {new_device}
+- Unusual location: {unusual_location}
+- Amount (LKR): {amount_lkr:,.2f}
+
+SHAP CONTRIBUTIONS:
+{shap_lines}
+
+LIMITATION:
+The SHAP values explain a locally trained synthetic Random Forest prototype,
+not the production model or Component 2 engine.
+Device and location inputs were inferred from mock reason labels.
+These results are prototype evidence, not verified production output.
+Probability calibration not established."""
+    else:
+        shap_section = """AI EXPLANATION NOTICE:
+Optional SHAP feature-attribution details were suppressed based on user preference (AI explanation disabled).
+The recorded score and contributing factors reflect the recorded mock baseline without prototype SHAP attribution.
+
+LIMITATION:
+Device and location inputs were inferred from mock reason labels.
+These results are baseline mock evidence, not verified production output.
+Probability calibration not established."""
 
     return f"""
 FRAUD ANALYSIS — FALLBACK MOCK DATA
@@ -276,27 +312,6 @@ Recorded Status:
 RECORDED CONTRIBUTING FACTORS:
 {reasons_text}
 
-LOCAL SHAP PROTOTYPE — NOT THE TEAM MODEL
-
-Prototype prediction:
-{shap_result["prediction"]}
-
-Prototype fraud probability:
-{shap_result["fraud_probability"]:.4f}
-
-Prototype input features:
-- New device: {new_device}
-- Unusual location: {unusual_location}
-- Amount (LKR): {amount_lkr:,.2f}
-
-SHAP CONTRIBUTIONS:
-{shap_lines}
-
-LIMITATION:
-The SHAP values explain a locally trained synthetic Random Forest prototype,
-not the production model or Component 2 engine.
-Device and location inputs were inferred from mock reason labels.
-These results are prototype evidence, not verified production output.
-Probability calibration not established.
+{shap_section}
 """
 

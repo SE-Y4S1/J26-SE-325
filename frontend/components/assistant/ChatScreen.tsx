@@ -8,6 +8,47 @@ import { BotIcon, SparklesIcon, ChevronRightIcon, WrenchIcon } from "./icons";
 
 import { request } from "@/lib/api/client";
 
+const RESPONSIBLE_AI_STORAGE_KEY = "finagent_responsible_ai_preferences";
+
+export function getValidatedResponsibleAIPreferences(): {
+  explanationEnabled: boolean;
+  personalizedContext: boolean;
+  dataSharingConsent: boolean;
+} {
+  const defaults = {
+    explanationEnabled: true,
+    personalizedContext: true,
+    dataSharingConsent: true,
+  };
+
+  try {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return defaults;
+    }
+    const raw = window.localStorage.getItem(RESPONSIBLE_AI_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return defaults;
+
+    return {
+      explanationEnabled:
+        typeof parsed.explanationEnabled === "boolean"
+          ? parsed.explanationEnabled
+          : defaults.explanationEnabled,
+      personalizedContext:
+        typeof parsed.personalizedContext === "boolean"
+          ? parsed.personalizedContext
+          : defaults.personalizedContext,
+      dataSharingConsent:
+        typeof parsed.dataSharingConsent === "boolean"
+          ? parsed.dataSharingConsent
+          : defaults.dataSharingConsent,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
 function getTimestamp(): string {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -53,14 +94,17 @@ export function ChatScreen({
     setIsSimulatingResponse(true);
 
     try {
+      const preferences = getValidatedResponsibleAIPreferences();
+
       // Call live FastAPI backend at http://localhost:8003/assistant/chat
       const response = await request<{
         answer: string;
         agent_execution?: { tools_used?: string[] };
         evidence?: Array<{ tool: string; result: unknown }>;
+        responsible_ai?: Record<string, unknown>;
       }>("assistant", "/assistant/chat", {
         method: "POST",
-        body: { message: text },
+        body: { message: text, preferences },
         auth: false,
       });
 
