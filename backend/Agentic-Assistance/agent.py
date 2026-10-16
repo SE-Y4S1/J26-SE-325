@@ -4,7 +4,7 @@ from typing import Annotated
 
 from typing_extensions import TypedDict
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langchain_ollama import ChatOllama
 
 from langgraph.graph import StateGraph, START
@@ -12,6 +12,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from tools import tools
+from preferences_context import get_current_preferences
 
 
 # --------------------------------------------------
@@ -124,6 +125,43 @@ def has_financial_intent(text: str) -> bool:
     ]
 
     return any(re.search(pattern, clean) for pattern in financial_keywords)
+
+
+def has_portfolio_intent(text: str) -> bool:
+    clean = text.strip().lower()
+    portfolio_patterns = [
+        r"\bportfolios?\b",
+        r"\bholdings?\b",
+        r"\basset\s*allocations?\b",
+        r"\ballocations?\b",
+        r"\bdiversif\w+\b",
+        r"\bliquidity(?:\s*risk)?\b",
+        r"\brebalanc\w+\b",
+        r"\binvestments?\b",
+        r"\bassets?\b",
+        r"\bwealth\b",
+        r"\bnet\s*worth\b",
+        r"\bpositions?\b",
+        r"\bvaluations?\b",
+    ]
+    return any(re.search(p, clean) for p in portfolio_patterns)
+
+
+def has_fraud_or_audit_intent(text: str) -> bool:
+    clean = text.strip().lower()
+    patterns = [
+        r"\btx\d*\b",
+        r"\bfraud\b",
+        r"\bscams?\b",
+        r"\bblocked\b",
+        r"\bflagged\b",
+        r"\bshap\b",
+        r"\bblockchain\b",
+        r"\baudit\b",
+        r"\bledger\b",
+        r"\bsmart\s*contract\b",
+    ]
+    return any(re.search(p, clean) for p in patterns)
 
 
 def should_route_to_financial_tools(text: str) -> bool:
@@ -277,6 +315,13 @@ call ONLY:
 
 get_blockchain_audit
 
+If the user mentions a specific transaction ID in their message (such as PP1-DEMO-001 or TX1001),
+pass that exact string as the transaction_id argument to get_blockchain_audit.
+Do not default to TX1001 if the user provided a different transaction ID.
+If no transaction ID is mentioned by the user, call get_blockchain_audit with the default mock transaction:
+
+TX1001
+
 Call multiple tools ONLY if the question explicitly asks for multiple types of information (e.g. asking for both fraud analysis and blockchain audit verification).
 
 NEVER tell the user to call a tool themselves.
@@ -327,7 +372,7 @@ SHAP EVIDENCE ACCURACY — CRITICAL:
 
 4. When explaining fraud analysis, report the recorded fraud score and recorded contributing factors separately from local prototype predictions and SHAP contributions.
 
-5. Never claim that a blockchain record has been independently verified merely because its status field says VERIFIED. State what the available tool output actually confirms and what verification remains unproven.
+5. Never claim that a blockchain record has been independently verified merely because its status field says VERIFIED. If the record status is NOT_FOUND, state clearly that no audit record exists for the transaction on the live audit service and that no verified record was retrieved. If the record status is INTEGRITY_FAILED, state that cryptographic integrity verification failed and tampering is suspected. State what the available tool output actually confirms and what verification remains unproven.
 
 6. Never invent causes, financial misconduct, transaction details, model behavior, or verification results that are not supported by the available evidence.
 
@@ -427,17 +472,49 @@ The assistant must call the tool itself.
 
 def call_llm(state: AgentState):
 
+    prefs = get_current_preferences()
+    explanation_enabled = prefs.get("explanation_enabled", True)
+    personalized_context = prefs.get("personalized_context", True)
+
+    directive_lines = []
+    if not explanation_enabled:
+        directive_lines.append(
+            "- User preference 'AI explanation enabled' is set to FALSE. Suppress optional SHAP/feature-attribution details. "
+            "Report the recorded fraud score, decision, risk level, and contributing factors without providing SHAP values or feature importance numbers."
+        )
+    if not personalized_context:
+        directive_lines.append(
+            "- User preference 'Personalized financial context' is set to FALSE. Do NOT query personal investment portfolios or account-specific holdings. "
+            "If the user asks about personal portfolios or investments, explain that personalized financial context is disabled by user preference."
+        )
+
+    pref_messages = []
+    if directive_lines:
+        pref_messages.append(
+            SystemMessage(
+                content="RESPONSIBLE AI USER PREFERENCE DIRECTIVES:\n" + "\n".join(directive_lines)
+            )
+        )
+
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
+        *pref_messages,
         *state["messages"]
     ]
 
     latest_msg = state["messages"][-1] if state.get("messages") else None
 
+    # Choose tool binding based on personalization preference
+    if not personalized_context:
+        bound_tools = [t for t in tools if t.name != "get_portfolio_analysis"]
+        runtime_llm_with_tools = llm.bind_tools(bound_tools)
+    else:
+        runtime_llm_with_tools = llm_with_tools
+
     # If the latest message is a tool response, continue tool-enabled workflow
     # to allow multi-tool calls or final explanation generation.
     if getattr(latest_msg, "type", None) == "tool":
-        response = llm_with_tools.invoke(messages)
+        response = runtime_llm_with_tools.invoke(messages)
         return {
             "messages": [response]
         }
@@ -451,11 +528,25 @@ def call_llm(state: AgentState):
     else:
         latest_text = str(latest_content)
 
+    if not personalized_context and has_portfolio_intent(latest_text) and not has_fraud_or_audit_intent(latest_text):
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "Notice: Personalized financial context is disabled by user preference. "
+                        "Account-specific portfolio lookup and asset holdings analysis are blocked for this request, "
+                        "and no personalized portfolio data has been retrieved. "
+                        "To analyze your portfolio, please re-enable 'Personalized financial context' in your Responsible AI & Safety settings."
+                    )
+                )
+            ]
+        }
+
     # Route to financial tools ONLY when there is clear financial intent.
     # Non-financial questions (including arithmetic and general knowledge),
     # greetings, and ambiguous queries route to base LLM without tool binding.
     if should_route_to_financial_tools(latest_text):
-        response = llm_with_tools.invoke(messages)
+        response = runtime_llm_with_tools.invoke(messages)
     else:
         response = llm.invoke(messages)
 

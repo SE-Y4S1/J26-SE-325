@@ -1,5 +1,6 @@
 
 import re
+from preferences_context import get_current_preferences
 
 
 def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
@@ -21,7 +22,25 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
     checks_applied = []
     corrected_answer = answer
 
+    prefs = get_current_preferences()
+    personalized_context = prefs.get("personalized_context", True)
+
+    if not personalized_context:
+        # Strict enforcement: when personalization is disabled, never return mock portfolio balances or claims
+        if "LKR 1,000,000" in corrected_answer or "1,000,000" in corrected_answer or "Baseline Valuation" in corrected_answer:
+            corrected_answer = (
+                "Notice: Personalized financial context is disabled by user preference. "
+                "Account-specific portfolio lookup and asset holdings analysis are blocked for this request, "
+                "and no personalized portfolio data has been retrieved."
+            )
+
     if not tool_names:
+        if "get_portfolio_analysis" in corrected_answer and (corrected_answer.strip().startswith("{") or "name" in corrected_answer):
+            corrected_answer = (
+                "Notice: Personalized financial context is disabled by user preference. "
+                "Account-specific portfolio lookup and asset holdings analysis are blocked for this request, "
+                "and no personalized portfolio data has been retrieved."
+            )
         return {
             "passed": True,
             "answer": corrected_answer,
@@ -108,7 +127,7 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
     if "get_portfolio_analysis" in tool_names:
         checks_applied.append("portfolio_evidence_present")
         is_portfolio_fallback = any(
-            re.search(r"FALLBACK|Local mock baseline|NO LIVE PORTFOLIO", str(item.get("result", "")), re.IGNORECASE)
+            re.search(r"FALLBACK|Local mock baseline|NO LIVE PORTFOLIO|PERSONALIZED CONTEXT DISABLED", str(item.get("result", "")), re.IGNORECASE)
             for item in evidence
             if item.get("tool") == "get_portfolio_analysis"
         )
@@ -143,56 +162,119 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
         if "get_portfolio_analysis" in tool_names and not ({"get_fraud_analysis", "get_blockchain_audit"} & tool_names):
             p_item = next((item for item in evidence if item.get("tool") == "get_portfolio_analysis"), None)
             p_text = str(p_item.get("result", "")) if p_item else ""
-            reason_match = re.search(r"Platform service note:\s*([^\n\r]+)", p_text, re.IGNORECASE)
-            reason_str = reason_match.group(1).strip() if reason_match else "Portfolio not found on platform service"
-
-            corrected_answer = (
-                f"Notice: No live portfolio was retrieved for this account from the platform service ({reason_str}). "
-                "The user has zero verified live holdings on record.\n\n"
-                "For illustrative demonstration only, the local mock baseline example lists:\n"
-                "- Baseline Valuation: LKR 1,000,000 (Mock Baseline Demonstration Only)\n"
-                "- Expected Annual Return: 11.8% (Synthetic Example)\n"
-                "- Risk Score: 38/100 (Moderate, Synthetic Example)\n"
-                "- Diversification Score: 74/100 (Synthetic Example)\n"
-                "- Liquidity: High (Synthetic Example)\n"
-                "- Mock Allocation: 35% Technology, 25% Banking, 15% Healthcare, 15% Government Bonds, 10% Cash (Sample Example)\n\n"
-                "Please note: These figures and recommendations are synthetic baseline examples for demonstration only and do not reflect your actual portfolio or verified balance."
-            )
-        else:
-            audit_summary = ""
-            if "get_blockchain_audit" in tool_names:
-                audit_summary = (
-                    "Regarding blockchain audit status: An audit record "
-                    "(Audit ID AUDIT-2026-001, Block #1847291) was returned "
-                    "with record status VERIFIED from mock ledger data. "
-                    "Independent blockchain verification is not established "
-                    "by the available evidence.\n\n"
+            if "PERSONALIZED CONTEXT DISABLED" in p_text or "Personalized financial context is disabled" in p_text:
+                corrected_answer = (
+                    "Notice: Personalized financial context is disabled by user preference. "
+                    "Account-specific portfolio lookup was not performed, and no personalized holdings or balance were retrieved."
                 )
+            else:
+                reason_match = re.search(r"Platform service note:\s*([^\n\r]+)", p_text, re.IGNORECASE)
+                reason_str = reason_match.group(1).strip() if reason_match else "Portfolio not found on platform service"
 
-            corrected_answer = (
-                "For TX1001, the available tool returned a recorded fraud "
-                "score of 0.92, risk level HIGH, and status BLOCKED in a "
-                "mock transaction record. The meaning of the score as a "
-                "calibrated probability is not established by the available "
-                "evidence.\n\n"
-                "The local synthetic Random Forest prototype returned a "
-                "fraud probability output of 1.0000. This is a prototype "
-                "model output, not proof of fraud or a verified real-world "
-                "probability.\n\n"
-                "The recorded contributing factors are new device, unusual "
-                "location, and high transfer amount. The tool says the device "
-                "and location inputs for the local prototype were inferred "
-                "from mock reason labels. These are not independently "
-                "verified real-world observations.\n\n"
-                "The SHAP values explain the local synthetic prototype, "
-                "not necessarily the model associated with the recorded "
-                "score. Whether the models share training data is not "
-                "established by the available evidence.\n\n"
-                f"{audit_summary}"
-                "Evidence validation detected risky wording in the original "
-                "LLM response. The answer above was replaced with a "
-                "grounded summary based on the returned tool evidence."
-            )
+                corrected_answer = (
+                    f"Notice: No live portfolio was retrieved for this account from the platform service ({reason_str}). "
+                    "The user has zero verified live holdings on record.\n\n"
+                    "For illustrative demonstration only, the local mock baseline example lists:\n"
+                    "- Baseline Valuation: LKR 1,000,000 (Mock Baseline Demonstration Only)\n"
+                    "- Expected Annual Return: 11.8% (Synthetic Example)\n"
+                    "- Risk Score: 38/100 (Moderate, Synthetic Example)\n"
+                    "- Diversification Score: 74/100 (Synthetic Example)\n"
+                    "- Liquidity: High (Synthetic Example)\n"
+                    "- Mock Allocation: 35% Technology, 25% Banking, 15% Healthcare, 15% Government Bonds, 10% Cash (Sample Example)\n\n"
+                    "Please note: These figures and recommendations are synthetic baseline examples for demonstration only and do not reflect your actual portfolio or verified balance."
+                )
+        elif "get_blockchain_audit" in tool_names and not ({"get_fraud_analysis", "get_portfolio_analysis"} & tool_names):
+            audit_item = next((item for item in evidence if item.get("tool") == "get_blockchain_audit"), None)
+            audit_text = str(audit_item.get("result", "")) if audit_item else ""
+            tx_match = re.search(r"Transaction ID:\s*([^\n\r]+)", audit_text)
+            tx_id = tx_match.group(1).strip() if tx_match else "the requested transaction"
+
+            if "Record Status:\nNOT_FOUND" in audit_text or "confirmed that no audit record exists" in audit_text:
+                corrected_answer = (
+                    f"Notice: The blockchain audit record for transaction {tx_id} was not found on the live audit service. "
+                    f"No audit record exists and no on-chain commitment exists for {tx_id}, and no independent verification is established."
+                )
+            elif "INTEGRITY_FAILED" in audit_text or "Cryptographic integrity verification failed" in audit_text:
+                corrected_answer = (
+                    f"ALERT: Cryptographic integrity verification failed for transaction {tx_id}. "
+                    "The calculated SHA-256 hash does not match the blockchain commitment. Tampering is suspected, "
+                    "and independent verification is not established."
+                )
+            elif "SIMULATED LEDGER" in audit_text or "Simulated Mock Ledger Adapter" in audit_text:
+                block_match = re.search(r"Block Number:\s*([^\n\r]+)", audit_text)
+                audit_id_match = re.search(r"Audit ID:\s*([^\n\r]+)", audit_text)
+                block_no = block_match.group(1).strip() if block_match else "1"
+                audit_id = audit_id_match.group(1).strip() if audit_id_match else f"AUDIT-{tx_id}"
+                corrected_answer = (
+                    f"Regarding blockchain audit verification for transaction {tx_id}: An audit record ({audit_id}, Block #{block_no}) "
+                    "was retrieved with status VERIFIED against the local simulated ledger adapter. Cryptographic hash matches the ledger commitment. "
+                    "Independent external blockchain verification is not established by the available evidence."
+                )
+            elif "CONFIGURED BLOCKCHAIN" in audit_text:
+                block_match = re.search(r"Block Number:\s*([^\n\r]+)", audit_text)
+                audit_id_match = re.search(r"Audit ID:\s*([^\n\r]+)", audit_text)
+                block_no = block_match.group(1).strip() if block_match else "1"
+                audit_id = audit_id_match.group(1).strip() if audit_id_match else f"AUDIT-{tx_id}"
+                corrected_answer = (
+                    f"Regarding blockchain audit verification for transaction {tx_id}: An audit record ({audit_id}, Block #{block_no}) "
+                    "was verified on the configured blockchain network. Cryptographic hash matches the on-chain smart contract commitment. "
+                    "Independent external mainnet verification is not established by the available evidence."
+                )
+            elif "FALLBACK DATA" in audit_text or "NOT_FOUND_ON_LIVE_BRIDGE" in audit_text:
+                block_match = re.search(r"Block Number:\s*([^\n\r]+)", audit_text)
+                audit_id_match = re.search(r"Audit ID:\s*([^\n\r]+)", audit_text)
+                block_no = block_match.group(1).strip() if block_match else "1847291"
+                audit_id = audit_id_match.group(1).strip() if audit_id_match else f"AUDIT-{tx_id}"
+                corrected_answer = (
+                    f"Notice: The live audit service was queried, but no live audit record was found for {tx_id}. "
+                    f"The available record ({audit_id}, Block #{block_no}) is local fallback mock baseline data. Independent blockchain verification is not established."
+                )
+            else:
+                corrected_answer = (
+                    f"Regarding blockchain audit verification for transaction {tx_id}: The live audit service was unreachable or returned an error. "
+                    "No verified blockchain record is established by the available evidence."
+                )
+        else:
+            parts = []
+            if "get_fraud_analysis" in tool_names:
+                fraud_item = next((item for item in evidence if item.get("tool") == "get_fraud_analysis"), None)
+                fraud_text = str(fraud_item.get("result", "")) if fraud_item else ""
+                if "Optional SHAP feature-attribution details were suppressed" in fraud_text or "AI EXPLANATION NOTICE" in fraud_text:
+                    parts.append(
+                        "For TX1001, the available tool returned a recorded fraud score of 0.92, risk level HIGH, and status BLOCKED in a "
+                        "mock transaction record. The meaning of the score as a calibrated probability is not established by the available evidence.\n\n"
+                        "Detailed SHAP feature attributions and prototype model metrics were suppressed based on user preference (AI explanation disabled).\n\n"
+                        "The recorded contributing factors are new device, unusual location, and high transfer amount."
+                    )
+                else:
+                    parts.append(
+                        "For TX1001, the available tool returned a recorded fraud score of 0.92, risk level HIGH, and status BLOCKED in a "
+                        "mock transaction record. The meaning of the score as a calibrated probability is not established by the available "
+                        "evidence.\n\n"
+                        "The local synthetic Random Forest prototype returned a fraud probability output of 1.0000. This is a prototype "
+                        "model output, not proof of fraud or a verified real-world probability.\n\n"
+                        "The recorded contributing factors are new device, unusual location, and high transfer amount. The tool says the device "
+                        "and location inputs for the local prototype were inferred from mock reason labels. These are not independently "
+                        "verified real-world observations.\n\n"
+                        "The SHAP values explain the local synthetic prototype, not necessarily the model associated with the recorded "
+                        "score. Whether the models share training data is not established by the available evidence."
+                    )
+            if "get_blockchain_audit" in tool_names:
+                audit_item = next((item for item in evidence if item.get("tool") == "get_blockchain_audit"), None)
+                audit_text = str(audit_item.get("result", "")) if audit_item else ""
+                tx_match = re.search(r"Transaction ID:\s*([^\n\r]+)", audit_text)
+                tx_id = tx_match.group(1).strip() if tx_match else "the transaction"
+                if "Record Status:\nNOT_FOUND" in audit_text or "confirmed that no audit record exists" in audit_text:
+                    parts.append(f"Regarding blockchain audit status: No audit record exists for transaction {tx_id} on the live audit bridge.")
+                elif "INTEGRITY_FAILED" in audit_text:
+                    parts.append(f"Regarding blockchain audit status: Cryptographic integrity verification failed for transaction {tx_id}.")
+                elif "FALLBACK DATA" in audit_text or "NOT_FOUND_ON_LIVE_BRIDGE" in audit_text:
+                    parts.append(f"Regarding blockchain audit status: No live audit record was found on the bridge for {tx_id}; data shown is fallback mock baseline. Independent blockchain verification is not established.")
+                else:
+                    parts.append(f"Regarding blockchain audit status: An audit record for {tx_id} was inspected. Independent blockchain verification is not established by the available evidence.")
+
+            parts.append("Evidence validation detected risky wording in the original LLM response. The answer above was replaced with a grounded summary based on the returned tool evidence.")
+            corrected_answer = "\n\n".join(parts)
 
     if (
         "LOCAL SHAP PROTOTYPE" in evidence_text

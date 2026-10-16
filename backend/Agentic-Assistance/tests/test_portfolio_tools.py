@@ -452,6 +452,116 @@ class TestPortfolioAuthAndIntegration(unittest.TestCase):
             self.assertIn("FALLBACK DATA", output)
             self.assertIn("Portfolio 99 not owned by user 1", output)
 
+    def test_query_live_portfolio_service_empty_list_contract(self):
+        """query_live_portfolio_service returns exact contract dictionary when user has empty portfolio list."""
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps([]).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            res = query_live_portfolio_service(user_id="1")
+            self.assertTrue(res["available"])
+            self.assertEqual(res["status_code"], 200)
+            self.assertIsNone(res["data"])
+            self.assertEqual(res["resolved_user_id"], "1")
+            self.assertTrue(res["empty_list"])
+            self.assertIsNone(res["error"])
+
+    def test_query_live_portfolio_service_valid_data_contract(self):
+        """query_live_portfolio_service returns detailed portfolio record on valid data."""
+        p_list = json.dumps([{"id": 42, "name": "Alpha Fund", "base_currency": "USD"}]).encode("utf-8")
+        p_detail = json.dumps({
+            "id": 42,
+            "name": "Alpha Fund",
+            "base_currency": "USD",
+            "total_value": 50000.0,
+            "holdings": [{"symbol": "MSFT", "quantity": 100.0, "current_price": 500.0}],
+        }).encode("utf-8")
+
+        def fake_urlopen(req, timeout=1.5):
+            url = getattr(req, "full_url", str(req))
+            resp = MagicMock()
+            resp.status = 200
+            resp.read.return_value = p_detail if "/portfolios/42" in url else p_list
+            resp.__enter__.return_value = resp
+            return resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            res = query_live_portfolio_service(user_id="1")
+            self.assertTrue(res["available"])
+            self.assertEqual(res["status_code"], 200)
+            self.assertFalse(res["empty_list"])
+            self.assertEqual(res["portfolio_id"], "42")
+            self.assertEqual(res["data"]["name"], "Alpha Fund")
+            self.assertIsNone(res["error"])
+
+    def test_query_live_portfolio_service_auth_failure_contract(self):
+        """query_live_portfolio_service returns structured auth failure status on HTTP 401."""
+        mock_err = urllib.error.HTTPError(
+            url="http://localhost:8100/portfolios",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=MagicMock(read=lambda: b'{"detail":"Not authenticated"}'),
+        )
+
+        with patch("urllib.request.urlopen", side_effect=mock_err):
+            res = query_live_portfolio_service(user_id="1")
+            self.assertTrue(res["available"])
+            self.assertEqual(res["status_code"], 401)
+            self.assertFalse(res["empty_list"])
+            self.assertIn("HTTP 401", res["error"])
+
+    def test_query_live_portfolio_service_invalid_ownership_contract(self):
+        """query_live_portfolio_service validates ownership and rejects unowned portfolio with status 404."""
+        p_list = json.dumps([{"id": 10, "name": "Owned Portfolio", "base_currency": "USD"}]).encode("utf-8")
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = p_list
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            # User requests portfolio_id="999", which is not owned by user 1
+            res = query_live_portfolio_service(user_id="1", portfolio_id="999")
+            self.assertTrue(res["available"])
+            self.assertEqual(res["status_code"], 404)
+            self.assertIsNone(res["data"])
+            self.assertFalse(res["empty_list"])
+            self.assertIn("not owned by user 1", res["error"])
+
+    def test_live_portfolio_null_total_value_and_safe_computation(self):
+        """get_portfolio_analysis recalculates total_value safely when total_value is None."""
+        payload = {
+            "id": 12,
+            "name": "Safety Test Portfolio",
+            "base_currency": "USD",
+            "total_value": None,  # Explicit None from API
+            "holdings": [
+                {
+                    "symbol": "TSLA",
+                    "quantity": 10.0,
+                    "current_price": 250.0,
+                    "cost_basis": None,
+                    "avg_daily_volume": None,
+                }
+            ],
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            output = get_portfolio_analysis.invoke({"user_id": "1"})
+            self.assertIn("PORTFOLIO ANALYSIS — LIVE PLATFORM RECORD", output)
+            self.assertIn("Safety Test Portfolio", output)
+            self.assertIn("USD 2,500.00", output)
+            self.assertIn("TSLA", output)
+            self.assertNotIn("FALLBACK DATA", output)
+
     def test_malformed_json_fallback(self):
         """Platform returning malformed JSON is caught safely as fallback."""
         mock_resp = MagicMock()
@@ -465,6 +575,28 @@ class TestPortfolioAuthAndIntegration(unittest.TestCase):
             self.assertIn("FALLBACK DATA", output)
             self.assertIn("Malformed JSON", output)
 
+    def test_live_platform_connection_if_available(self):
+        """If the real Platform service is running, verify live authenticated connection without fabricating data."""
+        try:
+            req = urllib.request.Request(f"{PLATFORM_SERVICE_URL}/health")
+            with urllib.request.urlopen(req, timeout=1.0) as resp:
+                health_data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            # Platform service is offline in this environment; skip live assertion
+            return
+
+        # If platform service is healthy, perform live authenticated portfolio query
+        res = query_live_portfolio_service(user_id="1")
+        self.assertTrue(res["available"])
+        self.assertEqual(res["status_code"], 200)
+        # If database currently has no portfolios, empty_list must be True honestly
+        if res["empty_list"]:
+            self.assertIsNone(res["data"])
+            tool_output = get_portfolio_analysis.invoke({"user_id": "1"})
+            self.assertIn("NO LIVE PORTFOLIO RECORD RETRIEVED", tool_output)
+            self.assertIn("Empty portfolio list", tool_output)
+
 
 if __name__ == "__main__":
     unittest.main()
+

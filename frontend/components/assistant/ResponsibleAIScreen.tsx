@@ -1,13 +1,132 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { MOCK_RESPONSIBLE_METRICS } from "./mockData";
 import { CpuIcon, LockIcon, ShieldIcon, CheckCircleIcon, AlertTriangleIcon } from "./icons";
+
+const STORAGE_KEY = "finagent_responsible_ai_preferences";
 
 export function ResponsibleAIScreen() {
   const [explanationEnabled, setExplanationEnabled] = useState(true);
   const [personalizedContext, setPersonalizedContext] = useState(true);
   const [dataSharingConsent, setDataSharingConsent] = useState(true);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (typeof window !== "undefined") {
+        const saved = window.localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (typeof parsed?.explanationEnabled === "boolean") {
+            setExplanationEnabled(parsed.explanationEnabled);
+          }
+          if (typeof parsed?.personalizedContext === "boolean") {
+            setPersonalizedContext(parsed.personalizedContext);
+          }
+          if (typeof parsed?.dataSharingConsent === "boolean") {
+            setDataSharingConsent(parsed.dataSharingConsent);
+          }
+        }
+      }
+    } catch {
+      // Safe fallback: ignore localStorage permission issues or malformed JSON
+    } finally {
+      setIsLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({
+            explanationEnabled,
+            personalizedContext,
+            dataSharingConsent,
+          })
+        );
+      }
+    } catch {
+      // Safe fallback: ignore quota or storage access errors
+    }
+  }, [explanationEnabled, personalizedContext, dataSharingConsent, isLoaded]);
+
+  const metrics = MOCK_RESPONSIBLE_METRICS.map((metric) => {
+    if (metric.id === "consent") {
+      return {
+        ...metric,
+        status: dataSharingConsent ? "Active" : "Opted Out",
+        description: dataSharingConsent
+          ? "User consent is granted for optional empirical research telemetry. Upstream transaction and gateway audit logs remain governed by system policy."
+          : "User has opted out of optional empirical research telemetry. Note: upstream gateway audit logging and required system operational logs remain active.",
+        complianceText: dataSharingConsent
+          ? "Consent Granted for Research"
+          : "Consent Withdrawn — Telemetry Disabled",
+        isCompliant: dataSharingConsent,
+      };
+    }
+    if (metric.id === "transparency") {
+      return {
+        ...metric,
+        status: explanationEnabled ? "Enabled" : "Suppressed",
+        description: explanationEnabled
+          ? "AI-generated explanations are grounded in available tool evidence with SHAP feature attributions."
+          : "Detailed SHAP feature attributions are suppressed by user preference. Core fraud scores, decisions, and evidence provenance remain accessible.",
+        complianceText: explanationEnabled
+          ? "Grounded Explanations Active"
+          : "Explanations Suppressed by Preference",
+        isCompliant: true,
+      };
+    }
+    if (metric.id === "privacy") {
+      return {
+        ...metric,
+        status: personalizedContext ? "Protected" : "Restricted",
+        description: personalizedContext
+          ? "Personal financial information is handled according to platform privacy controls with personalized context enabled."
+          : "Personalized financial context is disabled. Account-specific portfolio queries are blocked without fabricating anonymous holdings.",
+        complianceText: personalizedContext
+          ? "Privacy Protection Active"
+          : "Personalized Context Restricted",
+        isCompliant: true,
+      };
+    }
+    if (metric.id === "safety") {
+      return {
+        ...metric,
+        status: "Protected",
+        description: "Essential safety checks remain active regardless of preferences. Uncertain financial outcomes are never presented as guaranteed results.",
+        complianceText: "Essential Safety Enforced",
+        isCompliant: true,
+      };
+    }
+    if (metric.id === "fairness") {
+      return {
+        ...metric,
+        status: "Monitoring",
+        description: "Fairness and demographic neutrality monitoring remains active across all requests.",
+        complianceText: "Fairness Monitoring Active",
+        isCompliant: true,
+      };
+    }
+    if (metric.id === "user_control") {
+      return {
+        ...metric,
+        status: "Enforced",
+        description: "User preference controls actively enforce explanation suppression, personalization gating, and research consent limits.",
+        complianceText: "Preferences Enforced",
+        isCompliant: true,
+      };
+    }
+    return {
+      ...metric,
+      complianceText: "Compliant with Research Framework",
+      isCompliant: true,
+    };
+  });
 
   return (
     <div className="flex flex-col gap-6">
@@ -27,7 +146,7 @@ export function ResponsibleAIScreen() {
 
       {/* 6 Governance Cards Grid */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {MOCK_RESPONSIBLE_METRICS.map((metric) => (
+        {metrics.map((metric) => (
           <div
             key={metric.id}
             className="flex flex-col justify-between rounded-xl border border-black/10 bg-white p-5 shadow-2xs dark:border-white/15 dark:bg-neutral-900"
@@ -39,8 +158,10 @@ export function ResponsibleAIScreen() {
                 </span>
                 <span
                   className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
-                    metric.status === "Protected" || metric.status === "Active" || metric.status === "Enabled"
+                    metric.status === "Protected" || metric.status === "Active" || metric.status === "Enabled" || metric.status === "Enforced"
                       ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                      : metric.status === "Opted Out" || metric.status === "Suppressed" || metric.status === "Restricted"
+                      ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
                       : "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300"
                   }`}
                 >
@@ -53,9 +174,19 @@ export function ResponsibleAIScreen() {
               </p>
             </div>
 
-            <div className="mt-4 flex items-center gap-1.5 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
-              <CheckCircleIcon className="size-3.5" />
-              <span>Compliant with Research Framework</span>
+            <div
+              className={`mt-4 flex items-center gap-1.5 text-[11px] font-semibold ${
+                metric.isCompliant
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-amber-600 dark:text-amber-400"
+              }`}
+            >
+              {metric.isCompliant ? (
+                <CheckCircleIcon className="size-3.5" />
+              ) : (
+                <AlertTriangleIcon className="size-3.5" />
+              )}
+              <span>{metric.complianceText}</span>
             </div>
           </div>
         ))}

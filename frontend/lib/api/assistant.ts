@@ -11,6 +11,12 @@ export interface AssistantEvidence {
   result: string;
 }
 
+export interface ResponsibleAIPreferences {
+  explanationEnabled?: boolean;
+  personalizedContext?: boolean;
+  dataSharingConsent?: boolean;
+}
+
 export interface AssistantReply {
   answer: string;
   agent_execution: {
@@ -22,10 +28,13 @@ export interface AssistantReply {
   responsible_ai: Record<string, unknown>;
 }
 
-export function askAssistant(message: string): Promise<AssistantReply> {
+export function askAssistant(
+  message: string,
+  preferences?: ResponsibleAIPreferences
+): Promise<AssistantReply> {
   return request<AssistantReply>("assistant", "/assistant/chat", {
     method: "POST",
-    body: { message },
+    body: { message, preferences },
     auth: false,
   });
 }

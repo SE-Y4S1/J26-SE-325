@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
+from preferences_context import get_current_preferences
 
 
 DATA_FILE = (
@@ -184,6 +185,19 @@ def query_live_portfolio_service(
 
     target_p_id = str(portfolio_id).strip() if (portfolio_id is not None and str(portfolio_id).strip().isdigit()) else None
 
+    # Check user personalization preference: if disabled, do not query platform service
+    prefs = get_current_preferences()
+    if not prefs.get("personalized_context", True):
+        return {
+            "available": False,
+            "status_code": None,
+            "data": None,
+            "resolved_user_id": None,
+            "portfolio_id": target_p_id,
+            "empty_list": False,
+            "error": "Personalized financial context is disabled by user preference",
+        }
+
     # Always query GET /portfolios first to retrieve the user's registered portfolio list
     list_url = f"{base_url}/portfolios"
     status_code, data, err = _http_get(list_url, headers=headers, timeout=timeout)
@@ -301,6 +315,24 @@ def get_portfolio_analysis(
       explicitly asked for a specific portfolio number in their message.
       Do not provide a default portfolio ID for general portfolio queries.
     """
+    prefs = get_current_preferences()
+    if not prefs.get("personalized_context", True):
+        return """
+PORTFOLIO ANALYSIS — PERSONALIZED CONTEXT DISABLED
+
+Data Source:
+None (Personalized financial context is disabled by user preference).
+
+STATUS:
+Personalized financial context is disabled by user preference.
+Account-specific portfolio lookup was not performed, and no personalized data was retrieved.
+
+NOTICE:
+Under your current Responsible AI settings, access to account-specific investment portfolios and personal asset holdings is disabled. To view your portfolio holdings or allocation, enable 'Personalized financial context' in Responsible AI & Safety settings.
+No anonymous or fallback portfolio data has been substituted.
+Live holdings: Unverified (Personalized context disabled).
+"""
+
     mock_data = load_mock_data()
     mock_portfolio = mock_data.get("portfolio")
     mock_allocation = mock_portfolio.get("allocation", {}) if mock_portfolio else {}
@@ -316,28 +348,66 @@ def get_portfolio_analysis(
         p_id = live_res.get("portfolio_id") or p.get("id", "N/A")
         name = p.get("name", "Unnamed Portfolio")
         currency = p.get("base_currency", "USD")
-        total_value = float(p.get("total_value", 0.0))
-        holdings = p.get("holdings", [])
+        total_val_raw = p.get("total_value")
+        try:
+            total_value = float(total_val_raw) if total_val_raw is not None else 0.0
+        except (ValueError, TypeError):
+            total_value = 0.0
+
+        raw_holdings = p.get("holdings")
+        holdings = raw_holdings if isinstance(raw_holdings, list) else []
 
         if holdings:
             holdings_lines = []
+            parsed_holdings = []
+            calculated_total = 0.0
             for h in holdings:
-                sym = h.get("symbol", "UNKNOWN")
-                qty = float(h.get("quantity", 0.0))
-                price = float(h.get("current_price", 0.0))
+                if not isinstance(h, dict):
+                    continue
+                sym = str(h.get("symbol", "UNKNOWN")).strip().upper()
+                try:
+                    qty = float(h.get("quantity") if h.get("quantity") is not None else 0.0)
+                except (ValueError, TypeError):
+                    qty = 0.0
+                try:
+                    price = float(h.get("current_price") if h.get("current_price") is not None else 0.0)
+                except (ValueError, TypeError):
+                    price = 0.0
                 val = qty * price
-                wt = (val / total_value * 100.0) if total_value > 0 else 0.0
+                calculated_total += val
+
                 cost = h.get("cost_basis")
-                cost_str = f"Cost Basis: {currency} {float(cost):,.2f}; " if cost is not None else ""
+                if cost is not None:
+                    try:
+                        cost_str = f"Cost Basis: {currency} {float(cost):,.2f}; "
+                    except (ValueError, TypeError):
+                        cost_str = ""
+                else:
+                    cost_str = ""
+
                 adv = h.get("avg_daily_volume")
-                adv_str = f"ADV: {float(adv):,.0f}" if adv is not None else ""
+                if adv is not None:
+                    try:
+                        adv_str = f"ADV: {float(adv):,.0f}"
+                    except (ValueError, TypeError):
+                        adv_str = ""
+                else:
+                    adv_str = ""
+
+                parsed_holdings.append((sym, qty, price, val, cost_str, adv_str))
+
+            if total_value <= 0.0 and calculated_total > 0.0:
+                total_value = calculated_total
+
+            for sym, qty, price, val, cost_str, adv_str in parsed_holdings:
+                wt = (val / total_value * 100.0) if total_value > 0 else 0.0
                 holdings_lines.append(
                     f"- {sym}: {qty:,.2f} units @ {currency} {price:,.2f} = {currency} {val:,.2f} ({wt:.1f}% of portfolio); {cost_str}{adv_str}".strip()
                 )
             holdings_text = "\n".join(holdings_lines)
             observations_text = f"""- Live holdings and asset valuations retrieved directly from the platform portfolio store.
 - Total recorded market value: {currency} {total_value:,.2f}.
-- Largest recorded positions: {', '.join(h.get('symbol', '') for h in holdings[:3]) or 'None'}."""
+- Largest recorded positions: {', '.join(h[0] for h in parsed_holdings[:3]) or 'None'}."""
             lookup_status = "Active live portfolio record retrieved from platform service."
         else:
             holdings_text = "- No holdings recorded in this portfolio. Live API confirms 0 active positions."

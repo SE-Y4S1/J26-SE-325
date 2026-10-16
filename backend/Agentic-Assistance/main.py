@@ -9,16 +9,24 @@ for env_candidate in env_candidates:
     if env_candidate.is_file():
         load_dotenv(env_candidate, override=False)
 
+from datetime import datetime, timezone
+from typing import Any
+
 from evidence_validator import validate_evidence_claims
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 from langchain_core.messages import HumanMessage
 
 from agent import agent
-from responsible_ai import run_responsible_ai_checks
+from preferences_context import (
+    get_current_preferences,
+    reset_current_preferences,
+    set_current_preferences,
+)
+from responsible_ai import record_research_telemetry, run_responsible_ai_checks
 
 app = FastAPI(
     title="FinAgent - Agentic Financial Assistant",
@@ -59,8 +67,58 @@ def health():
 # REQUEST MODEL
 # --------------------------------------------------
 
+class ResponsibleAIPreferences(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    explanation_enabled: bool = True
+    personalized_context: bool = True
+    data_sharing_consent: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_keys(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            exp = data.get("explanation_enabled")
+            if exp is None:
+                exp = data.get("explanationEnabled", True)
+            pers = data.get("personalized_context")
+            if pers is None:
+                pers = data.get("personalizedContext", True)
+            ds = data.get("data_sharing_consent")
+            if ds is None:
+                ds = data.get("dataSharingConsent", True)
+
+            def to_bool(val: Any) -> bool:
+                if isinstance(val, bool):
+                    return val
+                if isinstance(val, str):
+                    if val.lower() in ("false", "0", "no"):
+                        return False
+                    if val.lower() in ("true", "1", "yes"):
+                        return True
+                return True
+
+            return {
+                "explanation_enabled": to_bool(exp),
+                "personalized_context": to_bool(pers),
+                "data_sharing_consent": to_bool(ds),
+            }
+        return data
+
+
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     message: str
+    preferences: ResponsibleAIPreferences = Field(default_factory=ResponsibleAIPreferences)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_request(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            prefs = data.get("preferences")
+            if prefs is None or not isinstance(prefs, (dict, ResponsibleAIPreferences)):
+                data["preferences"] = ResponsibleAIPreferences()
+        return data
 
 
 # --------------------------------------------------
@@ -85,118 +143,131 @@ def root():
 @app.post("/assistant/chat")
 def chat(request: ChatRequest):
 
-    # ----------------------------------------------
-    # Send user message to agent
-    # ----------------------------------------------
-
-    result = agent.invoke(
-        {
-            "messages": [
-                HumanMessage(content=request.message)
-            ]
-        }
-    )
-
-    messages = result["messages"]
-
-    # ----------------------------------------------
-    # Final answer
-    # ----------------------------------------------
-
-    final_message = messages[-1]
-
-    response_text = final_message.content
-
-    # ----------------------------------------------
-    # Extract tools used
-    # ----------------------------------------------
-
-    tools_used = []
-
-    for message in messages:
-
-        # ToolMessage represents the result
-        # returned by a tool
-        if getattr(message, "type", None) == "tool":
-
-            tool_name = getattr(message, "name", None)
-
-            if tool_name and tool_name not in tools_used:
-                tools_used.append(tool_name)
-
-    # ----------------------------------------------
-    # Extract tool evidence
-    # ----------------------------------------------
-
-    evidence = []
-
-    for message in messages:
-
-        if getattr(message, "type", None) == "tool":
-
-            tool_name = getattr(message, "name", "unknown_tool")
-
-            tool_output = getattr(message, "content", "")
-
-            evidence.append(
-                {
-                    "tool": tool_name,
-                    "result": tool_output
-                }
-            )
-
-
-    # ----------------------------------------------
-    # Evidence validation
-    # ----------------------------------------------
-
-    validation = validate_evidence_claims(
-        response_text,
-        evidence
-    )
-
-    response_text = validation["answer"]
-
-    # ----------------------------------------------
-    # Responsible AI
-    # ----------------------------------------------
-
-    responsible_ai = run_responsible_ai_checks(
-        request.message,
-        response_text
-    )
-
-
-    # ----------------------------------------------
-    # Return complete response
-    # ----------------------------------------------
-
-    return {
-
-        
-        "evidence_validation": {
-            "passed": validation["passed"],
-            "issues": validation["issues"],
-            "checks_applied": validation["checks_applied"]
-        },
-
-
-        "answer": response_text,
-
-        "agent_execution": {
-
-            "tools_used": tools_used,
-
-            "number_of_tools": len(tools_used),
-
-            "status": (
-                "tools_executed"
-                if tools_used
-                else "no_tools_required"
-            )
-        },
-
-        "evidence": evidence,
-
-        "responsible_ai": responsible_ai
+    prefs = request.preferences or ResponsibleAIPreferences()
+    pref_dict = {
+        "explanation_enabled": prefs.explanation_enabled,
+        "personalized_context": prefs.personalized_context,
+        "data_sharing_consent": prefs.data_sharing_consent,
     }
+
+    token = set_current_preferences(pref_dict)
+    try:
+        # ----------------------------------------------
+        # Send user message to agent
+        # ----------------------------------------------
+
+        result = agent.invoke(
+            {
+                "messages": [
+                    HumanMessage(content=request.message)
+                ]
+            }
+        )
+
+        messages = result["messages"]
+
+        # ----------------------------------------------
+        # Final answer
+        # ----------------------------------------------
+
+        final_message = messages[-1]
+
+        response_text = final_message.content
+
+        # ----------------------------------------------
+        # Extract tools used
+        # ----------------------------------------------
+
+        tools_used = []
+
+        for message in messages:
+
+            # ToolMessage represents the result
+            # returned by a tool
+            if getattr(message, "type", None) == "tool":
+
+                tool_name = getattr(message, "name", None)
+
+                if tool_name and tool_name not in tools_used:
+                    tools_used.append(tool_name)
+
+        # ----------------------------------------------
+        # Extract tool evidence
+        # ----------------------------------------------
+
+        evidence = []
+
+        for message in messages:
+
+            if getattr(message, "type", None) == "tool":
+
+                tool_name = getattr(message, "name", "unknown_tool")
+
+                tool_output = getattr(message, "content", "")
+
+                evidence.append(
+                    {
+                        "tool": tool_name,
+                        "result": tool_output
+                    }
+                )
+
+        # ----------------------------------------------
+        # Evidence validation
+        # ----------------------------------------------
+
+        validation = validate_evidence_claims(
+            response_text,
+            evidence
+        )
+
+        response_text = validation["answer"]
+
+        # ----------------------------------------------
+        # Responsible AI
+        # ----------------------------------------------
+
+        responsible_ai = run_responsible_ai_checks(
+            request.message,
+            response_text,
+            preferences=pref_dict,
+        )
+
+        # ----------------------------------------------
+        # Optional research telemetry (gated by consent)
+        # ----------------------------------------------
+
+        record_research_telemetry(
+            event={
+                "message_length": len(request.message),
+                "tools_used": tools_used,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            consent_granted=prefs.data_sharing_consent,
+        )
+
+        # ----------------------------------------------
+        # Return complete response
+        # ----------------------------------------------
+
+        return {
+            "evidence_validation": {
+                "passed": validation["passed"],
+                "issues": validation["issues"],
+                "checks_applied": validation["checks_applied"]
+            },
+            "answer": response_text,
+            "agent_execution": {
+                "tools_used": tools_used,
+                "number_of_tools": len(tools_used),
+                "status": (
+                    "tools_executed"
+                    if tools_used
+                    else "no_tools_required"
+                )
+            },
+            "evidence": evidence,
+            "responsible_ai": responsible_ai
+        }
+    finally:
+        reset_current_preferences(token)

@@ -264,6 +264,23 @@ export function parseAuditResult(text: string): ParsedAuditEvidence {
 }
 
 export function parsePortfolioResult(text: string): ParsedPortfolioEvidence {
+  const isPersonalizationDisabled = /PERSONALIZED CONTEXT DISABLED|Personalized financial context is disabled/i.test(text);
+
+  if (isPersonalizationDisabled) {
+    return {
+      hasEvidence: false,
+      provenanceType: "fallback",
+      provenanceLabel: "Personalized Context Disabled",
+      portfolioId: "N/A",
+      totalValue: "Disabled",
+      currency: "USD",
+      holdingCount: 0,
+      isFallback: false,
+      fallbackReason: "Personalized financial context is disabled by user preference.",
+      explanationText: "Notice: Personalized financial context is disabled by user preference. Account-specific portfolio queries are blocked without fabricating anonymous holdings.",
+    };
+  }
+
   const isFallback = /FALLBACK|Local mock baseline|NO LIVE PORTFOLIO/i.test(text);
   const isLive = !isFallback && /LIVE PLATFORM RECORD/i.test(text);
   const provenanceType: "live" | "fallback" = isLive ? "live" : "fallback";
@@ -308,7 +325,7 @@ export function parsePortfolioResult(text: string): ParsedPortfolioEvidence {
       currency = valMatch[1] || "LKR";
       totalValue = valMatch[2];
     } else {
-      totalValue = "1,000,000";
+      totalValue = "N/A";
     }
 
     const retMatch = text.match(/(?:Illustrative\s+)?Expected Annual Return:\s*([0-9.]+)%/i);
@@ -397,7 +414,15 @@ export function parseSessionEvidence(evidenceList: Array<{ tool: string; result:
 
   const hasFraud = Boolean(fraudItem?.result && !fraudItem.result.includes("No transaction was found"));
   const hasAudit = Boolean(auditItem?.result && !auditItem.result.includes("No audit record found"));
-  const hasPortfolio = Boolean(portfolioItem?.result && !portfolioItem.result.includes("No portfolio found"));
+  const isPortfolioDisabled = Boolean(
+    portfolioItem?.result &&
+    /PERSONALIZED CONTEXT DISABLED|Personalized financial context is disabled/i.test(portfolioItem.result)
+  );
+  const hasPortfolio = Boolean(
+    portfolioItem?.result &&
+    !portfolioItem.result.includes("No portfolio found") &&
+    !isPortfolioDisabled
+  );
 
   if (hasFraud && hasAudit) {
     return {
