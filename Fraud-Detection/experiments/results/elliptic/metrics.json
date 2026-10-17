@@ -1,0 +1,418 @@
+{
+  "dataset": "elliptic",
+  "benchmark_valid": true,
+  "results_are_research_benchmark": true,
+  "split_strategy": "induced subgraph of 12989 nodes",
+  "rows": 12989,
+  "models": [
+    {
+      "model": "logistic_regression",
+      "dataset": "elliptic",
+      "benchmark_valid": true,
+      "parameters": {
+        "C": 1.0,
+        "class_weight": "balanced",
+        "dual": false,
+        "fit_intercept": true,
+        "intercept_scaling": 1,
+        "l1_ratio": 0.0,
+        "max_iter": 300,
+        "penalty": "deprecated",
+        "random_state": 42,
+        "solver": "liblinear",
+        "tol": 0.0001,
+        "verbose": 0,
+        "warm_start": false
+      },
+      "features": "induced subgraph of 12989 nodes. Node features are scaled with training-node statistics.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.5893631869445761,
+      "average_precision": 0.08689615904577488,
+      "precision": 0.10697674418604651,
+      "recall": 0.9750623441396509,
+      "f1": 0.19280078895463512,
+      "confusion_matrix": {
+        "tn": 1335,
+        "fp": 3264,
+        "fn": 10,
+        "tp": 391
+      },
+      "threshold": 0.000567084186586891,
+      "gateway": {
+        "fraud_rows": 401,
+        "legitimate_rows": 4599,
+        "fraud_blocked": 1,
+        "fraud_blocked_rate": 0.0024937655860349127,
+        "fraud_step_up": 2,
+        "legitimate_challenged": 481,
+        "legitimate_challenged_rate": 0.10458795390302239,
+        "legitimate_blocked": 152,
+        "legitimate_blocked_rate": 0.03305066318764949,
+        "allow": 4516,
+        "step_up": 331,
+        "block": 153,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.9999998675546068,
+          "block": 0.999999999999973,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 1283
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "svm",
+      "dataset": "elliptic",
+      "benchmark_valid": true,
+      "parameters": {
+        "C": 1.0,
+        "class_weight": "balanced",
+        "dual": "auto",
+        "fit_intercept": true,
+        "intercept_scaling": 1,
+        "loss": "squared_hinge",
+        "max_iter": 400,
+        "multi_class": "ovr",
+        "penalty": "l2",
+        "random_state": 42,
+        "tol": 0.0001,
+        "verbose": 0
+      },
+      "features": "induced subgraph of 12989 nodes. Node features are scaled with training-node statistics.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.6139321190392143,
+      "average_precision": 0.09286521428572929,
+      "precision": 0.10443037974683544,
+      "recall": 0.9052369077306733,
+      "f1": 0.18725818932164046,
+      "confusion_matrix": {
+        "tn": 1486,
+        "fp": 3113,
+        "fn": 38,
+        "tp": 363
+      },
+      "threshold": -8.279939023228554,
+      "gateway": {
+        "fraud_rows": 401,
+        "legitimate_rows": 4599,
+        "fraud_blocked": 1,
+        "fraud_blocked_rate": 0.0024937655860349127,
+        "fraud_step_up": 5,
+        "legitimate_challenged": 499,
+        "legitimate_challenged_rate": 0.10850184822787562,
+        "legitimate_blocked": 164,
+        "legitimate_blocked_rate": 0.03565992607088497,
+        "allow": 4495,
+        "step_up": 340,
+        "block": 165,
+        "notes": [],
+        "thresholds": {
+          "step_up": 3.70103810830914,
+          "block": 10.84251401957769,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 1283
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "random_forest",
+      "dataset": "elliptic",
+      "benchmark_valid": true,
+      "parameters": {
+        "bootstrap": true,
+        "ccp_alpha": 0.0,
+        "class_weight": "balanced_subsample",
+        "criterion": "gini",
+        "max_depth": 8,
+        "max_features": "sqrt",
+        "min_impurity_decrease": 0.0,
+        "min_samples_leaf": 5,
+        "min_samples_split": 2,
+        "min_weight_fraction_leaf": 0.0,
+        "n_estimators": 40,
+        "n_jobs": 1,
+        "oob_score": false,
+        "random_state": 42,
+        "verbose": 0,
+        "warm_start": false
+      },
+      "features": "induced subgraph of 12989 nodes. Node features are scaled with training-node statistics.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.7630516012642887,
+      "average_precision": 0.14678990648272566,
+      "precision": 0.19778067885117492,
+      "recall": 0.7556109725685786,
+      "f1": 0.31350232798758404,
+      "confusion_matrix": {
+        "tn": 3370,
+        "fp": 1229,
+        "fn": 98,
+        "tp": 303
+      },
+      "threshold": 0.1225356148080231,
+      "gateway": {
+        "fraud_rows": 401,
+        "legitimate_rows": 4599,
+        "fraud_blocked": 4,
+        "fraud_blocked_rate": 0.00997506234413965,
+        "fraud_step_up": 29,
+        "legitimate_challenged": 397,
+        "legitimate_challenged_rate": 0.08632311372037399,
+        "legitimate_blocked": 105,
+        "legitimate_blocked_rate": 0.0228310502283105,
+        "allow": 4570,
+        "step_up": 321,
+        "block": 109,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.3445227103401929,
+          "block": 0.4594743877229777,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 1283
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "static_gcn",
+      "dataset": "elliptic",
+      "benchmark_valid": true,
+      "parameters": {
+        "hidden": 32,
+        "epochs_ran": 5
+      },
+      "features": "Training edges have both ends in the training split so test node features cannot update the weights.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.8627881264440551,
+      "average_precision": 0.32194869614901245,
+      "precision": 0.27217125382262997,
+      "recall": 0.6658354114713217,
+      "f1": 0.38639652677279307,
+      "confusion_matrix": {
+        "tn": 3885,
+        "fp": 714,
+        "fn": 134,
+        "tp": 267
+      },
+      "threshold": 0.5653700232505798,
+      "gateway": {
+        "fraud_rows": 401,
+        "legitimate_rows": 4599,
+        "fraud_blocked": 20,
+        "fraud_blocked_rate": 0.04987531172069826,
+        "fraud_step_up": 71,
+        "legitimate_challenged": 164,
+        "legitimate_challenged_rate": 0.03565992607088497,
+        "legitimate_blocked": 28,
+        "legitimate_blocked_rate": 0.0060882800608828,
+        "allow": 4745,
+        "step_up": 207,
+        "block": 48,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.6635520339012143,
+          "block": 0.7653334105014802,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 1283
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "static_gat",
+      "dataset": "elliptic",
+      "benchmark_valid": true,
+      "parameters": {
+        "hidden": 32,
+        "epochs_ran": 5
+      },
+      "features": "Training edges have both ends in the training split so test node features cannot update the weights.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.7772187274800604,
+      "average_precision": 0.17777506837453103,
+      "precision": 0.16492796820665673,
+      "recall": 0.827930174563591,
+      "f1": 0.2750621375310688,
+      "confusion_matrix": {
+        "tn": 2918,
+        "fp": 1681,
+        "fn": 69,
+        "tp": 332
+      },
+      "threshold": 0.4340301752090454,
+      "gateway": {
+        "fraud_rows": 401,
+        "legitimate_rows": 4599,
+        "fraud_blocked": 5,
+        "fraud_blocked_rate": 0.012468827930174564,
+        "fraud_step_up": 68,
+        "legitimate_challenged": 286,
+        "legitimate_challenged_rate": 0.062187432050445746,
+        "legitimate_blocked": 41,
+        "legitimate_blocked_rate": 0.008914981517721243,
+        "allow": 4641,
+        "step_up": 313,
+        "block": 46,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.7304661273956295,
+          "block": 0.8425705504417421,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 1283
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "gnn_only",
+      "dataset": "elliptic",
+      "benchmark_valid": true,
+      "parameters": {
+        "hidden": 32,
+        "epochs_ran": 3
+      },
+      "features": "Training edges have both ends in the training split so test node features cannot update the weights.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.824636603750463,
+      "average_precision": 0.38573020373235645,
+      "precision": 0.2525027808676307,
+      "recall": 0.5660847880299252,
+      "f1": 0.34923076923076923,
+      "confusion_matrix": {
+        "tn": 3927,
+        "fp": 672,
+        "fn": 174,
+        "tp": 227
+      },
+      "threshold": 0.5154117465019226,
+      "gateway": {
+        "fraud_rows": 401,
+        "legitimate_rows": 4599,
+        "fraud_blocked": 63,
+        "fraud_blocked_rate": 0.1571072319201995,
+        "fraud_step_up": 79,
+        "legitimate_challenged": 175,
+        "legitimate_challenged_rate": 0.0380517503805175,
+        "legitimate_blocked": 17,
+        "legitimate_blocked_rate": 0.0036964557512502716,
+        "allow": 4683,
+        "step_up": 237,
+        "block": 80,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.5526556313037871,
+          "block": 0.5973346197605134,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 1283
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "lstm_only",
+      "auroc": null,
+      "precision": null,
+      "recall": null,
+      "f1": null,
+      "error": null,
+      "notes": [
+        "This dataset is a node graph, not a per-account transaction sequence, so the LSTM autoencoder is not applicable."
+      ],
+      "skipped": true,
+      "benchmark_valid": false
+    },
+    {
+      "model": "fused_lstm_gnn",
+      "auroc": null,
+      "precision": null,
+      "recall": null,
+      "f1": null,
+      "error": null,
+      "notes": [
+        "Fusion needs an LSTM sequence score. It is reported on the IEEE-CIS transaction stream."
+      ],
+      "skipped": true,
+      "benchmark_valid": false
+    }
+  ],
+  "source_metadata": {
+    "source": "https://www.kaggle.com/datasets/ellipticco/elliptic-data-set",
+    "license": "CC BY-NC-ND 4.0",
+    "files": [
+      {
+        "path": "C:\\Users\\dhush\\Downloads\\research_project\\J26-SE-325\\Fraud-Detection\\data\\raw\\elliptic\\elliptic_bitcoin_dataset\\elliptic_txs_features.csv",
+        "name": "elliptic_txs_features.csv",
+        "bytes": 689683771,
+        "sha256": "fd7f83573443c9e302e371d3f110e3b6224160f5d1ed8a287757936127800ff0"
+      },
+      {
+        "path": "C:\\Users\\dhush\\Downloads\\research_project\\J26-SE-325\\Fraud-Detection\\data\\raw\\elliptic\\elliptic_bitcoin_dataset\\elliptic_txs_classes.csv",
+        "name": "elliptic_txs_classes.csv",
+        "bytes": 3305144,
+        "sha256": "93e2e7b2405c735ba752bf6ba06b947561deddd1f5a8fc91e46f6a4c0e439493"
+      },
+      {
+        "path": "C:\\Users\\dhush\\Downloads\\research_project\\J26-SE-325\\Fraud-Detection\\data\\raw\\elliptic\\elliptic_bitcoin_dataset\\elliptic_txs_edgelist.csv",
+        "name": "elliptic_txs_edgelist.csv",
+        "bytes": 4470584,
+        "sha256": "a35053ba68a98e4382cae2ba65b9d9e36b23b6439e02dff084971b1b72a5156e"
+      }
+    ],
+    "notes": [
+      "Positive class is illicit (original class 1). Licit is class 2. Unknown nodes stay in the graph with label -1 and are excluded from supervised metrics.",
+      "Do not publish modified copies of this dataset. The licence is CC BY-NC-ND 4.0."
+    ]
+  },
+  "graph_models_trained": [
+    "static_gcn",
+    "static_gat",
+    "gnn_only"
+  ],
+  "notes": [
+    "Metrics ignore nodes whose label is unknown (-1)."
+  ]
+}

@@ -1,0 +1,14 @@
+# Manageable IEEE-CIS development subset: earliest 20,000 transactions
+# after the time-order check described in the README.
+dataset_name: ieee-cis
+benchmark_valid: true
+max_rows: 20000
+models:
+  rf_trees: 40
+  rf_depth: 8
+  hidden: 32
+  epochs: 5
+  seq_len: 8
+graph_limits:
+  dgraph_max_nodes: 8000
+  elliptic_max_nodes: 15000

@@ -1,0 +1,13 @@
+data/raw/
+data/processed/
+data/interim/
+artifacts/
+experiments/decision_log.jsonl
+experiments/logs/
+experiments/demo_stream.csv
+.venv/
+__pycache__/
+.pytest_cache/
+*.pt
+*.pth
+*.joblib

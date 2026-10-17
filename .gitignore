@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Secrets. Never commit Kaggle tokens or environment files.
+.env
+.env.*
+kaggle.json
+**/.kaggle/
+
+# Component 02 datasets, processed extracts, decision logs, and model weights.
+# Small metric JSON/CSV files under experiments/results may be kept locally.
+Fraud-Detection/data/raw/
+Fraud-Detection/data/processed/
+Fraud-Detection/data/interim/
+Fraud-Detection/artifacts/
+Fraud-Detection/experiments/decision_log.jsonl
+Fraud-Detection/experiments/logs/
+Fraud-Detection/experiments/demo_stream.csv
+*.pt
+*.pth
+*.joblib
+
+# Local scan previews
+_taf_preview/
+_extract_taf.py

@@ -1,0 +1,17 @@
+# Tiny fixture used to prove the pipeline runs.
+# Results from this profile are not research benchmark numbers.
+dataset_name: synthetic-fixture
+benchmark_valid: false
+max_rows: 360
+models:
+  rf_trees: 20
+  rf_depth: 6
+  svm_max_iter: 200
+  hidden: 8
+  epochs: 3
+  patience: 3
+  seq_len: 4
+  max_neighbors: 3
+  batch_size: 64
+gateway:
+  feedback_min_samples: 8
