@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { BarChartIcon, CheckCircleIcon, SparklesIcon, ChevronRightIcon, ShieldIcon } from "./icons";
 import {
   parseSessionEvidence,
@@ -32,6 +32,21 @@ interface Props {
 export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] }: Props) {
   const [feedbackGiven, setFeedbackGiven] = useState<"yes" | "no" | null>(null);
   const [showIllustrativeBaseline, setShowIllustrativeBaseline] = useState(false);
+  const [personalizedContext, setPersonalizedContext] = useState<boolean>(true);
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("finagent_responsible_ai_prefs");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (typeof parsed?.personalizedContext === "boolean") {
+          setPersonalizedContext(parsed.personalizedContext);
+        }
+      }
+    } catch {
+      // Fall back to default
+    }
+  }, []);
 
   const session = parseSessionEvidence(latestEvidence);
   const fraud = session.fraud;
@@ -523,110 +538,165 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
           </p>
         </div>
       ) : session.mode === "portfolio" && portfolio ? (
-        <div className="rounded-xl border border-black/10 bg-white p-5 shadow-xs overflow-hidden dark:border-white/15 dark:bg-neutral-900">
-          <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-            <div className="min-w-0">
-              <h3 className="text-base font-semibold text-neutral-900 dark:text-white break-words">
-                {portfolio.isFallback
-                  ? "Illustrative Mock Baseline Portfolio Breakdown"
-                  : "Live Portfolio Allocation & Breakdown"}
-              </h3>
-              <p className="text-xs text-neutral-500">
-                {portfolio.isFallback
-                  ? "Synthetic mock estimates shown for system demonstration — Not verified user assets"
-                  : "Live platform portfolio asset distribution"}
-              </p>
+        !personalizedContext ? (
+          <div className="rounded-xl border border-amber-300 bg-amber-50/80 p-5 shadow-xs dark:border-amber-900/60 dark:bg-amber-950/30">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300">
+              <ShieldIcon className="size-4" />
+              <span>Personalized Context Disabled</span>
             </div>
-            <span
-              className={`w-fit shrink-0 rounded-full px-3 py-1 text-xs font-bold ${
-                portfolio.isFallback
-                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
-                  : "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
-              }`}
-            >
-              {portfolio.isFallback ? "Sample Demonstration Metrics" : "Live Portfolio Data"}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div className="min-w-0 rounded-lg border border-neutral-200 bg-neutral-50/80 p-3.5 dark:border-neutral-800 dark:bg-neutral-800/60">
-              <span className="text-xs text-neutral-500">Expected Annual Return</span>
-              <p className="mt-1 text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
-                {portfolio.expectedAnnualReturn != null ? `${portfolio.expectedAnnualReturn}%` : "N/A"}
-              </p>
-              <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
-                {portfolio.isFallback ? "Illustrative mock baseline" : "Projected annual return"}
-              </p>
-            </div>
-
-            <div className="min-w-0 rounded-lg border border-neutral-200 bg-neutral-50/80 p-3.5 dark:border-neutral-800 dark:bg-neutral-800/60">
-              <span className="text-xs text-neutral-500">Risk Score</span>
-              <p className="mt-1 text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
-                {portfolio.riskScore != null ? `${portfolio.riskScore}/100` : "N/A"}
-              </p>
-              <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
-                {portfolio.isFallback ? `Illustrative mock (${portfolio.riskLevel ?? "Moderate"})` : portfolio.riskLevel ?? "Evaluated"}
-              </p>
-            </div>
-
-            <div className="min-w-0 rounded-lg border border-neutral-200 bg-neutral-50/80 p-3.5 dark:border-neutral-800 dark:bg-neutral-800/60">
-              <span className="text-xs text-neutral-500">Diversification Score</span>
-              <p className="mt-1 text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
-                {portfolio.diversificationScore != null ? `${portfolio.diversificationScore}/100` : "N/A"}
-              </p>
-              <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
-                {portfolio.isFallback ? "Illustrative mock baseline" : "Cross-sector spread"}
-              </p>
-            </div>
-
-            <div className="min-w-0 rounded-lg border border-neutral-200 bg-neutral-50/80 p-3.5 dark:border-neutral-800 dark:bg-neutral-800/60">
-              <span className="text-xs text-neutral-500">Liquidity</span>
-              <p className="mt-1 text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
-                {portfolio.liquidity ?? "N/A"}
-              </p>
-              <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
-                {portfolio.isFallback ? "Illustrative mock baseline" : "Cash & near-cash buffer"}
-              </p>
-            </div>
-          </div>
-
-          {portfolio.allocation && Object.keys(portfolio.allocation).length > 0 && (
-            <div className="mt-4">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wider text-neutral-600 dark:text-neutral-400">
-                  {portfolio.isFallback ? "Illustrative Mock Asset Allocation (Sample Only)" : "Asset Allocation Breakdown"}
-                </span>
-                {portfolio.isFallback && (
-                  <span className="text-[11px] text-amber-700 dark:text-amber-400">
-                    Not actual user holdings
-                  </span>
-                )}
-              </div>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3">
-                {Object.entries(portfolio.allocation).map(([sector, pct]) => (
-                  <div key={sector} className="rounded-lg border border-neutral-200 bg-neutral-50/60 p-2.5 dark:border-neutral-800 dark:bg-neutral-800/40">
-                    <div className="flex justify-between text-xs font-medium text-neutral-800 dark:text-neutral-200">
-                      <span>{sector}</span>
-                      <span className="font-mono font-bold">{pct}%</span>
-                    </div>
-                    <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-700">
-                      <div
-                        className="h-full rounded-full bg-blue-500"
-                        style={{ width: `${Math.min(pct, 100)}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {portfolio.isFallback && (
-            <p className="mt-4 text-xs leading-relaxed text-amber-800 dark:text-amber-400/90 break-words [overflow-wrap:anywhere]">
-              <strong>Notice:</strong> The live platform service was queried, but no portfolio record was found for this user ID. The metrics, risk score, and asset allocations displayed above are synthetic baseline estimates shown strictly for system demonstration purposes. They do not represent verified holdings, actual account balances, or personalized investment advice.
+            <h3 className="mt-2 text-base font-semibold text-neutral-900 dark:text-white">
+              Portfolio Metrics & Allocations Suppressed
+            </h3>
+            <p className="mt-1 text-xs leading-relaxed text-neutral-700 dark:text-neutral-300">
+              Personalized financial context is disabled by user preference. Account-specific portfolio lookup, illustrative mock valuations, synthetic risk scores, and asset allocation breakdowns are blocked for this request, and no personalized portfolio evidence was accessed.
             </p>
-          )}
-        </div>
+            <p className="mt-2 text-[11px] text-neutral-500 dark:text-neutral-400">
+              You can re-enable personalized context anytime in the Responsible AI settings tab.
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-black/10 bg-white p-5 shadow-xs overflow-hidden dark:border-white/15 dark:bg-neutral-900">
+            <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <h3 className="text-base font-semibold text-neutral-900 dark:text-white break-words">
+                  {portfolio.isFallback
+                    ? "Illustrative Mock Baseline Portfolio Breakdown"
+                    : "Live Portfolio Allocation & Breakdown"}
+                </h3>
+                <p className="text-xs text-neutral-500">
+                  {portfolio.isFallback
+                    ? "Synthetic mock estimates shown for system demonstration — Not verified user assets"
+                    : "Live platform portfolio asset distribution"}
+                </p>
+              </div>
+              <span
+                className={`w-fit shrink-0 rounded-full px-3 py-1 text-xs font-bold ${
+                  portfolio.isFallback
+                    ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                    : "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
+                }`}
+              >
+                {portfolio.isFallback ? "Tool Evidence — Synthetic Demo Data" : "Live Portfolio Data"}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+              {/* 1. Valuation Card */}
+              <div className="min-w-0 rounded-lg border border-neutral-200 bg-neutral-50/80 p-3.5 dark:border-neutral-800 dark:bg-neutral-800/60">
+                <span className="text-xs text-neutral-500">
+                  {portfolio.isFallback ? "Illustrative Mock Valuation" : "Recorded Valuation"}
+                </span>
+                <p className="mt-1 text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
+                  {portfolio.totalValue !== "N/A" ? `${portfolio.currency} ${portfolio.totalValue}` : "Unverified"}
+                </p>
+                <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
+                  {portfolio.isFallback ? "Sample demo valuation (Not actual balance)" : `${portfolio.holdingCount} verified holdings`}
+                </p>
+              </div>
+
+              {/* 2. Expected Annual Return Card */}
+              <div className="min-w-0 rounded-lg border border-neutral-200 bg-neutral-50/80 p-3.5 dark:border-neutral-800 dark:bg-neutral-800/60">
+                <span className="text-xs text-neutral-500">Expected Annual Return</span>
+                <p className="mt-1 text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
+                  {portfolio.expectedAnnualReturn != null ? `${portfolio.expectedAnnualReturn}%` : "N/A"}
+                </p>
+                <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
+                  {portfolio.isFallback ? "Illustrative mock baseline" : "Projected annual return"}
+                </p>
+              </div>
+
+              {/* 3. Risk Score Card */}
+              <div className="min-w-0 rounded-lg border border-neutral-200 bg-neutral-50/80 p-3.5 dark:border-neutral-800 dark:bg-neutral-800/60">
+                <span className="text-xs text-neutral-500">
+                  {portfolio.isFallback ? "Illustrative Risk Score" : "Risk Score"}
+                </span>
+                <p className="mt-1 text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
+                  {portfolio.riskScore != null ? `${portfolio.riskScore}/100` : "N/A"}
+                </p>
+                <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
+                  {portfolio.isFallback ? `Illustrative mock (${portfolio.riskLevel ?? "Moderate"}) — Not user risk` : portfolio.riskLevel ?? "Evaluated"}
+                </p>
+              </div>
+
+              {/* 4. Diversification Score Card */}
+              <div className="min-w-0 rounded-lg border border-neutral-200 bg-neutral-50/80 p-3.5 dark:border-neutral-800 dark:bg-neutral-800/60">
+                <span className="text-xs text-neutral-500">Diversification Score</span>
+                <p className="mt-1 text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
+                  {portfolio.diversificationScore != null ? `${portfolio.diversificationScore}/100` : "N/A"}
+                </p>
+                <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
+                  {portfolio.isFallback ? "Illustrative mock baseline" : "Cross-sector spread"}
+                </p>
+              </div>
+
+              {/* 5. Liquidity Card */}
+              <div className="min-w-0 rounded-lg border border-neutral-200 bg-neutral-50/80 p-3.5 dark:border-neutral-800 dark:bg-neutral-800/60">
+                <span className="text-xs text-neutral-500">Liquidity</span>
+                <p className="mt-1 text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
+                  {portfolio.liquidity ?? "N/A"}
+                </p>
+                <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
+                  {portfolio.isFallback ? "Illustrative mock baseline" : "Cash & near-cash buffer"}
+                </p>
+              </div>
+            </div>
+
+            {portfolio.allocation && Object.keys(portfolio.allocation).length > 0 && (
+              <div className="mt-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-neutral-600 dark:text-neutral-400">
+                    {portfolio.isFallback ? "Illustrative Mock Asset Allocation (Sample Only)" : "Asset Allocation Breakdown"}
+                  </span>
+                  {portfolio.isFallback && (
+                    <span className="text-[11px] text-amber-700 dark:text-amber-400">
+                      Not actual user holdings
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 md:grid-cols-3">
+                  {Object.entries(portfolio.allocation).map(([sector, pct]) => (
+                    <div key={sector} className="rounded-lg border border-neutral-200 bg-neutral-50/60 p-2.5 dark:border-neutral-800 dark:bg-neutral-800/40">
+                      <div className="flex justify-between text-xs font-medium text-neutral-800 dark:text-neutral-200">
+                        <span>{sector}</span>
+                        <span className="font-mono font-bold">{pct}%</span>
+                      </div>
+                      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-700">
+                        <div
+                          className="h-full rounded-full bg-blue-500"
+                          style={{ width: `${Math.min(pct, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {portfolio.isFallback && (
+              <p className="mt-4 text-xs leading-relaxed text-amber-800 dark:text-amber-400/90 break-words [overflow-wrap:anywhere]">
+                <strong>Notice:</strong> The live platform service was queried, but no portfolio record was found for this user ID. The metrics, risk score, and asset allocations displayed above are synthetic baseline estimates shown strictly for system demonstration purposes. They do not represent verified holdings, actual account balances, or personalized investment advice.
+              </p>
+            )}
+
+            {latestEvidence.length > 0 && (
+              <details className="mt-4 rounded-lg border border-neutral-200 bg-neutral-50/60 p-3 text-xs dark:border-neutral-800 dark:bg-neutral-800/40">
+                <summary className="cursor-pointer font-semibold text-blue-700 dark:text-blue-400">
+                  View raw portfolio tool evidence ({latestEvidence.filter(e => e.tool === "get_portfolio_analysis").length || latestEvidence.length})
+                </summary>
+                <div className="mt-2 space-y-2">
+                  {latestEvidence
+                    .filter((e) => e.tool === "get_portfolio_analysis")
+                    .map((ev, idx) => (
+                      <div key={idx} className="rounded border border-neutral-200 bg-white p-2.5 font-mono text-[11px] dark:border-neutral-700 dark:bg-neutral-900">
+                        <div className="mb-1 font-bold text-neutral-700 dark:text-neutral-300">Tool: {ev.tool}</div>
+                        <pre className="whitespace-pre-wrap break-all text-neutral-600 dark:text-neutral-400">{ev.result}</pre>
+                      </div>
+                    ))}
+                </div>
+              </details>
+            )}
+          </div>
+        )
       ) : fraud && fraud.shapContributions.length > 0 ? (
         <div className="rounded-xl border border-black/10 bg-white p-5 shadow-xs dark:border-white/15 dark:bg-neutral-900">
           <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
@@ -814,8 +884,32 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
             <SparklesIcon className="size-4 text-blue-600" />
             <span>Simple explanation</span>
           </div>
-          <span className="rounded-full bg-blue-600 px-2.5 py-0.5 text-[11px] font-bold text-white shadow-2xs">
-            {session.mode === "baseline"
+          <span
+            className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold shadow-2xs ${
+              session.mode === "portfolio" && portfolio?.isFallback
+                ? "bg-amber-600 text-white dark:bg-amber-700"
+                : session.mode === "fraud" && fraud?.provenanceType === "fallback"
+                ? "bg-amber-600 text-white dark:bg-amber-700"
+                : session.mode === "audit" && audit?.isFallback
+                ? "bg-amber-600 text-white dark:bg-amber-700"
+                : session.mode === "baseline"
+                ? "bg-neutral-600 text-white dark:bg-neutral-700"
+                : "bg-blue-600 text-white"
+            }`}
+          >
+            {session.mode === "portfolio" && portfolio
+              ? portfolio.isFallback
+                ? "Tool evidence — synthetic demo data"
+                : "Grounded in live tool evidence"
+              : session.mode === "fraud" && fraud
+              ? fraud.provenanceType === "fallback"
+                ? "Tool evidence — synthetic demo data"
+                : "Grounded in live tool evidence"
+              : session.mode === "audit" && audit
+              ? audit.isFallback
+                ? "Tool evidence — synthetic demo data"
+                : "Grounded in live tool evidence"
+              : session.mode === "baseline"
               ? showIllustrativeBaseline
                 ? "Illustrative Demonstration"
                 : "No Active Evidence"
@@ -823,7 +917,9 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
           </span>
         </div>
         <p className="text-sm font-medium leading-relaxed text-neutral-800 dark:text-neutral-200">
-          {explanationSummary}
+          {!personalizedContext && session.mode === "portfolio"
+            ? "Notice: Personalized financial context is disabled by user preference. Account-specific portfolio lookup, illustrative mock valuations, and asset holdings analysis are blocked for this request, and no personalized portfolio evidence was accessed."
+            : explanationSummary}
         </p>
 
         {/* Evidence Sources & Next Action */}
@@ -836,7 +932,11 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
                 {session.mode === "portfolio" && portfolio && portfolio.hasEvidence ? (
                   <>
                     <CheckCircleIcon className="size-4 text-emerald-500" />
-                    <span>Portfolio analysis ({portfolio.provenanceType})</span>
+                    <span>
+                      {portfolio.isFallback
+                        ? "Portfolio analysis (synthetic demo fallback)"
+                        : "Portfolio analysis (live platform)"}
+                    </span>
                   </>
                 ) : (
                   <>

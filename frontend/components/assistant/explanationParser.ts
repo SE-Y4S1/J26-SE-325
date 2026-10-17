@@ -286,7 +286,7 @@ export function parsePortfolioResult(text: string): ParsedPortfolioEvidence {
   const provenanceType: "live" | "fallback" = isLive ? "live" : "fallback";
   const provenanceLabel = isLive
     ? "Live Service Evidence (Platform Portfolio)"
-    : "Fallback Mock Data (No Live Portfolio)";
+    : "Tool Evidence — Synthetic Demo Data";
 
   const pIdMatch = text.match(/(?:Portfolio ID|User ID):\s*([A-Za-z0-9_-]+)/i);
   const portfolioId = pIdMatch ? pIdMatch[1] : "USER001";
@@ -360,7 +360,7 @@ export function parsePortfolioResult(text: string): ParsedPortfolioEvidence {
 
   const explanationText = isLive
     ? `Live portfolio record retrieved from the platform portfolio store. Total recorded market value: ${currency} ${totalValue} across ${holdingCount} verified holdings. Optimization metrics require Component 1 analytical modeling.`
-    : `Notice: No live portfolio was retrieved for user ${portfolioId} from the platform service (${fallbackReason || "portfolio not found"}). The user has 0 verified live holdings on record. The displayed valuation (${currency} ${totalValue}) and synthetic metrics (${expectedAnnualReturn}% expected return, ${riskScore}/100 risk score, ${diversificationScore}/100 diversification, ${liquidity} liquidity) are illustrative mock baseline examples for demonstration only and do not reflect actual user holdings or a verified account balance.`;
+    : `Notice: No live portfolio was retrieved for user ${portfolioId} from the platform service (${fallbackReason || "portfolio not found"}). The user has 0 verified live holdings on record. What the platform verified: no live portfolio record was found on the platform service. What the demonstration illustrates: sample return (${expectedAnnualReturn}%), risk score (${riskScore}/100, ${riskLevel ?? "Moderate"}), diversification (${diversificationScore}/100), liquidity (${liquidity}), mock valuation (${currency} ${totalValue}), and sector allocations as illustrative mock baseline examples for demonstration only. What remains unknown: the user's actual portfolio risk profile and real account balance remain unknown and unassessed, and do not reflect actual user holdings or a verified account balance.`;
 
   return {
     hasEvidence: true,
@@ -430,6 +430,7 @@ export function parseSessionEvidence(evidenceList: Array<{ tool: string; result:
       hasActiveEvidence: true,
       fraud: parseFraudResult(fraudItem!.result),
       audit: parseAuditResult(auditItem!.result),
+      portfolio: hasPortfolio ? parsePortfolioResult(portfolioItem!.result) : undefined,
     };
   }
 
@@ -438,6 +439,7 @@ export function parseSessionEvidence(evidenceList: Array<{ tool: string; result:
       mode: "audit",
       hasActiveEvidence: true,
       audit: parseAuditResult(auditItem!.result),
+      portfolio: hasPortfolio ? parsePortfolioResult(portfolioItem!.result) : undefined,
     };
   }
 
@@ -446,6 +448,7 @@ export function parseSessionEvidence(evidenceList: Array<{ tool: string; result:
       mode: "fraud",
       hasActiveEvidence: true,
       fraud: parseFraudResult(fraudItem!.result),
+      portfolio: hasPortfolio ? parsePortfolioResult(portfolioItem!.result) : undefined,
     };
   }
 

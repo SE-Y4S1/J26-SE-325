@@ -1,5 +1,7 @@
+import contextvars
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -9,6 +11,33 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from preferences_context import get_current_preferences
+
+try:
+    from timing_context import get_current_timing
+except ImportError:
+    try:
+        import sys
+        sys.path.append(str(Path(__file__).resolve().parent.parent))
+        from timing_context import get_current_timing
+    except Exception:
+        get_current_timing = lambda: None
+
+
+_request_portfolio_cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_request_portfolio_cache", default=None
+)
+
+
+def init_request_portfolio_cache():
+    return _request_portfolio_cache.set({})
+
+
+def clear_request_portfolio_cache(token):
+    if token is not None:
+        try:
+            _request_portfolio_cache.reset(token)
+        except Exception:
+            pass
 
 
 DATA_FILE = (
@@ -129,7 +158,13 @@ def _http_get(url: str, headers: dict, timeout: float) -> tuple[int | None, obje
     """
     Safely execute an HTTP GET request returning (status_code, parsed_json, error_message).
     """
+    t_start = time.perf_counter()
+    endpoint = urllib.parse.urlparse(url).path or url
     req = urllib.request.Request(url, headers=headers)
+    status_code = None
+    data = None
+    err_msg = None
+    is_timeout = False
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
             status_code = getattr(response, "status", 200)
@@ -139,18 +174,36 @@ def _http_get(url: str, headers: dict, timeout: float) -> tuple[int | None, obje
                 data = json.loads(text)
                 return status_code, data, None
             except json.JSONDecodeError:
-                return status_code, None, "Malformed JSON returned by platform service"
+                err_msg = "Malformed JSON returned by platform service"
+                return status_code, None, err_msg
     except urllib.error.HTTPError as err:
+        status_code = err.code
         try:
             error_body = err.read().decode("utf-8")
             data = json.loads(error_body)
         except Exception:
             data = None
-        return err.code, data, f"HTTP {err.code}: {err.reason}"
+        err_msg = f"HTTP {err.code}: {err.reason}"
+        return status_code, data, err_msg
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as err:
-        return None, None, f"Service unavailable ({err})"
+        is_timeout = isinstance(err, TimeoutError) or "timed out" in str(err).lower()
+        err_msg = f"Service unavailable ({err})"
+        return None, None, err_msg
     except Exception as err:
-        return None, None, f"Unexpected error querying portfolio service ({err})"
+        err_msg = f"Unexpected error querying portfolio service ({err})"
+        return None, None, err_msg
+    finally:
+        duration_ms = (time.perf_counter() - t_start) * 1000
+        timing_ctx = get_current_timing()
+        if timing_ctx is not None:
+            timing_ctx.record_http(
+                endpoint=endpoint,
+                duration_ms=duration_ms,
+                status_code=status_code,
+                retries=0,
+                is_timeout=is_timeout,
+                error=err_msg,
+            )
 
 
 def query_live_portfolio_service(
@@ -180,9 +233,6 @@ def query_live_portfolio_service(
             portfolio_id = clean_id
 
     resolved_user = resolve_user_id(user_id)
-    headers = {"Accept": "application/json"}
-    headers.update(get_auth_header(user_id=resolved_user))
-
     target_p_id = str(portfolio_id).strip() if (portfolio_id is not None and str(portfolio_id).strip().isdigit()) else None
 
     # Check user personalization preference: if disabled, do not query platform service
@@ -198,12 +248,21 @@ def query_live_portfolio_service(
             "error": "Personalized financial context is disabled by user preference",
         }
 
+    # Request-scoped cache to prevent redundant duplicate queries within the same request
+    req_cache = _request_portfolio_cache.get()
+    cache_key = (resolved_user, target_p_id, base_url)
+    if req_cache is not None and cache_key in req_cache:
+        return req_cache[cache_key]
+
+    headers = {"Accept": "application/json"}
+    headers.update(get_auth_header(user_id=resolved_user))
+
     # Always query GET /portfolios first to retrieve the user's registered portfolio list
     list_url = f"{base_url}/portfolios"
     status_code, data, err = _http_get(list_url, headers=headers, timeout=timeout)
 
     if status_code != 200:
-        return {
+        res = {
             "available": status_code is not None,
             "status_code": status_code,
             "data": data,
@@ -212,93 +271,102 @@ def query_live_portfolio_service(
             "empty_list": False,
             "error": err or f"HTTP {status_code}",
         }
+        if req_cache is not None:
+            req_cache[cache_key] = res
+        return res
 
-    # If platform returns a list
-    if isinstance(data, list):
-        if len(data) == 0:
-            return {
-                "available": True,
-                "status_code": 200,
-                "data": None,
-                "resolved_user_id": resolved_user,
-                "portfolio_id": target_p_id,
-                "empty_list": True,
-                "error": None,
-            }
-
-        # Portfolios exist. Select target or first available portfolio.
-        if target_p_id is not None:
-            # Check if target_p_id appears in the authenticated user's portfolio list
-            matching_p = next((p for p in data if isinstance(p, dict) and str(p.get("id")) == target_p_id), None)
-            if matching_p is None:
-                return {
-                    "available": True,
-                    "status_code": 404,
-                    "data": None,
-                    "resolved_user_id": resolved_user,
-                    "portfolio_id": target_p_id,
-                    "empty_list": False,
-                    "error": f"Portfolio {target_p_id} not owned by user {resolved_user}",
-                }
-            selected_id = target_p_id
-        else:
-            selected_p = data[0]
-            selected_id = selected_p.get("id") if isinstance(selected_p, dict) else None
-            if selected_id is None:
+    def _fetch():
+        # If platform returns a list
+        if isinstance(data, list):
+            if len(data) == 0:
                 return {
                     "available": True,
                     "status_code": 200,
                     "data": None,
                     "resolved_user_id": resolved_user,
-                    "portfolio_id": None,
+                    "portfolio_id": target_p_id,
                     "empty_list": True,
-                    "error": "Unexpected portfolio list item format",
+                    "error": None,
                 }
 
-        detail_url = f"{base_url}/portfolios/{selected_id}"
-        detail_status, detail_data, detail_err = _http_get(detail_url, headers=headers, timeout=timeout)
-        if detail_status == 200 and isinstance(detail_data, dict):
+            # Portfolios exist. Select target or first available portfolio.
+            if target_p_id is not None:
+                # Check if target_p_id appears in the authenticated user's portfolio list
+                matching_p = next((p for p in data if isinstance(p, dict) and str(p.get("id")) == target_p_id), None)
+                if matching_p is None:
+                    return {
+                        "available": True,
+                        "status_code": 404,
+                        "data": None,
+                        "resolved_user_id": resolved_user,
+                        "portfolio_id": target_p_id,
+                        "empty_list": False,
+                        "error": f"Portfolio {target_p_id} not owned by user {resolved_user}",
+                    }
+                selected_id = target_p_id
+            else:
+                selected_p = data[0]
+                selected_id = selected_p.get("id") if isinstance(selected_p, dict) else None
+                if selected_id is None:
+                    return {
+                        "available": True,
+                        "status_code": 200,
+                        "data": None,
+                        "resolved_user_id": resolved_user,
+                        "portfolio_id": None,
+                        "empty_list": True,
+                        "error": "Unexpected portfolio list item format",
+                    }
+
+            detail_url = f"{base_url}/portfolios/{selected_id}"
+            detail_status, detail_data, detail_err = _http_get(detail_url, headers=headers, timeout=timeout)
+            if detail_status == 200 and isinstance(detail_data, dict):
+                return {
+                    "available": True,
+                    "status_code": 200,
+                    "data": detail_data,
+                    "resolved_user_id": resolved_user,
+                    "portfolio_id": str(selected_id),
+                    "empty_list": False,
+                    "error": None,
+                }
             return {
-                "available": True,
-                "status_code": 200,
+                "available": detail_status is not None,
+                "status_code": detail_status,
                 "data": detail_data,
                 "resolved_user_id": resolved_user,
                 "portfolio_id": str(selected_id),
                 "empty_list": False,
+                "error": detail_err,
+            }
+
+        # Safe handling: if endpoint returned a portfolio dict directly (e.g. single-response mock)
+        if isinstance(data, dict):
+            p_id = str(data.get("id", target_p_id or "1"))
+            return {
+                "available": True,
+                "status_code": 200,
+                "data": data,
+                "resolved_user_id": resolved_user,
+                "portfolio_id": p_id,
+                "empty_list": False,
                 "error": None,
             }
-        return {
-            "available": detail_status is not None,
-            "status_code": detail_status,
-            "data": detail_data,
-            "resolved_user_id": resolved_user,
-            "portfolio_id": str(selected_id),
-            "empty_list": False,
-            "error": detail_err,
-        }
 
-    # Safe handling: if endpoint returned a portfolio dict directly (e.g. single-response mock)
-    if isinstance(data, dict):
-        p_id = str(data.get("id", target_p_id or "1"))
         return {
             "available": True,
             "status_code": 200,
-            "data": data,
+            "data": None,
             "resolved_user_id": resolved_user,
-            "portfolio_id": p_id,
+            "portfolio_id": target_p_id,
             "empty_list": False,
-            "error": None,
+            "error": err or "Unexpected response format from portfolio endpoint",
         }
 
-    return {
-        "available": True,
-        "status_code": 200,
-        "data": None,
-        "resolved_user_id": resolved_user,
-        "portfolio_id": target_p_id,
-        "empty_list": False,
-        "error": err or "Unexpected response format from portfolio endpoint",
-    }
+    res = _fetch()
+    if req_cache is not None:
+        req_cache[cache_key] = res
+    return res
 
 
 @tool
@@ -315,6 +383,30 @@ def get_portfolio_analysis(
       explicitly asked for a specific portfolio number in their message.
       Do not provide a default portfolio ID for general portfolio queries.
     """
+    t_tool_start = time.perf_counter()
+    tool_error = None
+    try:
+        return _execute_portfolio_analysis(user_id=user_id, portfolio_id=portfolio_id)
+    except Exception as exc:
+        tool_error = str(exc)
+        raise
+    finally:
+        tool_duration_ms = (time.perf_counter() - t_tool_start) * 1000
+        timing_ctx = get_current_timing()
+        if timing_ctx is not None:
+            timing_ctx.record_tool(
+                tool_name="get_portfolio_analysis",
+                duration_ms=tool_duration_ms,
+                success=(tool_error is None),
+                retries=0,
+                error=tool_error,
+            )
+
+
+def _execute_portfolio_analysis(
+    user_id: str = "1",
+    portfolio_id: str | None = None,
+) -> str:
     prefs = get_current_preferences()
     if not prefs.get("personalized_context", True):
         return """

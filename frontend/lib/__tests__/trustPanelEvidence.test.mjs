@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 function parseLatestEvidence(evidenceList = []) {
   const fraudItem = evidenceList.find((e) => e.tool === "get_fraud_analysis");
   const auditItem = evidenceList.find((e) => e.tool === "get_blockchain_audit");
+  const portfolioItem = evidenceList.find((e) => e.tool === "get_portfolio_analysis");
 
   const isFraudFallback = fraudItem?.result
     ? /FALLBACK MOCK DATA|Local mock baseline|FALLBACK NOTICE|NOT a live lookup result/i.test(fraudItem.result)
@@ -28,6 +29,13 @@ function parseLatestEvidence(evidenceList = []) {
       (/LIVE SERVICE VERIFICATION|Live Component 3|CONFIGURED BLOCKCHAIN|SIMULATED LEDGER/i.test(auditItem.result))
     );
 
+  const isPortfolioFallback = portfolioItem?.result
+    ? /FALLBACK|Local mock baseline|NO LIVE PORTFOLIO/i.test(portfolioItem.result)
+    : false;
+  const isPortfolioLive =
+    !isPortfolioFallback &&
+    Boolean(portfolioItem?.result && (/LIVE PLATFORM RECORD/i.test(portfolioItem.result)));
+
   let provenanceType = "baseline";
   if (fraudItem && auditItem) {
     provenanceType = isFraudLive && isAuditLive ? "live" : "fallback";
@@ -35,6 +43,8 @@ function parseLatestEvidence(evidenceList = []) {
     provenanceType = isFraudLive ? "live" : "fallback";
   } else if (auditItem) {
     provenanceType = isAuditLive ? "live" : "fallback";
+  } else if (portfolioItem) {
+    provenanceType = isPortfolioLive ? "live" : "fallback";
   } else {
     provenanceType = "baseline";
   }
@@ -43,12 +53,16 @@ function parseLatestEvidence(evidenceList = []) {
     provenanceType === "live"
       ? "Active Session: Live Service Evidence"
       : provenanceType === "fallback"
-      ? "Active Session: Fallback Mock Data"
+      ? portfolioItem && !fraudItem && !auditItem
+        ? "Active Session: Tool Evidence — Synthetic Demo Data"
+        : "Active Session: Fallback Mock Data"
       : "Mock Baseline (No Active Session Evidence)";
 
   const parsed = {
     hasFraudEvidence: Boolean(fraudItem?.result && !fraudItem.result.includes("No transaction was found")),
     hasAuditEvidence: Boolean(auditItem?.result && !auditItem.result.includes("No audit record found")),
+    hasPortfolioEvidence: Boolean(portfolioItem?.result && portfolioItem.result.trim().length > 0),
+    isPortfolioFallback,
     hasShap: false,
     provenanceType,
     provenanceLabel,
@@ -96,6 +110,38 @@ function parseLatestEvidence(evidenceList = []) {
 
     const statusMatch = text.match(/Record Status:\s*([A-Za-z0-9_-]+)/i);
     if (statusMatch) parsed.recordStatus = statusMatch[1];
+  }
+
+  if (portfolioItem?.result) {
+    const text = portfolioItem.result;
+    const pIdMatch =
+      text.match(/(?:Portfolio ID|User ID|USER \/ PORTFOLIO IDENTIFIER):\s*([A-Za-z0-9_-]+)/i) ||
+      text.match(/user ID ['"]?([A-Za-z0-9_-]+)['"]?/i);
+    if (pIdMatch) parsed.portfolioId = pIdMatch[1];
+
+    const valMatch = text.match(/(?:Total Portfolio Value|Illustrative Baseline Valuation):\s*([A-Za-z]+)?\s*([0-9,]+(?:\.[0-9]+)?)/i);
+    if (valMatch) {
+      parsed.portfolioCurrency = valMatch[1] || (isPortfolioLive ? "USD" : "LKR");
+      parsed.portfolioTotalValue = valMatch[2];
+    }
+
+    const retMatch = text.match(/(?:Illustrative\s+)?Expected Annual Return:\s*([0-9.]+)%/i);
+    if (retMatch) parsed.portfolioExpectedReturn = parseFloat(retMatch[1]);
+
+    const riskMatch = text.match(/(?:Illustrative\s+)?Risk Score:\s*([0-9]+)/i);
+    if (riskMatch) parsed.portfolioRiskScore = parseInt(riskMatch[1], 10);
+
+    const levelMatch = text.match(/(?:Illustrative\s+)?Risk Level:\s*([A-Za-z]+)/i);
+    if (levelMatch) parsed.portfolioRiskLevel = levelMatch[1];
+
+    const divMatch = text.match(/(?:Illustrative\s+)?Diversification Score:\s*([0-9]+)/i);
+    if (divMatch) parsed.portfolioDiversificationScore = parseInt(divMatch[1], 10);
+
+    const liqMatch = text.match(/(?:Illustrative\s+)?Liquidity:\s*([A-Za-z]+)/i);
+    if (liqMatch) parsed.portfolioLiquidity = liqMatch[1];
+
+    const countMatch = text.match(/Holding Count:\s*([0-9]+)/i);
+    parsed.portfolioHoldingCount = countMatch ? parseInt(countMatch[1], 10) : 0;
   }
 
   return parsed;
@@ -333,3 +379,149 @@ test("7. Mixed fallback fraud and live audit evidence does NOT label session as 
   assert.equal(parsed.provenanceType, "fallback", "Mixed evidence with fallback fraud must not be labeled live");
   assert.equal(parsed.provenanceLabel, "Active Session: Fallback Mock Data");
 });
+
+test("8. Portfolio fallback evidence: mode is fallback, provenance is tool evidence synthetic demo data, no fabrication", () => {
+  const fallbackPortfolioEvidence = [
+    {
+      tool: "get_portfolio_analysis",
+      result: `
+PORTFOLIO ANALYSIS — FALLBACK DATA (NO LIVE RECORD RETRIEVED)
+STATUS: NO LIVE PORTFOLIO RECORD RETRIEVED for user ID 'USER001'.
+FALLBACK NOTICE: No live portfolio was retrieved for user 'USER001' from the platform service.
+USER / PORTFOLIO IDENTIFIER: USER001
+LIVE HOLDING STATUS: Live holdings: 0 verified assets on platform.
+ILLUSTRATIVE MOCK BASELINE ESTIMATES (NOT ACTUAL USER PORTFOLIO):
+- Illustrative Baseline Valuation: LKR 1,000,000 (Mock Baseline Demonstration Only)
+- Expected Annual Return: 11.8% (Synthetic Estimate)
+- Risk Score: 38/100 (Moderate Risk Baseline)
+- Diversification Score: 74/100 (Moderate Diversification Baseline)
+- Liquidity: High (Synthetic Estimate)
+      `,
+    },
+  ];
+
+  const parsed = parseLatestEvidence(fallbackPortfolioEvidence);
+  assert.equal(parsed.hasPortfolioEvidence, true);
+  assert.equal(parsed.hasFraudEvidence, false);
+  assert.equal(parsed.hasAuditEvidence, false);
+  assert.equal(parsed.isPortfolioFallback, true);
+  assert.equal(parsed.provenanceType, "fallback");
+  assert.equal(parsed.provenanceLabel, "Active Session: Tool Evidence — Synthetic Demo Data");
+  assert.equal(parsed.portfolioId, "USER001");
+  assert.equal(parsed.portfolioTotalValue, "1,000,000");
+  assert.equal(parsed.portfolioCurrency, "LKR");
+  assert.equal(parsed.portfolioRiskScore, 38);
+  assert.equal(parsed.portfolioExpectedReturn, 11.8);
+  assert.equal(parsed.portfolioDiversificationScore, 74);
+  assert.equal(parsed.portfolioLiquidity, "High");
+});
+
+test("9. Live portfolio evidence: mode is live, live service evidence label preserved", () => {
+  const livePortfolioEvidence = [
+    {
+      tool: "get_portfolio_analysis",
+      result: `
+PORTFOLIO ANALYSIS — LIVE PLATFORM RECORD
+Data Source: Live platform portfolio service at http://localhost:8100/portfolios/USER001.
+Portfolio ID: USER001
+Total Portfolio Value: USD 45,250.00
+Holding Count: 5
+      `,
+    },
+  ];
+
+  const parsed = parseLatestEvidence(livePortfolioEvidence);
+  assert.equal(parsed.hasPortfolioEvidence, true);
+  assert.equal(parsed.isPortfolioFallback, false);
+  assert.equal(parsed.provenanceType, "live");
+  assert.equal(parsed.provenanceLabel, "Active Session: Live Service Evidence");
+  assert.equal(parsed.portfolioId, "USER001");
+  assert.equal(parsed.portfolioTotalValue, "45,250.00");
+  assert.equal(parsed.portfolioCurrency, "USD");
+  assert.equal(parsed.portfolioHoldingCount, 5);
+});
+
+test("10. Sequential conversation regression: Portfolio query followed by TX1001 fraud query", () => {
+  // Turn 1: Portfolio query returns fallback portfolio evidence
+  const turn1PortfolioEvidence = [
+    {
+      tool: "get_portfolio_analysis",
+      result: `
+PORTFOLIO ANALYSIS — FALLBACK DATA (NO LIVE RECORD RETRIEVED)
+STATUS: NO LIVE PORTFOLIO RECORD RETRIEVED for user ID 'USER001'.
+Platform service note: HTTP 404: Portfolio not found.
+FALLBACK NOTICE: No live portfolio was retrieved for user 'USER001' from the platform service.
+USER / PORTFOLIO IDENTIFIER: USER001
+LIVE HOLDING STATUS: Live holdings: 0 verified assets on platform.
+ILLUSTRATIVE MOCK BASELINE ESTIMATES (NOT ACTUAL USER PORTFOLIO):
+- Illustrative Baseline Valuation: LKR 1,000,000 (Mock Baseline Demonstration Only)
+- Expected Annual Return: 11.8% (Synthetic Estimate)
+- Risk Score: 38/100 (Moderate Risk Baseline)
+- Diversification Score: 74/100 (Moderate Diversification Baseline)
+- Liquidity: High (Synthetic Estimate)
+      `,
+    },
+  ];
+
+  const parsed1 = parseLatestEvidence(turn1PortfolioEvidence);
+  assert.equal(parsed1.hasPortfolioEvidence, true);
+  assert.equal(parsed1.hasFraudEvidence, false);
+  assert.equal(parsed1.isPortfolioFallback, true);
+  assert.equal(parsed1.provenanceType, "fallback");
+  assert.equal(parsed1.provenanceLabel, "Active Session: Tool Evidence — Synthetic Demo Data");
+  assert.equal(parsed1.portfolioTotalValue, "1,000,000");
+
+  // Turn 2: User asks "Why was TX1001 blocked?", returning get_fraud_analysis evidence for TX1001
+  const turn2FraudEvidence = [
+    {
+      tool: "get_fraud_analysis",
+      result: `
+FRAUD ANALYSIS — FALLBACK MOCK DATA
+Data Source: Local mock baseline (mock_financial_data.json).
+Live service status (http://localhost:8001): Component 2 service at http://localhost:8001 timed out.
+FALLBACK NOTICE: This is FALLBACK MOCK DATA because the live Component 2 service did not provide a record for TX1001.
+Transaction ID: TX1001
+Transaction Amount: LKR 250,000.00
+Recorded Fraud Score: 0.92
+Recorded Risk Level: HIGH
+Recorded Status: BLOCKED
+RECORDED CONTRIBUTING FACTORS:
+- New device
+- Unusual location
+- High transfer amount
+LOCAL SHAP PROTOTYPE — NOT THE TEAM MODEL
+Prototype fraud probability: 1.0000
+SHAP CONTRIBUTIONS:
+- amount_thousands: SHAP value = 0.193289; increases fraud risk
+      `,
+    },
+  ];
+
+  const parsed2 = parseLatestEvidence(turn2FraudEvidence);
+  // Second response must display fraud evidence only, with correct mock provenance disclosure
+  assert.equal(parsed2.hasFraudEvidence, true);
+  assert.equal(parsed2.hasPortfolioEvidence, false, "Must not retain portfolio evidence in fraud turn");
+  assert.equal(parsed2.hasAuditEvidence, false);
+  assert.equal(parsed2.provenanceType, "fallback");
+  assert.equal(parsed2.provenanceLabel, "Active Session: Fallback Mock Data");
+  assert.equal(parsed2.transactionId, "TX1001");
+  assert.equal(parsed2.amount, 250000);
+  assert.equal(parsed2.currency, "LKR");
+  assert.equal(parsed2.fraudScore, 0.92);
+  assert.equal(parsed2.status, "BLOCKED");
+  assert.equal(parsed2.riskLevel, "HIGH");
+
+  // No portfolio balance, allocation, or portfolio fallback fields may survive into second turn
+  assert.equal(parsed2.portfolioId, undefined, "Portfolio ID must be undefined in fraud turn");
+  assert.equal(parsed2.portfolioTotalValue, undefined, "Portfolio valuation must be undefined in fraud turn");
+  assert.equal(parsed2.portfolioExpectedReturn, undefined, "Portfolio return must be undefined in fraud turn");
+  assert.equal(parsed2.portfolioRiskScore, undefined, "Portfolio risk score must be undefined in fraud turn");
+  assert.equal(parsed2.portfolioDiversificationScore, undefined, "Diversification score must be undefined in fraud turn");
+  assert.equal(parsed2.portfolioLiquidity, undefined, "Liquidity must be undefined in fraud turn");
+
+  // Verify UI decision mode
+  const isPortfolio2 = Boolean(parsed2.hasPortfolioEvidence && !parsed2.hasFraudEvidence && !parsed2.hasAuditEvidence);
+  assert.equal(isPortfolio2, false, "UI must not be in portfolio mode during fraud turn");
+});
+
+

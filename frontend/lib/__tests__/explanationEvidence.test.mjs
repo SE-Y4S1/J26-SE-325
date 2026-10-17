@@ -294,7 +294,7 @@ function parsePortfolioResult(text) {
 
   const explanationText = isLive
     ? `Live portfolio record retrieved from the platform portfolio store. Total recorded market value: ${currency} ${totalValue} across ${holdingCount} verified holdings. Optimization metrics require Component 1 analytical modeling.`
-    : `Notice: No live portfolio was retrieved for user ${portfolioId} from the platform service (${fallbackReason || "portfolio not found"}). The user has 0 verified live holdings on record. The displayed valuation (${currency} ${totalValue}) and synthetic metrics (${expectedAnnualReturn}% expected return, ${riskScore}/100 risk score, ${diversificationScore}/100 diversification, ${liquidity} liquidity) are illustrative mock baseline examples for demonstration only and do not reflect actual user holdings or a verified account balance.`;
+    : `Notice: No live portfolio was retrieved for user ${portfolioId} from the platform service (${fallbackReason || "portfolio not found"}). The user has 0 verified live holdings on record. What the platform verified: no live portfolio record was found on the platform service. What the demonstration illustrates: sample return (${expectedAnnualReturn}%), risk score (${riskScore}/100, ${riskLevel ?? "Moderate"}), diversification (${diversificationScore}/100), liquidity (${liquidity}), mock valuation (${currency} ${totalValue}), and sector allocations as illustrative mock baseline examples for demonstration only. What remains unknown: the user's actual portfolio risk profile and real account balance remain unknown and unassessed, and do not reflect actual user holdings or a verified account balance.`;
 
   return {
     hasEvidence: true,
@@ -834,6 +834,9 @@ MOCK ALLOCATION BREAKDOWN (DEMONSTRATION SAMPLE):
   const summary = getExplanationSummary(session);
   assert.ok(summary.startsWith("Notice: No live portfolio was retrieved for user USER001"));
   assert.ok(summary.includes("0 verified live holdings on record"));
+  assert.ok(summary.includes("What the platform verified: no live portfolio record was found"));
+  assert.ok(summary.includes("What the demonstration illustrates: sample return"));
+  assert.ok(summary.includes("What remains unknown: the user's actual portfolio risk profile"));
   assert.ok(summary.includes("illustrative mock baseline examples for demonstration only"));
   assert.ok(summary.includes("do not reflect actual user holdings or a verified account balance"));
 });
@@ -878,6 +881,141 @@ Holdings:
   assert.ok(summary.includes("Live portfolio record retrieved from the platform portfolio store"));
   assert.ok(summary.includes("USD 45,250.00 across 5 verified holdings"));
 });
+
+test("11. Sequential conversation regression: Portfolio query followed by TX1001 fraud query", () => {
+  // Step A: Portfolio query returns fallback portfolio evidence
+  const turn1PortfolioEvidence = [
+    {
+      tool: "get_portfolio_analysis",
+      result: `
+PORTFOLIO ANALYSIS — FALLBACK DATA (NO LIVE RECORD RETRIEVED)
+STATUS: NO LIVE PORTFOLIO RECORD RETRIEVED for user ID 'USER001'.
+Platform service note: HTTP 404: Portfolio not found.
+FALLBACK NOTICE: No live portfolio was retrieved for user 'USER001' from the platform service.
+USER / PORTFOLIO IDENTIFIER: USER001
+LIVE HOLDING STATUS: Live holdings: 0 verified assets on platform.
+ILLUSTRATIVE MOCK BASELINE ESTIMATES (NOT ACTUAL USER PORTFOLIO):
+- Illustrative Baseline Valuation: LKR 1,000,000 (Mock Baseline Demonstration Only)
+- Expected Annual Return: 11.8% (Synthetic Estimate)
+- Risk Score: 38/100 (Moderate Risk Baseline)
+- Diversification Score: 74/100 (Moderate Diversification Baseline)
+- Liquidity: High (Synthetic Estimate)
+MOCK ALLOCATION BREAKDOWN (DEMONSTRATION SAMPLE):
+- Technology: 35.0%
+- Banking: 25.0%
+- Healthcare: 15.0%
+- Government Bonds: 15.0%
+- Cash: 10.0%
+      `,
+    },
+  ];
+
+  const session1 = parseSessionEvidence(turn1PortfolioEvidence);
+  assert.equal(session1.mode, "portfolio");
+  assert.ok(session1.portfolio);
+  assert.equal(session1.portfolio.isFallback, true);
+  assert.equal(session1.portfolio.totalValue, "1,000,000");
+  const summary1 = getExplanationSummary(session1);
+  assert.ok(summary1.includes("Notice: No live portfolio was retrieved"));
+  assert.ok(summary1.includes("1,000,000"));
+
+  // Step B: User immediately asks "Why was TX1001 blocked?", returning get_fraud_analysis evidence for TX1001
+  const turn2FraudEvidence = [
+    {
+      tool: "get_fraud_analysis",
+      result: `
+FRAUD ANALYSIS — FALLBACK MOCK DATA
+
+Data Source:
+Local mock baseline (mock_financial_data.json).
+Live service status (http://localhost:8001): Component 2 service at http://localhost:8001 timed out.
+
+FALLBACK NOTICE:
+This is FALLBACK MOCK DATA because the live Component 2 service did not provide a record for TX1001.
+Reason: Component 2 service at http://localhost:8001 timed out.
+This record is NOT a live lookup result from Component 2.
+
+Transaction ID:
+TX1001
+
+Transaction Amount:
+LKR 250,000.00
+
+Recorded Fraud Score:
+0.92
+
+Recorded Risk Level:
+HIGH
+
+Recorded Status:
+BLOCKED
+
+RECORDED CONTRIBUTING FACTORS:
+- New device
+- Unusual location
+- High transfer amount
+
+LOCAL SHAP PROTOTYPE — NOT THE TEAM MODEL
+
+Prototype prediction:
+1
+
+Prototype fraud probability:
+1.0000
+
+Prototype input features:
+- New device: 1
+- Unusual location: 1
+- Amount (LKR): 250,000.00
+
+SHAP CONTRIBUTIONS:
+- amount_thousands: SHAP value = 0.193289; increases fraud risk
+- unusual_location: SHAP value = 0.153450; increases fraud risk
+- new_device: SHAP value = 0.130761; increases fraud risk
+
+LIMITATION:
+The SHAP values explain a locally trained synthetic Random Forest prototype,
+not the production model or Component 2 engine.
+Device and location inputs were inferred from mock reason labels.
+These results are prototype evidence, not verified production output.
+Probability calibration not established.
+      `,
+    },
+  ];
+
+  // Step C: Second response must display fraud evidence only, with correct mock provenance disclosure
+  const session2 = parseSessionEvidence(turn2FraudEvidence);
+  assert.equal(session2.mode, "fraud");
+  assert.ok(session2.fraud);
+  assert.equal(session2.portfolio, undefined, "Portfolio evidence must be undefined in fraud turn");
+  assert.equal(session2.fraud.provenanceType, "fallback");
+  assert.equal(session2.fraud.provenanceLabel, "Fallback Mock Data (Component 4 Local Prototype)");
+  assert.equal(session2.fraud.transactionId, "TX1001");
+  assert.equal(session2.fraud.fraudScore, 0.92);
+  assert.equal(session2.fraud.status, "BLOCKED");
+  assert.equal(session2.fraud.riskLevel, "HIGH");
+  assert.deepEqual(session2.fraud.factors, [
+    "New device",
+    "Unusual location",
+    "High transfer amount",
+  ]);
+
+  const summary2 = getExplanationSummary(session2);
+  assert.ok(summary2.includes("mock transaction record lists a recorded fraud score of 0.92"));
+  assert.ok(summary2.includes("HIGH risk level"));
+  assert.ok(summary2.includes("BLOCKED status"));
+  assert.ok(summary2.includes("New device, Unusual location, High transfer amount"));
+  assert.ok(summary2.includes("distinct from the recorded score 0.92"));
+  assert.ok(summary2.includes("Component 2's live gateway audit service was not reached"));
+
+  // Step D: No portfolio balance, allocation, or portfolio fallback notice may appear in second response
+  assert.equal(summary2.includes("portfolio"), false, "No portfolio text may appear in fraud turn");
+  assert.equal(summary2.includes("1,000,000"), false, "No portfolio valuation may appear in fraud turn");
+  assert.equal(summary2.includes("allocation"), false, "No portfolio allocation may appear in fraud turn");
+  assert.equal(summary2.includes("Notice: No live portfolio"), false, "No portfolio notice may appear in fraud turn");
+  assert.equal(summary2.includes("USER001"), false, "No portfolio account identifier may appear in fraud turn");
+});
+
 
 
 

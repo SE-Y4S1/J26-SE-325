@@ -24,6 +24,17 @@ interface ParsedEvidenceData {
   auditIsMockLedger?: boolean;
   hasFraudEvidence: boolean;
   hasAuditEvidence: boolean;
+  hasPortfolioEvidence?: boolean;
+  portfolioId?: string;
+  isPortfolioFallback?: boolean;
+  portfolioTotalValue?: string;
+  portfolioCurrency?: string;
+  portfolioRiskScore?: number;
+  portfolioRiskLevel?: string;
+  portfolioDiversificationScore?: number;
+  portfolioLiquidity?: string;
+  portfolioExpectedReturn?: number;
+  portfolioHoldingCount?: number;
   hasShap: boolean;
   provenanceType: "live" | "fallback" | "baseline";
   provenanceLabel: string;
@@ -32,6 +43,7 @@ interface ParsedEvidenceData {
 function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string }> = []): ParsedEvidenceData {
   const fraudItem = evidenceList.find((e) => e.tool === "get_fraud_analysis");
   const auditItem = evidenceList.find((e) => e.tool === "get_blockchain_audit");
+  const portfolioItem = evidenceList.find((e) => e.tool === "get_portfolio_analysis");
 
   const isFraudFallback = fraudItem?.result
     ? /FALLBACK MOCK DATA|Local mock baseline|FALLBACK NOTICE|NOT a live lookup result/i.test(fraudItem.result)
@@ -41,7 +53,7 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
     Boolean(
       fraudItem?.result &&
       (/LIVE COMPONENT 2 AUDIT RECORD/i.test(fraudItem.result) ||
-       /Live Component 2 Gateway Audit Log/i.test(fraudItem.result))
+        /Live Component 2 Gateway Audit Log/i.test(fraudItem.result))
     );
 
   const isAuditFallback = auditItem?.result
@@ -54,13 +66,28 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
       (/LIVE SERVICE VERIFICATION|Live Component 3|CONFIGURED BLOCKCHAIN|SIMULATED LEDGER/i.test(auditItem.result))
     );
 
+  const isPortfolioFallback = portfolioItem?.result
+    ? /FALLBACK|Local mock baseline|NO LIVE PORTFOLIO/i.test(portfolioItem.result)
+    : false;
+  const isPortfolioLive =
+    !isPortfolioFallback &&
+    Boolean(portfolioItem?.result && (/LIVE PLATFORM RECORD/i.test(portfolioItem.result)));
+
   let provenanceType: "live" | "fallback" | "baseline" = "baseline";
-  if (fraudItem && auditItem) {
+  if (fraudItem && auditItem && portfolioItem) {
+    provenanceType = isFraudLive && isAuditLive && isPortfolioLive ? "live" : "fallback";
+  } else if (fraudItem && auditItem) {
     provenanceType = isFraudLive && isAuditLive ? "live" : "fallback";
+  } else if (fraudItem && portfolioItem) {
+    provenanceType = isFraudLive && isPortfolioLive ? "live" : "fallback";
+  } else if (auditItem && portfolioItem) {
+    provenanceType = isAuditLive && isPortfolioLive ? "live" : "fallback";
   } else if (fraudItem) {
     provenanceType = isFraudLive ? "live" : "fallback";
   } else if (auditItem) {
     provenanceType = isAuditLive ? "live" : "fallback";
+  } else if (portfolioItem) {
+    provenanceType = isPortfolioLive ? "live" : "fallback";
   } else {
     provenanceType = "baseline";
   }
@@ -69,12 +96,16 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
     provenanceType === "live"
       ? "Active Session: Live Service Evidence"
       : provenanceType === "fallback"
-      ? "Active Session: Fallback Mock Data"
-      : "Mock Baseline (No Active Session Evidence)";
+        ? portfolioItem && !fraudItem && !auditItem
+          ? "Active Session: Tool Evidence — Synthetic Demo Data"
+          : "Active Session: Fallback Mock Data"
+        : "Mock Baseline (No Active Session Evidence)";
 
   const parsed: ParsedEvidenceData = {
     hasFraudEvidence: !!(fraudItem?.result && !fraudItem.result.includes("No transaction was found")),
     hasAuditEvidence: !!(auditItem?.result && !auditItem.result.includes("No audit record found")),
+    hasPortfolioEvidence: !!(portfolioItem?.result && portfolioItem.result.trim().length > 0),
+    isPortfolioFallback,
     hasShap: false,
     provenanceType,
     provenanceLabel,
@@ -138,6 +169,38 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
     parsed.auditIsMockLedger = /Simulated Ledger|mock/i.test(text);
   }
 
+  if (portfolioItem?.result) {
+    const text = portfolioItem.result;
+    const pIdMatch =
+      text.match(/(?:Portfolio ID|User ID|USER \/ PORTFOLIO IDENTIFIER):\s*([A-Za-z0-9_-]+)/i) ||
+      text.match(/user ID ['"]?([A-Za-z0-9_-]+)['"]?/i);
+    if (pIdMatch) parsed.portfolioId = pIdMatch[1];
+
+    const valMatch = text.match(/(?:Total Portfolio Value|Illustrative Baseline Valuation):\s*([A-Za-z]+)?\s*([0-9,]+(?:\.[0-9]+)?)/i);
+    if (valMatch) {
+      parsed.portfolioCurrency = valMatch[1] || (isPortfolioLive ? "USD" : "LKR");
+      parsed.portfolioTotalValue = valMatch[2];
+    }
+
+    const retMatch = text.match(/(?:Illustrative\s+)?Expected Annual Return:\s*([0-9.]+)%/i);
+    if (retMatch) parsed.portfolioExpectedReturn = parseFloat(retMatch[1]);
+
+    const riskMatch = text.match(/(?:Illustrative\s+)?Risk Score:\s*([0-9]+)/i);
+    if (riskMatch) parsed.portfolioRiskScore = parseInt(riskMatch[1], 10);
+
+    const levelMatch = text.match(/(?:Illustrative\s+)?Risk Level:\s*([A-Za-z]+)/i);
+    if (levelMatch) parsed.portfolioRiskLevel = levelMatch[1];
+
+    const divMatch = text.match(/(?:Illustrative\s+)?Diversification Score:\s*([0-9]+)/i);
+    if (divMatch) parsed.portfolioDiversificationScore = parseInt(divMatch[1], 10);
+
+    const liqMatch = text.match(/(?:Illustrative\s+)?Liquidity:\s*([A-Za-z]+)/i);
+    if (liqMatch) parsed.portfolioLiquidity = liqMatch[1];
+
+    const countMatch = text.match(/Holding Count:\s*([0-9]+)/i);
+    parsed.portfolioHoldingCount = countMatch ? parseInt(countMatch[1], 10) : 0;
+  }
+
   return parsed;
 }
 
@@ -148,12 +211,15 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
 
   const parsed = parseLatestEvidence(latestEvidence);
   // Session policy: Active session evidence is valid only when tools returned results in this response.
-  const hasLiveEvidence = latestEvidence.length > 0 && (parsed.hasFraudEvidence || parsed.hasAuditEvidence);
+  const hasLiveEvidence = latestEvidence.length > 0 && (parsed.hasFraudEvidence || parsed.hasAuditEvidence || Boolean(parsed.hasPortfolioEvidence));
+  const isPortfolio = Boolean(parsed.hasPortfolioEvidence && !parsed.hasFraudEvidence && !parsed.hasAuditEvidence);
 
   const displayTxId = parsed.transactionId ?? (hasLiveEvidence ? "TX1001" : tx.id);
   const displayAmount = parsed.amount ?? (hasLiveEvidence ? undefined : tx.amount);
   const displayCurrency = parsed.currency ?? (hasLiveEvidence ? "LKR" : tx.currency);
-  const displayStatus = parsed.status ?? (hasLiveEvidence ? (parsed.recordStatus ?? "RECORDED") : tx.status);
+  const displayStatus = isPortfolio
+    ? (parsed.isPortfolioFallback ? "DEMO BASELINE" : "LIVE PORTFOLIO")
+    : (parsed.status ?? (hasLiveEvidence ? (parsed.recordStatus ?? "RECORDED") : tx.status));
 
   return (
     <div className="flex flex-col gap-6">
@@ -180,11 +246,12 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
             </h3>
             {hasLiveEvidence ? (
               <span
-                className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
-                  parsed.provenanceType === "live"
+                className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${parsed.provenanceType === "live"
                     ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
-                    : "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300"
-                }`}
+                    : isPortfolio && parsed.isPortfolioFallback
+                      ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                      : "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300"
+                  }`}
               >
                 {parsed.provenanceLabel}
               </span>
@@ -194,7 +261,14 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
               </span>
             )}
           </div>
-          <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700 dark:bg-red-950 dark:text-red-300">
+          <span
+            className={`rounded-full px-3 py-1 text-xs font-bold ${isPortfolio
+                ? parsed.isPortfolioFallback
+                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                  : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                : "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+              }`}
+          >
             {displayStatus}
           </span>
         </div>
@@ -202,22 +276,40 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
         <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-800/60">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-xs font-semibold text-neutral-500">Target Transaction</p>
+              <p className="text-xs font-semibold text-neutral-500">
+                {isPortfolio ? "Target Account / Portfolio" : "Target Transaction"}
+              </p>
               <p className="text-lg font-bold text-neutral-900 dark:text-white">
-                Transaction {displayTxId}
-                {displayAmount != null && ` — ${displayCurrency} ${displayAmount.toLocaleString()}`}
+                {isPortfolio
+                  ? `Portfolio ${parsed.portfolioId || "USER001"}${parsed.portfolioTotalValue ? ` — ${parsed.portfolioCurrency || "LKR"} ${parsed.portfolioTotalValue} (Illustrative)` : ""}`
+                  : `Transaction ${displayTxId}${displayAmount != null ? ` — ${displayCurrency} ${displayAmount.toLocaleString()}` : ""}`}
               </p>
             </div>
             <div className="text-right">
-              <span className="text-xs text-neutral-500">Decision</span>
-              <p className="text-base font-bold text-red-600 dark:text-red-400">{displayStatus}</p>
+              <span className="text-xs text-neutral-500">Status</span>
+              <p
+                className={`text-base font-bold ${isPortfolio
+                    ? parsed.isPortfolioFallback
+                      ? "text-amber-600 dark:text-amber-400"
+                      : "text-emerald-600 dark:text-emerald-400"
+                    : "text-red-600 dark:text-red-400"
+                  }`}
+              >
+                {displayStatus}
+              </p>
             </div>
           </div>
 
           <p className="mt-3 text-sm text-neutral-700 dark:text-neutral-300">
             <span className="font-semibold text-neutral-900 dark:text-white">Explanation:</span>{" "}
             {hasLiveEvidence ? (
-              parsed.hasFraudEvidence ? (
+              isPortfolio ? (
+                parsed.isPortfolioFallback ? (
+                  <>Notice: No live portfolio record was retrieved for user <span className="font-semibold text-neutral-900 dark:text-white">{parsed.portfolioId || "USER001"}</span> from the platform service (0 verified holdings). The displayed metrics and valuation are synthetic baseline demonstrations shown for system demonstration purposes and do not represent verified holdings, actual account balances, or personalized investment advice.</>
+                ) : (
+                  <>Live portfolio record retrieved from the platform portfolio store. Recorded market value: <span className="font-semibold text-neutral-900 dark:text-white">{parsed.portfolioCurrency || "USD"} {parsed.portfolioTotalValue}</span> across <span className="font-semibold text-neutral-900 dark:text-white">{parsed.portfolioHoldingCount}</span> verified holdings.</>
+                )
+              ) : parsed.hasFraudEvidence ? (
                 parsed.provenanceType === "live" ? (
                   <>Component 2 gateway audit trail reports status <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> with risk score <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore?.toFixed(4) ?? "N/A"}</span>. The recorded decision factor is {parsed.factors?.[0] || "recorded dual-stream signals"}. The production model&apos;s internal reasoning has not been independently established.</>
                 ) : (
@@ -236,108 +328,144 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
               Available Evidence Checklist
             </p>
             <div className="flex flex-col gap-1.5 text-xs text-neutral-800 dark:text-neutral-200">
-              {/* Row 1: Fraud score evidence */}
-              {hasLiveEvidence ? (
-                parsed.hasFraudEvidence ? (
+              {isPortfolio ? (
+                <>
                   <div className="flex items-center gap-2">
                     <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
                     <span>
-                      {parsed.provenanceType === "live"
-                        ? `Live gateway fraud score: ${parsed.fraudScore?.toFixed(4) ?? "N/A"} (verification and probability calibration not established)`
-                        : `Recorded mock fraud score: ${parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"} (distinct from prototype prob ${parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}; calibration not established)`}
+                      {parsed.isPortfolioFallback
+                        ? "Platform service query: No live portfolio record found on platform service (0 verified holdings on record)"
+                        : `Platform service query: Live portfolio retrieved (${parsed.portfolioCurrency || "USD"} ${parsed.portfolioTotalValue}, ${parsed.portfolioHoldingCount} verified holdings)`}
                     </span>
                   </div>
-                ) : (
-                  <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-                    <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <circle cx="12" cy="12" r="8" />
-                    </svg>
-                    <span>Recorded fraud score: Not evaluated in this response</span>
+                  <div className="flex items-center gap-2">
+                    <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                    <span>
+                      {parsed.isPortfolioFallback
+                        ? `Illustrative demo metrics: Sample return (${parsed.portfolioExpectedReturn ?? 11.8}%), risk score (${parsed.portfolioRiskScore ?? 38}/100), and allocation (calibration not established; not actual user assets)`
+                        : "Live asset allocation and holdings distribution verified"}
+                    </span>
                   </div>
-                )
+                  {parsed.isPortfolioFallback ? (
+                    <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                      <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="12" cy="12" r="8" />
+                      </svg>
+                      <span>Actual portfolio risk and verified account balance: Unassessed (0 verified live holdings on platform)</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                      <span>Verified portfolio balance on platform record</span>
+                    </div>
+                  )}
+                </>
               ) : (
-                <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-                  <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <circle cx="12" cy="12" r="8" />
-                  </svg>
-                  <span>Mock baseline fraud score: {tx.fraudScore} (verification and probability calibration not established)</span>
-                </div>
-              )}
+                <>
+                  {/* Row 1: Fraud score evidence */}
+                  {hasLiveEvidence ? (
+                    parsed.hasFraudEvidence ? (
+                      <div className="flex items-center gap-2">
+                        <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                        <span>
+                          {parsed.provenanceType === "live"
+                            ? `Live gateway fraud score: ${parsed.fraudScore?.toFixed(4) ?? "N/A"} (verification and probability calibration not established)`
+                            : `Recorded mock fraud score: ${parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"} (distinct from prototype prob ${parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}; calibration not established)`}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                        <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <circle cx="12" cy="12" r="8" />
+                        </svg>
+                        <span>Recorded fraud score: Not evaluated in this response</span>
+                      </div>
+                    )
+                  ) : (
+                    <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                      <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="12" cy="12" r="8" />
+                      </svg>
+                      <span>Mock baseline fraud score: {tx.fraudScore} (verification and probability calibration not established)</span>
+                    </div>
+                  )}
 
-              {/* Row 2: Blockchain audit evidence */}
-              {hasLiveEvidence ? (
-                parsed.hasAuditEvidence ? (
-                  <div className="flex items-center gap-2">
-                    <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
-                    <span>
-                      Blockchain audit record returned (Audit ID:{" "}
-                      <code className="rounded bg-neutral-200 px-1 py-0.5 font-mono text-[11px] dark:bg-neutral-700">
-                        {parsed.auditId || "RECORDED"}
-                      </code>
-                      {parsed.blockNumber != null && `, Block: #${parsed.blockNumber}`}
-                      {parsed.recordStatus && `, Status: ${parsed.recordStatus}`}
-                      {parsed.auditIsMockLedger && " — simulated ledger"}
-                      )
-                    </span>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-                    <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <circle cx="12" cy="12" r="8" />
-                    </svg>
-                    <span>
-                      Blockchain audit record: Not requested or provided in this response (audit status unverified)
-                    </span>
-                  </div>
-                )
-              ) : (
-                <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-                  <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <circle cx="12" cy="12" r="8" />
-                  </svg>
-                  <span>
-                    Mock baseline audit record (Audit ID:{" "}
-                    <code className="rounded bg-neutral-200 px-1 py-0.5 font-mono text-[11px] dark:bg-neutral-700">
-                      {tx.blockchainAudit.auditId}
-                    </code>
-                    , Block: #{tx.blockchainAudit.blockNumber}, Status: {tx.blockchainAudit.recordStatus} — unverified baseline)
-                  </span>
-                </div>
-              )}
+                  {/* Row 2: Blockchain audit evidence */}
+                  {hasLiveEvidence ? (
+                    parsed.hasAuditEvidence ? (
+                      <div className="flex items-center gap-2">
+                        <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                        <span>
+                          Blockchain audit record returned (Audit ID:{" "}
+                          <code className="rounded bg-neutral-200 px-1 py-0.5 font-mono text-[11px] dark:bg-neutral-700">
+                            {parsed.auditId || "RECORDED"}
+                          </code>
+                          {parsed.blockNumber != null && `, Block: #${parsed.blockNumber}`}
+                          {parsed.recordStatus && `, Status: ${parsed.recordStatus}`}
+                          {parsed.auditIsMockLedger && " — simulated ledger"}
+                          )
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                        <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <circle cx="12" cy="12" r="8" />
+                        </svg>
+                        <span>
+                          Blockchain audit record: Not requested or provided in this response (audit status unverified)
+                        </span>
+                      </div>
+                    )
+                  ) : (
+                    <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                      <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="12" cy="12" r="8" />
+                      </svg>
+                      <span>
+                        Mock baseline audit record (Audit ID:{" "}
+                        <code className="rounded bg-neutral-200 px-1 py-0.5 font-mono text-[11px] dark:bg-neutral-700">
+                          {tx.blockchainAudit.auditId}
+                        </code>
+                        , Block: #{tx.blockchainAudit.blockNumber}, Status: {tx.blockchainAudit.recordStatus} — unverified baseline)
+                      </span>
+                    </div>
+                  )}
 
-              {/* Row 3: Model attribution evidence */}
-              {hasLiveEvidence ? (
-                parsed.hasShap ? (
-                  <div className="flex items-center gap-2">
-                    <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
-                    <span>
-                      {parsed.provenanceType === "live"
-                        ? "SHAP explanation: Not computed for live Component 2 gateway decision (telemetry not retained)"
-                        : `SHAP explanation available (local synthetic Random Forest prototype, prob ${parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}; does not explain production model)`}
-                    </span>
-                  </div>
-                ) : parsed.provenanceType === "live" ? (
-                  <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-                    <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <circle cx="12" cy="12" r="8" />
-                    </svg>
-                    <span>SHAP explanation: Not computed for live Component 2 gateway decision (telemetry not retained)</span>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-                    <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <circle cx="12" cy="12" r="8" />
-                    </svg>
-                    <span>SHAP explanation: Not evaluated in this response</span>
-                  </div>
-                )
-              ) : (
-                <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-                  <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <circle cx="12" cy="12" r="8" />
-                  </svg>
-                  <span>Mock baseline SHAP explanation (3 primary features computed on local prototype)</span>
-                </div>
+                  {/* Row 3: Model attribution evidence */}
+                  {hasLiveEvidence ? (
+                    parsed.hasShap ? (
+                      <div className="flex items-center gap-2">
+                        <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                        <span>
+                          {parsed.provenanceType === "live"
+                            ? "SHAP explanation: Not computed for live Component 2 gateway decision (telemetry not retained)"
+                            : `SHAP explanation available (local synthetic Random Forest prototype, prob ${parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}; does not explain production model)`}
+                        </span>
+                      </div>
+                    ) : parsed.provenanceType === "live" ? (
+                      <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                        <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <circle cx="12" cy="12" r="8" />
+                        </svg>
+                        <span>SHAP explanation: Not computed for live Component 2 gateway decision (telemetry not retained)</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                        <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <circle cx="12" cy="12" r="8" />
+                        </svg>
+                        <span>SHAP explanation: Not evaluated in this response</span>
+                      </div>
+                    )
+                  ) : (
+                    <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                      <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="12" cy="12" r="8" />
+                      </svg>
+                      <span>Mock baseline SHAP explanation (3 primary features computed on local prototype)</span>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
