@@ -54,6 +54,19 @@ def test_neural_models_emit_one_score_per_row() -> None:
     assert np.isfinite(errors).all()
 
 
+def test_fusion_drops_a_stream_that_does_not_improve_validation_auroc() -> None:
+    """A weaker LSTM is given weight 0. The mixer is not forced to keep both streams."""
+    labels = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    strong = np.array([0.05, 0.1, 0.2, 0.3, 0.8, 0.85, 0.9, 0.95])
+    weak = np.array([0.45, 0.2, 0.55, 0.1, 0.4, 0.9, 0.3, 0.6])
+    fusion = ScoreFusion(seed=0)
+    fusion.fit(weak, strong, labels)
+    assert fusion.alpha == 0.0
+    assert fusion.flip_first is False
+    assert fusion.flip_second is False
+    assert np.allclose(fusion.score(weak, strong), strong)
+
+
 def test_fusion_scores_are_probabilities() -> None:
     fusion = ScoreFusion(seed=0)
     first = np.array([0.1, 0.2, 0.8, 0.9])

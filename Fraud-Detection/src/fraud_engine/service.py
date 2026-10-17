@@ -71,6 +71,7 @@ class FraudService:
         self.benchmark_model = False
         if bundle_path and bundle_path.is_file():
             self._load(bundle_path)
+        self._bind_drift_reference()
 
     def _load(self, path: Path) -> None:
         from fraud_engine.data.preprocess import TabularPreprocessor
@@ -85,6 +86,18 @@ class FraudService:
         self.thresholds = dict(bundle["thresholds"])
         self.model_version = str(bundle.get("model_version", "trained-bundle"))
         self.benchmark_model = bool(bundle.get("benchmark_valid"))
+
+    def _bind_drift_reference(self) -> None:
+        """Compare new scores with the legitimate step-up cut.
+
+        That cut is already chosen from legitimate validation scores. Leaving the
+        reference empty made concept_drift_step_up unreachable, including after a
+        trained bundle was loaded.
+        """
+        step_up = self.thresholds.get("step_up")
+        if step_up is None:
+            return
+        self.drift.set_reference(np.array([float(step_up)], dtype=float))
 
     def score(self, payload: dict[str, Any], now: float | None = None) -> dict[str, Any]:
         _reject_sensitive(payload)
@@ -200,6 +213,7 @@ class FraudService:
         with self.lock:
             previous = dict(self.thresholds)
             self.thresholds = updated
+            self._bind_drift_reference()
         return {"previous": previous, "current": updated}
 
     def dashboard_html(self) -> str:
