@@ -1,6 +1,21 @@
-const Database = require("better-sqlite3");
 const path = require("path");
 const fs = require("fs");
+
+let DatabaseEngine;
+let engineType = "";
+
+try {
+  DatabaseEngine = require("better-sqlite3");
+  engineType = "better-sqlite3";
+} catch {
+  try {
+    const nodeSqlite = require("node:sqlite");
+    DatabaseEngine = nodeSqlite.DatabaseSync;
+    engineType = "node:sqlite";
+  } catch (err) {
+    throw new Error("Neither better-sqlite3 nor node:sqlite is available in this Node runtime: " + err.message);
+  }
+}
 
 class DuplicateTransactionError extends Error {
   constructor(message) {
@@ -19,12 +34,19 @@ class AuditDatabase {
 
     const dbPath = customDbPath || process.env.DB_PATH || path.join(defaultDataDir, "audits.sqlite");
     this.dbPath = dbPath;
-    this.db = new Database(dbPath);
+    this.engineType = engineType;
+    this.db = new DatabaseEngine(dbPath);
 
-    // High performance and durability with WAL mode
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
-    this.db.pragma("foreign_keys = ON");
+    // Performance and integrity pragmas
+    if (typeof this.db.pragma === "function") {
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
+      this.db.pragma("foreign_keys = ON");
+    } else {
+      this.db.exec("PRAGMA journal_mode = WAL;");
+      this.db.exec("PRAGMA synchronous = NORMAL;");
+      this.db.exec("PRAGMA foreign_keys = ON;");
+    }
 
     this.initSchema();
     this.prepareStatements();
@@ -118,17 +140,6 @@ class AuditDatabase {
       `),
       deleteAll: this.db.prepare(`
         DELETE FROM audits
-      `),
-      tamperField: (field) => this.db.prepare(`
-        UPDATE audits SET
-          ${field} = ?,
-          isTampered = 1,
-          tamperedAt = ?,
-          tamperedField = ?,
-          previousValue = ?,
-          verificationStatus = 'TAMPER_SUSPECTED',
-          updatedAt = ?
-        WHERE transactionId = ?
       `)
     };
   }
@@ -145,11 +156,9 @@ class AuditDatabase {
     };
   }
 
-  saveRecord(record) {
-    const existing = this.stmts.getByTxId.get(record.transactionId);
+  toInsertPayload(record) {
     const now = new Date().toISOString();
-
-    const payload = {
+    return {
       transactionId: record.transactionId,
       auditId: record.auditId,
       salt: record.salt,
@@ -180,21 +189,65 @@ class AuditDatabase {
       createdAt: record.createdAt || now,
       updatedAt: now
     };
+  }
 
+  toUpdatePayload(record) {
+    const now = new Date().toISOString();
+    return {
+      transactionId: record.transactionId,
+      recordHash: record.recordHash || record.hash || "",
+      finalDecision: record.finalDecision || "",
+      reviewRequired: record.reviewRequired ? 1 : 0,
+      reviewerDecision: record.reviewerDecision || null,
+      reviewedAt: record.reviewedAt || null,
+      blockchainTxId: record.blockchainTxId || null,
+      blockNumber: record.blockNumber !== undefined ? record.blockNumber : null,
+      verificationStatus: record.verificationStatus || "RECORDED_ON_CHAIN",
+      isTampered: record.isTampered ? 1 : 0,
+      tamperedAt: record.tamperedAt || null,
+      tamperedField: record.tamperedField || null,
+      previousValue: record.previousValue !== undefined ? String(record.previousValue) : null,
+      lastVerifiedAt: record.lastVerifiedAt || null,
+      updatedAt: now
+    };
+  }
+
+  createRecord(record) {
+    const existing = this.stmts.getByTxId.get(record.transactionId);
     if (existing) {
-      this.stmts.update.run(payload);
-    } else {
-      try {
-        this.stmts.insert.run(payload);
-      } catch (err) {
-        if (err.message && err.message.includes("UNIQUE constraint failed")) {
-          throw new DuplicateTransactionError(`Transaction ID '${record.transactionId}' or Audit ID already exists`);
-        }
-        throw err;
+      throw new DuplicateTransactionError(`Transaction ID '${record.transactionId}' already exists`);
+    }
+
+    const payload = this.toInsertPayload(record);
+    try {
+      this.stmts.insert.run(payload);
+    } catch (err) {
+      if (err.message && err.message.includes("UNIQUE constraint failed")) {
+        throw new DuplicateTransactionError(`Transaction ID '${record.transactionId}' or Audit ID already exists`);
       }
+      throw err;
     }
 
     return this.getRecord(record.transactionId);
+  }
+
+  updateRecord(record) {
+    const existing = this.stmts.getByTxId.get(record.transactionId);
+    if (!existing) {
+      throw new Error(`Record ${record.transactionId} not found for update`);
+    }
+
+    const payload = this.toUpdatePayload(record);
+    this.stmts.update.run(payload);
+    return this.getRecord(record.transactionId);
+  }
+
+  saveRecord(record) {
+    const existing = this.stmts.getByTxId.get(record.transactionId);
+    if (existing) {
+      return this.updateRecord(record);
+    }
+    return this.createRecord(record);
   }
 
   getRecord(transactionId) {
@@ -230,7 +283,17 @@ class AuditDatabase {
 
     const now = new Date().toISOString();
     const previousVal = current[fieldToTamper];
-    const stmt = this.stmts.tamperField(fieldToTamper);
+    const stmt = this.db.prepare(`
+      UPDATE audits SET
+        ${fieldToTamper} = ?,
+        isTampered = 1,
+        tamperedAt = ?,
+        tamperedField = ?,
+        previousValue = ?,
+        verificationStatus = 'TAMPER_SUSPECTED',
+        updatedAt = ?
+      WHERE transactionId = ?
+    `);
     stmt.run(tamperedValue, now, fieldToTamper, String(previousVal), now, transactionId);
 
     return {

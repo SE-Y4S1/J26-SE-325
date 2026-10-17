@@ -25,6 +25,16 @@ export const verifyAuditRecord = async (transactionId) => {
   return response.data;
 };
 
+export const verifyByAuditId = async (auditId) => {
+  const response = await axios.get(`${API_BASE_URL}/by-audit-id/${auditId}/verify`);
+  return response.data;
+};
+
+export const retryCommitment = async (transactionId) => {
+  const response = await axios.post(`${API_BASE_URL}/${transactionId}/retry`);
+  return response.data;
+};
+
 export const simulateTamperRecord = async (transactionId, field = 'riskScore', tamperedValue = 20) => {
   const response = await axios.post(`${API_BASE_URL}/${transactionId}/tamper`, {
     field,
