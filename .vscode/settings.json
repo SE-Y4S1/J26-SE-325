@@ -1,0 +1,8 @@
+{
+  "python.analysis.extraPaths": [
+    "./backend/Agentic-Assistance"
+  ],
+  "python.autoComplete.extraPaths": [
+    "./backend/Agentic-Assistance"
+  ]
+}

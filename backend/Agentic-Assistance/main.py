@@ -20,13 +20,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from langchain_core.messages import HumanMessage
 
-from agent import agent
+from agent import agent, get_deterministic_fast_path
 from preferences_context import (
     get_current_preferences,
     reset_current_preferences,
     set_current_preferences,
 )
 from responsible_ai import record_research_telemetry, run_responsible_ai_checks
+from timing_context import start_request_timing, end_request_timing
+from tools.portfolio_tools import init_request_portfolio_cache, clear_request_portfolio_cache
 
 app = FastAPI(
     title="FinAgent - Agentic Financial Assistant",
@@ -143,6 +145,8 @@ def root():
 @app.post("/assistant/chat")
 def chat(request: ChatRequest):
 
+    timing_ctx, timing_token = start_request_timing()
+    cache_token = init_request_portfolio_cache()
     prefs = request.preferences or ResponsibleAIPreferences()
     pref_dict = {
         "explanation_enabled": prefs.explanation_enabled,
@@ -151,7 +155,51 @@ def chat(request: ChatRequest):
     }
 
     token = set_current_preferences(pref_dict)
+    timing_summary = None
     try:
+        # ----------------------------------------------
+        # Deterministic fast path for greetings, thanks,
+        # and simple conversational messages.
+        # These requests must not call Ollama or financial tools.
+        # ----------------------------------------------
+        fast_reply = get_deterministic_fast_path(request.message)
+        if fast_reply is not None:
+            tools_used = []
+            evidence = []
+            validation = validate_evidence_claims(fast_reply, evidence)
+            response_text = validation["answer"]
+            responsible_ai = run_responsible_ai_checks(
+                request.message,
+                response_text,
+                preferences=pref_dict,
+            )
+            record_research_telemetry(
+                event={
+                    "message_length": len(request.message),
+                    "tools_used": tools_used,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "fast_path": True,
+                },
+                consent_granted=prefs.data_sharing_consent,
+            )
+            timing_summary = end_request_timing(timing_token)
+            return {
+                "evidence_validation": {
+                    "passed": validation["passed"],
+                    "issues": validation["issues"],
+                    "checks_applied": validation["checks_applied"]
+                },
+                "answer": response_text,
+                "agent_execution": {
+                    "tools_used": tools_used,
+                    "number_of_tools": 0,
+                    "status": "no_tools_required",
+                    "timing": timing_summary,
+                },
+                "evidence": evidence,
+                "responsible_ai": responsible_ai
+            }
+
         # ----------------------------------------------
         # Send user message to agent
         # ----------------------------------------------
@@ -250,6 +298,8 @@ def chat(request: ChatRequest):
         # Return complete response
         # ----------------------------------------------
 
+        timing_summary = end_request_timing(timing_token)
+
         return {
             "evidence_validation": {
                 "passed": validation["passed"],
@@ -264,10 +314,14 @@ def chat(request: ChatRequest):
                     "tools_executed"
                     if tools_used
                     else "no_tools_required"
-                )
+                ),
+                "timing": timing_summary,
             },
             "evidence": evidence,
             "responsible_ai": responsible_ai
         }
     finally:
+        clear_request_portfolio_cache(cache_token)
         reset_current_preferences(token)
+        if timing_summary is None:
+            end_request_timing(timing_token)

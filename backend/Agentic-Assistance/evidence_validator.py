@@ -3,6 +3,20 @@ import re
 from preferences_context import get_current_preferences
 
 
+def sanitize_internal_details(text: str) -> str:
+    """
+    Remove or clean any exposed system prompt fragments, internal routing instructions,
+    or tool-routing markers from user-facing responses.
+    """
+    cleaned = text
+    cleaned = re.sub(r"RESPONSIBLE AI USER PREFERENCE DIRECTIVES:.*?(?=\n\n|\Z)", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"SYSTEM PROMPT:.*?(?=\n\n|\Z)", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"MINIMAL INVOCATION RULE:.*?(?=\n\n|\Z)", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"STRICT FACTUALITY OVERRIDE:.*?(?=\n\n|\Z)", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"\[(?:INTERNAL ROUTING|ROUTING|TOOL CALL|SYSTEM DIRECTIVE)[^\]]*\]", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
 def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
     """Detect selected risky claims and append a grounded evidence note.
 
@@ -43,7 +57,7 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
             )
         return {
             "passed": True,
-            "answer": corrected_answer,
+            "answer": sanitize_internal_details(corrected_answer),
             "issues": [],
             "checks_applied": [],
         }
@@ -138,7 +152,7 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
             actual_portfolio_patterns = [
                 r"\byour portfolio (?:is valued at|holds|contains|has a value of)\s+(?:LKR\s*)?1,?000,?000\b",
                 r"\byou have (?:a total of\s+)?(?:LKR\s*)?1,?000,?000\b",
-                r"\byour actual (?:portfolio|balance|holdings)\b",
+                r"(?<!not reflect )\byour actual (?:portfolio|balance|holdings)\b",
                 r"\byour (?:current\s+)?expected (?:annual\s+)?return is 12%\b",
                 r"\byour risk score is 45\b",
                 r"\byou currently hold 40% (?:in )?equit(?:y|ies)\b",
@@ -156,6 +170,24 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
             )
             if not has_starting_notice:
                 issues.append("Missing required opening notice that no live portfolio was retrieved")
+    else:
+        checks_applied.append("portfolio_absence_verified")
+        portfolio_leak_patterns = [
+            r"no live portfolio was retrieved",
+            r"live portfolio (?:was )?not (?:found|retrieved)",
+            r"portfolio\s+risk\s+profile",
+            r"baseline valuation",
+            r"1,?000,?000",
+            r"expected annual return",
+            r"diversification score",
+            r"asset allocation",
+            r"verified live holdings",
+        ]
+        if any(
+            re.search(pattern, corrected_answer, re.IGNORECASE)
+            for pattern in portfolio_leak_patterns
+        ):
+            issues.append("Unrelated portfolio claims in non-portfolio response")
 
     # Replace or correct the answer when a high-risk claim or missing notice is detected.
     if issues:
@@ -284,7 +316,7 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
 
     return {
         "passed": len(issues) == 0,
-        "answer": corrected_answer,
+        "answer": sanitize_internal_details(corrected_answer),
         "issues": issues,
         "checks_applied": checks_applied,
     }

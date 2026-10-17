@@ -15,6 +15,9 @@ export default function AssistantPage() {
   const [activeTab, setActiveTab] = useState<TabType>("assistant");
   const [messages, setMessages] = useState<ChatMessage[]>(MOCK_INITIAL_MESSAGES);
   const [latestEvidence, setLatestEvidence] = useState<Array<{ tool: string; result: string }>>([]);
+  const [selectedEvidence, setSelectedEvidence] = useState<Array<{ tool: string; result: string }> | null>(null);
+
+  const activeEvidence = selectedEvidence ?? latestEvidence;
 
   return (
     <div className="flex flex-col gap-2">
@@ -29,7 +32,12 @@ export default function AssistantPage() {
         {/* Left Navigation Sidebar */}
         <AssistantSidebar
           activeTab={activeTab}
-          onSelectTab={(tab) => setActiveTab(tab)}
+          onSelectTab={(tab) => {
+            if (tab === "assistant") {
+              setSelectedEvidence(null);
+            }
+            setActiveTab(tab);
+          }}
         />
 
         {/* Main Active Screen */}
@@ -38,20 +46,26 @@ export default function AssistantPage() {
             <ChatScreen
               messages={messages}
               setMessages={setMessages}
-              onNavigateToExplanation={() => setActiveTab("explanation")}
-              onEvidenceReceived={(evidence) => setLatestEvidence(evidence)}
+              onNavigateToExplanation={(evidence) => {
+                setSelectedEvidence(evidence ?? latestEvidence);
+                setActiveTab("explanation");
+              }}
+              onEvidenceReceived={(evidence) => {
+                setLatestEvidence(evidence);
+                setSelectedEvidence(null);
+              }}
             />
           )}
 
           {activeTab === "explanation" && (
             <ExplanationScreen
               onNavigateToTrustPanel={() => setActiveTab("trust-panel")}
-              latestEvidence={latestEvidence}
+              latestEvidence={activeEvidence}
             />
           )}
 
           {activeTab === "trust-panel" && (
-            <TrustPanelScreen latestEvidence={latestEvidence} />
+            <TrustPanelScreen latestEvidence={activeEvidence} />
           )}
 
           {(activeTab === "responsible-ai" || activeTab === "settings") && (
