@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { Database, Search, Hash, Lock, CheckCircle2, AlertTriangle, Copy, ExternalLink } from 'lucide-react';
-import { fetchAuditRecords } from '../services/api';
+import { Database, Search, Hash, Lock, CheckCircle2, AlertTriangle, Copy, ExternalLink, RefreshCw } from 'lucide-react';
+import { fetchAuditRecords, retryCommitment } from '../services/api';
 
 export default function AuditLogsPage({ setActiveTab, setSelectedTxForVerify }) {
   const [records, setRecords] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [copiedTx, setCopiedTx] = useState(null);
+  const [retrying, setRetrying] = useState(false);
 
   const loadRecords = async () => {
     try {
@@ -26,19 +27,32 @@ export default function AuditLogsPage({ setActiveTab, setSelectedTxForVerify }) 
 
   const filteredRecords = records.filter(r =>
     r.transactionId.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (r.auditId && r.auditId.toLowerCase().includes(searchTerm.toLowerCase())) ||
     r.finalDecision.toLowerCase().includes(searchTerm.toLowerCase()) ||
     r.modelVersion.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const handleCopyHash = (hash, txId) => {
-    navigator.clipboard.writeText(hash);
-    setCopiedTx(txId);
+  const handleCopyHash = (text, id) => {
+    navigator.clipboard.writeText(text);
+    setCopiedTx(id);
     setTimeout(() => setCopiedTx(null), 2000);
   };
 
   const handleVerify = (txId) => {
     setSelectedTxForVerify(txId);
     setActiveTab('verification');
+  };
+
+  const handleRetry = async (txId) => {
+    setRetrying(true);
+    try {
+      await retryCommitment(txId);
+      await loadRecords();
+    } catch (err) {
+      console.error('Retry failed:', err);
+    } finally {
+      setRetrying(false);
+    }
   };
 
   return (
@@ -48,19 +62,19 @@ export default function AuditLogsPage({ setActiveTab, setSelectedTxForVerify }) 
         <div>
           <h1 className="text-2xl font-black text-slate-100 flex items-center space-x-2">
             <Database className="w-6 h-6 text-blue-400" />
-            <span>Off-Chain Audit Repository</span>
+            <span>Off-Chain Audit Repository (SQLite)</span>
           </h1>
           <p className="text-xs text-slate-400 font-mono mt-1">
-            Complete off-chain audit logs storing raw financial fields & provenance metadata alongside on-chain hash commitments.
+            Complete off-chain audit logs storing financial fields & provenance metadata alongside on-chain hash commitments.
           </p>
         </div>
 
         {/* Search */}
-        <div className="relative w-full md:w-64">
+        <div className="relative w-full md:w-72">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
           <input
             type="text"
-            placeholder="Search TX ID or decision..."
+            placeholder="Search TX ID, Audit ID, or Decision..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full bg-slate-900 border border-slate-800 text-slate-200 text-xs rounded-xl pl-9 pr-4 py-2.5 focus:border-blue-500 focus:outline-none font-mono"
@@ -75,7 +89,7 @@ export default function AuditLogsPage({ setActiveTab, setSelectedTxForVerify }) 
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
               Audit Records ({filteredRecords.length})
             </span>
-            <span className="text-[11px] text-slate-500 font-mono">Sorted Latest First</span>
+            <span className="text-[11px] text-slate-500 font-mono">SQLite WAL Mode</span>
           </div>
 
           {filteredRecords.length === 0 ? (
@@ -111,12 +125,12 @@ export default function AuditLogsPage({ setActiveTab, setSelectedTxForVerify }) 
 
                     <div className="flex items-center justify-between text-[11px] text-slate-400">
                       <span>Amount: ${r.amount?.toLocaleString()}</span>
-                      <span>Risk: <strong className="text-rose-400">{r.riskScore}</strong></span>
+                      <span>Risk: <strong className="text-rose-400">{r.riskScore}</strong> | Conf: <strong className="text-amber-400">{r.confidence}%</strong></span>
                     </div>
 
                     <div className="mt-2 pt-2 border-t border-slate-800/60 flex items-center justify-between text-[10px] text-slate-500">
-                      <span className="truncate max-w-[180px] font-mono text-purple-300">
-                        {r.hash?.substring(0, 14)}...
+                      <span className="truncate max-w-[200px] font-mono text-purple-300">
+                        AuditId: {r.auditId?.substring(0, 14)}...
                       </span>
                       <span>{new Date(r.timestamp).toLocaleTimeString()}</span>
                     </div>
@@ -143,13 +157,25 @@ export default function AuditLogsPage({ setActiveTab, setSelectedTxForVerify }) 
                   <p className="text-xs text-slate-400">Recorded: {new Date(selectedRecord.timestamp).toLocaleString()}</p>
                 </div>
 
-                <button
-                  onClick={() => handleVerify(selectedRecord.transactionId)}
-                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition-all flex items-center space-x-1.5 shadow-md shadow-blue-600/25"
-                >
-                  <span>Verify Integrity</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </button>
+                <div className="flex items-center space-x-2">
+                  {selectedRecord.verificationStatus === 'BLOCKCHAIN_FAILED' && (
+                    <button
+                      onClick={() => handleRetry(selectedRecord.transactionId)}
+                      disabled={retrying}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold transition-all flex items-center space-x-1 shadow-md shadow-amber-600/25"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`} />
+                      <span>Retry Anchor</span>
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleVerify(selectedRecord.transactionId)}
+                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition-all flex items-center space-x-1.5 shadow-md shadow-blue-600/25"
+                  >
+                    <span>Verify Integrity</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
 
               {/* Hashes Banner */}
@@ -157,27 +183,56 @@ export default function AuditLogsPage({ setActiveTab, setSelectedTxForVerify }) 
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-slate-400 text-[11px] font-sans font-semibold text-purple-400">
-                      Off-Chain SHA-256 Hash Commitment
+                      Pseudonymous On-Chain Audit ID (bytes32)
                     </span>
                     <button
-                      onClick={() => handleCopyHash(selectedRecord.hash, selectedRecord.transactionId)}
+                      onClick={() => handleCopyHash(selectedRecord.auditId, 'auditId')}
                       className="text-slate-400 hover:text-white flex items-center space-x-1 text-[11px]"
                     >
                       <Copy className="w-3 h-3" />
-                      <span>{copiedTx === selectedRecord.transactionId ? 'Copied!' : 'Copy'}</span>
+                      <span>{copiedTx === 'auditId' ? 'Copied!' : 'Copy'}</span>
                     </button>
                   </div>
                   <p className="text-purple-300 bg-slate-950 p-2 rounded border border-slate-800 break-all">
-                    {selectedRecord.hash}
+                    {selectedRecord.auditId}
                   </p>
                 </div>
 
                 <div>
-                  <span className="text-slate-400 text-[11px] font-sans font-semibold text-blue-400 block mb-1">
-                    Blockchain Transaction Hash (On-Chain)
-                  </span>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-slate-400 text-[11px] font-sans font-semibold text-emerald-400">
+                      Off-Chain SHA-256 Record Hash Commitment
+                    </span>
+                    <button
+                      onClick={() => handleCopyHash(selectedRecord.recordHash || selectedRecord.hash, 'recordHash')}
+                      className="text-slate-400 hover:text-white flex items-center space-x-1 text-[11px]"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>{copiedTx === 'recordHash' ? 'Copied!' : 'Copy'}</span>
+                    </button>
+                  </div>
+                  <p className="text-emerald-300 bg-slate-950 p-2 rounded border border-slate-800 break-all">
+                    {selectedRecord.recordHash || selectedRecord.hash}
+                  </p>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-slate-400 text-[11px] font-sans font-semibold text-blue-400">
+                      Smart Contract Transaction Hash
+                    </span>
+                    {selectedRecord.blockchainTxId && (
+                      <button
+                        onClick={() => handleCopyHash(selectedRecord.blockchainTxId, 'txHash')}
+                        className="text-slate-400 hover:text-white flex items-center space-x-1 text-[11px]"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>{copiedTx === 'txHash' ? 'Copied!' : 'Copy'}</span>
+                      </button>
+                    )}
+                  </div>
                   <p className="text-blue-300 bg-slate-950 p-2 rounded border border-slate-800 break-all">
-                    {selectedRecord.blockchainTransactionId}
+                    {selectedRecord.blockchainTxId || selectedRecord.blockchainTransactionId || 'NOT MINED YET'}
                   </p>
                 </div>
               </div>
@@ -185,9 +240,9 @@ export default function AuditLogsPage({ setActiveTab, setSelectedTxForVerify }) 
               {/* JSON Structure */}
               <div>
                 <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider block mb-2">
-                  Full Canonical Off-Chain Record Structure (JSON)
+                  Full Off-Chain Record Structure (JSON)
                 </span>
-                <pre className="bg-[#070a12] p-4 rounded-xl border border-slate-800 text-[11px] font-mono text-emerald-400 overflow-x-auto max-h-72">
+                <pre className="bg-[#070a12] p-4 rounded-xl border border-slate-800 text-[11px] font-mono text-slate-300 overflow-x-auto max-h-72">
                   {JSON.stringify(selectedRecord, null, 2)}
                 </pre>
               </div>
