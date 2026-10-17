@@ -1,31 +1,31 @@
+const { POLICY_DEFINITION, computePolicyHash } = require("./policyDefinition");
+
 /**
  * Policy Engine for AI Financial Risk Evaluation
- * Policy ID: P001, Version: 1.0
- * 
- * Rules:
- * - IF riskScore >= 80 AND confidence >= 70  => REJECT
- * - IF riskScore >= 80 AND confidence < 70   => HUMAN_REVIEW
- * - IF riskScore < 80                        => APPROVE
+ * Evaluates inputs against the single source of truth defined in policyDefinition.js.
  */
 class PolicyEngine {
   constructor() {
-    this.policyId = "P001";
-    this.policyVersion = "1.0";
+    this.policyId = POLICY_DEFINITION.id;
+    this.policyVersion = POLICY_DEFINITION.version;
+    this.thresholds = POLICY_DEFINITION.thresholds;
+    this.policyHash = computePolicyHash(POLICY_DEFINITION);
   }
 
   evaluate(input) {
     const { riskScore, confidence } = input;
-    
-    let action = "APPROVE";
-    let reason = "Risk score is below threshold (riskScore < 80). Transaction approved automatically.";
+    const { riskThreshold, confidenceThreshold } = this.thresholds;
 
-    if (riskScore >= 80) {
-      if (confidence >= 70) {
+    let action = "APPROVE";
+    let reason = `Risk score is below threshold (riskScore < ${riskThreshold}). Transaction approved automatically.`;
+
+    if (riskScore >= riskThreshold) {
+      if (confidence >= confidenceThreshold) {
         action = "REJECT";
-        reason = "High risk (riskScore >= 80) and high confidence (confidence >= 70). Automated rejection triggered.";
+        reason = `High risk (riskScore >= ${riskThreshold}) and high confidence (confidence >= ${confidenceThreshold}). Automated rejection triggered.`;
       } else {
         action = "HUMAN_REVIEW";
-        reason = "High risk (riskScore >= 80) but low confidence (confidence < 70). Requires human authorization.";
+        reason = `High risk (riskScore >= ${riskThreshold}) but low confidence (confidence < ${confidenceThreshold}). Requires human authorization.`;
       }
     }
 
@@ -34,6 +34,7 @@ class PolicyEngine {
       reason,
       policyId: this.policyId,
       policyVersion: this.policyVersion,
+      policyHash: this.policyHash,
       evaluatedAt: new Date().toISOString()
     };
   }

@@ -1,80 +1,104 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/access/AccessControl.sol";
+
 /**
  * @title AuditRegistry
- * @dev Privacy-Preserving Smart Contract Audit Registry for AI Financial Risk Outputs
- * Stores only cryptographic hash commitments and provenance metadata on-chain.
- * Financial details (amount, customer info, raw risk signals) remain strictly off-chain.
+ * @dev Privacy-Preserving Smart Contract Audit Registry for AI Risk Outputs
+ * Anchors only cryptographic bytes32 commitments on-chain.
+ * All sensitive financial data (amounts, customer info, risk scores, decisions) remain strictly off-chain.
  */
-contract AuditRegistry {
+contract AuditRegistry is AccessControl {
+    bytes32 public constant SUBMITTER_ROLE = keccak256("SUBMITTER_ROLE");
+
     struct AuditCommitment {
-        string transactionId;
-        string recordHash;
-        string decision;
-        string policyVersion;
-        string modelVersion;
+        bytes32 recordHash;
+        bytes32 policyHash;
         uint256 timestamp;
         address submitter;
         bool exists;
     }
 
-    // Mapping from transactionId => AuditCommitment
-    mapping(string => AuditCommitment) private audits;
-    
-    // Array of transaction IDs for iteration/enumeration
-    string[] private transactionIds;
+    // Mapping from pseudonymous auditId => AuditCommitment
+    mapping(bytes32 => AuditCommitment) private audits;
 
-    // Event emitted whenever a new audit hash commitment is recorded on-chain
+    // Policy registry: policyHash => active boolean
+    mapping(bytes32 => bool) private activePolicies;
+
+    // Custom errors for gas efficiency and clear diagnostics
+    error InvalidAuditId();
+    error InvalidRecordHash();
+    error PolicyNotActive();
+    error AuditAlreadyExists();
+
+    // Event emitted upon recording an audit commitment
     event AuditRecorded(
-        string indexed transactionId,
-        string recordHash,
-        string decision,
-        string policyVersion,
-        string modelVersion,
+        bytes32 indexed auditId,
+        bytes32 indexed policyHash,
+        bytes32 recordHash,
         uint256 timestamp,
         address submitter
     );
 
+    // Event emitted when a policy hash is registered or status changed
+    event PolicyRegistered(bytes32 indexed policyHash, bool active);
+
     /**
-     * @notice Records an audit commitment on the blockchain.
-     * @param _transactionId Unique identifier of the transaction.
-     * @param _decision Final decision (APPROVE, REJECT, HUMAN_APPROVED, HUMAN_REJECTED).
-     * @param _policyVersion Version identifier of policy engine.
-     * @param _modelVersion Version identifier of AI model.
+     * @notice Constructor initializes contract with deployer as DEFAULT_ADMIN_ROLE and SUBMITTER_ROLE.
+     */
+    constructor() {
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(SUBMITTER_ROLE, msg.sender);
+    }
+
+    /**
+     * @notice Registers or activates a policy definition hash. Admin only.
+     * @param _policyHash SHA-256 hash of the canonical policy specification.
+     */
+    function registerPolicy(bytes32 _policyHash) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_policyHash == bytes32(0)) revert InvalidRecordHash();
+        activePolicies[_policyHash] = true;
+        emit PolicyRegistered(_policyHash, true);
+    }
+
+    /**
+     * @notice Deactivates a policy hash if deprecated. Admin only.
+     * @param _policyHash SHA-256 hash of the policy specification.
+     */
+    function deactivatePolicy(bytes32 _policyHash) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        activePolicies[_policyHash] = false;
+        emit PolicyRegistered(_policyHash, false);
+    }
+
+    /**
+     * @notice Records an immutable audit commitment. Submitter role only. Write-once: cannot overwrite or delete.
+     * @param _auditId Pseudonymous unique commitment identifier (e.g. sha256(transactionId + ":" + salt)).
      * @param _recordHash SHA-256 hash of the canonical off-chain audit record.
+     * @param _policyHash SHA-256 hash of the evaluated policy specification.
      */
     function recordAudit(
-        string memory _transactionId,
-        string memory _decision,
-        string memory _policyVersion,
-        string memory _modelVersion,
-        string memory _recordHash
-    ) external returns (bool) {
-        require(bytes(_transactionId).length > 0, "Transaction ID cannot be empty");
-        require(bytes(_recordHash).length > 0, "Record hash cannot be empty");
+        bytes32 _auditId,
+        bytes32 _recordHash,
+        bytes32 _policyHash
+    ) external onlyRole(SUBMITTER_ROLE) returns (bool) {
+        if (_auditId == bytes32(0)) revert InvalidAuditId();
+        if (_recordHash == bytes32(0)) revert InvalidRecordHash();
+        if (!activePolicies[_policyHash]) revert PolicyNotActive();
+        if (audits[_auditId].exists) revert AuditAlreadyExists();
 
-        if (!audits[_transactionId].exists) {
-            transactionIds.push(_transactionId);
-        }
-
-        audits[_transactionId] = AuditCommitment({
-            transactionId: _transactionId,
+        audits[_auditId] = AuditCommitment({
             recordHash: _recordHash,
-            decision: _decision,
-            policyVersion: _policyVersion,
-            modelVersion: _modelVersion,
+            policyHash: _policyHash,
             timestamp: block.timestamp,
             submitter: msg.sender,
             exists: true
         });
 
         emit AuditRecorded(
-            _transactionId,
+            _auditId,
+            _policyHash,
             _recordHash,
-            _decision,
-            _policyVersion,
-            _modelVersion,
             block.timestamp,
             msg.sender
         );
@@ -83,50 +107,43 @@ contract AuditRegistry {
     }
 
     /**
-     * @notice Retrieves the recorded on-chain commitment for a given transaction ID.
+     * @notice Retrieves the recorded on-chain commitment for a given auditId.
+     * @param _auditId Pseudonymous audit commitment identifier.
      */
-    function getAudit(string memory _transactionId)
+    function getAudit(bytes32 _auditId)
         external
         view
         returns (
-            string memory recordHash,
-            string memory decision,
-            string memory policyVersion,
-            string memory modelVersion,
+            bool exists,
+            bytes32 recordHash,
+            bytes32 policyHash,
             uint256 timestamp,
             address submitter
         )
     {
-        require(audits[_transactionId].exists, "Audit record does not exist");
-        AuditCommitment memory item = audits[_transactionId];
+        AuditCommitment memory item = audits[_auditId];
         return (
+            item.exists,
             item.recordHash,
-            item.decision,
-            item.policyVersion,
-            item.modelVersion,
+            item.policyHash,
             item.timestamp,
             item.submitter
         );
     }
 
     /**
-     * @notice Checks whether an audit record exists for a transaction ID.
+     * @notice Checks whether an audit commitment exists on-chain.
+     * @param _auditId Pseudonymous audit commitment identifier.
      */
-    function hasAudit(string memory _transactionId) external view returns (bool) {
-        return audits[_transactionId].exists;
+    function hasAudit(bytes32 _auditId) external view returns (bool) {
+        return audits[_auditId].exists;
     }
 
     /**
-     * @notice Returns the total count of recorded audit commitments.
+     * @notice Checks whether a policy definition is active.
+     * @param _policyHash SHA-256 hash of the policy specification.
      */
-    function getTotalAudits() external view returns (uint256) {
-        return transactionIds.length;
-    }
-
-    /**
-     * @notice Returns all stored transaction IDs.
-     */
-    function getAllTransactionIds() external view returns (string[] memory) {
-        return transactionIds;
+    function isPolicyActive(bytes32 _policyHash) external view returns (bool) {
+        return activePolicies[_policyHash];
     }
 }
