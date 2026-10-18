@@ -1,9 +1,10 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const auditRoutes = require("./routes/auditRoutes");
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 8002;
 
 // Middleware
 app.use(cors({ origin: "*" }));
@@ -21,11 +22,15 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Start Server
-app.listen(PORT, () => {
-  console.log(`=============================================================`);
-  console.log(` Privacy-Preserving AI-to-Smart-Contract Audit Bridge Backend`);
-  console.log(` Server listening on http://localhost:${PORT}`);
-  console.log(` API Endpoint: http://localhost:${PORT}/api/audit`);
-  console.log(`=============================================================`);
-});
+// Start Server when run directly
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`=============================================================`);
+    console.log(` Privacy-Preserving AI-to-Smart-Contract Audit Bridge Backend`);
+    console.log(` Server listening on http://localhost:${PORT}`);
+    console.log(` API Endpoint: http://localhost:${PORT}/api/audit`);
+    console.log(`=============================================================`);
+  });
+}
+
+module.exports = app;
