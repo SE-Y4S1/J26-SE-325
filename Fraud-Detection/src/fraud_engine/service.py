@@ -126,6 +126,7 @@ class FraudService:
             self.decision_counts[decision] += 1
             record = {
                 "transaction_id": payload["transaction_id"],
+                "scored_at": datetime.fromtimestamp(clock, timezone.utc).isoformat(),
                 "decision": decision,
                 "fraud_score": fraud_score,
                 "model_version": self.model_version,
@@ -219,7 +220,7 @@ class FraudService:
     def dashboard_html(self) -> str:
         body = [
             "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Fraud analyst feedback</title>",
-            "<style>body{font-family:Segoe UI,sans-serif;margin:2rem;}table{border-collapse:collapse;}td,th{border:1px solid #ccc;padding:0.4rem;}</style>",
+            "<style>body{font-family:Segoe UI,sans-serif;margin:2rem;background:#fff;color:#111;}table{border-collapse:collapse;}td,th{border:1px solid #ccc;padding:0.4rem;color:#111;background:#fff;}</style>",
             "</head><body><h1>Component 02 analyst feedback</h1>",
             "<p>Decisions below come from the deterministic gateway. This page does not show account numbers, device strings, or network addresses.</p>",
             "<table><tr><th>Transaction</th><th>Score</th><th>Decision</th><th>Model</th></tr>",

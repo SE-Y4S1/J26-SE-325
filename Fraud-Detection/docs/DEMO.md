@@ -27,6 +27,8 @@ cd Fraud-Detection
 py scripts\run_api.py
 ```
 
+The research dashboard, after `npm install` and `npm run dev` inside `frontend`, is http://127.0.0.1:5173 . Keep this API running on port 8082.
+
 Health check:
 
 ```powershell

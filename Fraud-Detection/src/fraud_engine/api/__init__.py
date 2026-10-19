@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from fraud_engine import __version__
@@ -51,6 +52,13 @@ def create_app(settings: dict | None = None, bundle_path: Path | None | object =
     )
     app.state.service = service
     app.state.settings = resolved
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Accept"],
+    )
 
     @app.get("/health")
     def health() -> dict:
@@ -91,6 +99,20 @@ def create_app(settings: dict | None = None, bundle_path: Path | None | object =
 
     @app.get("/v1/decisions/summary")
     def decision_summary() -> dict:
-        return dict(service.decision_counts)
+        with service.lock:
+            return dict(service.decision_counts)
+
+    @app.get("/v1/decisions")
+    def decisions() -> dict:
+        """Recent gateway decisions already stored by this process."""
+        with service.lock:
+            rows = list(service.recent)
+            counts = dict(service.decision_counts)
+        rows.reverse()
+        return {
+            "decisions": rows,
+            "counts": counts,
+            "scope": "this API process only",
+        }
 
     return app
