@@ -33,7 +33,7 @@ function LoginForm() {
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center p-6">
-      <h1 className="mb-1 text-2xl font-semibold">Smart Finance Platform</h1>
+      <h1 className="mb-1 text-2xl font-semibold">Nexa</h1>
       <p className="mb-6 text-sm text-neutral-500">J26-SE-325</p>
 
       <Card title="Sign in">

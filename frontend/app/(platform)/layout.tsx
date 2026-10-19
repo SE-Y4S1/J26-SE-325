@@ -63,7 +63,7 @@ function Shell({ children }: { children: ReactNode }) {
       <header className="border-b border-black/10 dark:border-white/15">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 p-4">
           <Link href="/portfolio" className="font-semibold">
-            Smart Finance Platform
+            Nexa
           </Link>
           <div className="flex items-center gap-3 text-sm">
             <span className="text-neutral-500">{user.display_name}</span>

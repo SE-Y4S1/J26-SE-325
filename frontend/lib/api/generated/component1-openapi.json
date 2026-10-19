@@ -1812,6 +1812,25 @@
             "type": "string",
             "format": "date-time",
             "title": "Generated At"
+          },
+          "rebalance_orders": {
+            "items": {
+              "$ref": "#/components/schemas/RebalanceOrder"
+            },
+            "type": "array",
+            "title": "Rebalance Orders"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
           }
         },
         "type": "object",
@@ -1983,6 +2002,41 @@
           "stale"
         ],
         "title": "QuoteResponse"
+      },
+      "RebalanceOrder": {
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "title": "Symbol"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "BUY",
+              "SELL"
+            ],
+            "title": "Side"
+          },
+          "quantity": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Quantity"
+          },
+          "price": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Price"
+          }
+        },
+        "type": "object",
+        "required": [
+          "symbol",
+          "side",
+          "quantity",
+          "price"
+        ],
+        "title": "RebalanceOrder",
+        "description": "One trade that moves a holding to its recommended weight.\n\n`quantity` is in the holding's own units; `price` is per unit in the response's base\ncurrency. Sized here, not by the caller, because the weights are fractions of the\nFX-converted total and only this service knows the rates it converted with."
       },
       "RefreshRequest": {
         "properties": {

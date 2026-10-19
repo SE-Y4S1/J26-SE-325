@@ -35,7 +35,9 @@ export function askAssistant(
   return request<AssistantReply>("assistant", "/assistant/chat", {
     method: "POST",
     body: { message, preferences },
-    auth: false,
+    // The user's own token, forwarded so get_execution_explanation can read THEIR execution
+    // trace from the platform service. The assistant never mints one for another user.
+    auth: true,
   });
 }
 

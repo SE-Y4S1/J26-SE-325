@@ -10,6 +10,7 @@
 import { Suspense, useState } from "react";
 
 import { BaselineComparison, CostBreakdownCard, MarketContextPanel } from "@/components/analysis/MarketContext";
+import { ExecutionPanel } from "@/components/ExecutionPanel";
 import { Button, Card, Field, Input, Notice, Spinner, Stat, money, percent } from "@/components/ui";
 import { planWithdrawal } from "@/lib/api/portfolio";
 import type {
@@ -27,7 +28,7 @@ const BASE_CURRENCIES = ["LKR", "USD"] as const;
 import { usePortfolio } from "@/lib/usePortfolio";
 
 function WithdrawScreen() {
-  const { portfolio, loading, error } = usePortfolio();
+  const { portfolio, loading, error, reload } = usePortfolio();
 
   const [amount, setAmount] = useState(150_000);
   const [urgency, setUrgency] = useState(0.5);
@@ -178,6 +179,18 @@ function WithdrawScreen() {
 
       {planError && <Notice tone="error" title="Could not plan">{planError}</Notice>}
       {plan && <PlanResult plan={plan} />}
+      {plan && (
+        <ExecutionPanel
+          key={String(plan.generated_at)}
+          portfolioId={portfolio.id}
+          kind="withdrawal"
+          plan={plan}
+          disabledReason={
+            plan.assets_to_sell.some((sale) => sale.quantity > 0) ? undefined : "This plan sells nothing."
+          }
+          onExecuted={reload}
+        />
+      )}
     </div>
   );
 }

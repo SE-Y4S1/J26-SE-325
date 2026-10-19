@@ -623,6 +623,12 @@ export interface components {
              * Format: date-time
              */
             generated_at: string;
+            /** Rebalance Orders */
+            rebalance_orders?: components["schemas"]["RebalanceOrder"][];
+            /** Currency */
+            currency?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** QuoteRequest */
         QuoteRequest: {
@@ -673,6 +679,27 @@ export interface components {
             value_native?: number | null;
             /** Value Base */
             value_base?: number | null;
+        };
+        /**
+         * RebalanceOrder
+         * @description One trade that moves a holding to its recommended weight.
+         *
+         *     `quantity` is in the holding's own units; `price` is per unit in the response's base
+         *     currency. Sized here, not by the caller, because the weights are fractions of the
+         *     FX-converted total and only this service knows the rates it converted with.
+         */
+        RebalanceOrder: {
+            /** Symbol */
+            symbol: string;
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "BUY" | "SELL";
+            /** Quantity */
+            quantity: number;
+            /** Price */
+            price: number;
         };
         /** RefreshRequest */
         RefreshRequest: {
