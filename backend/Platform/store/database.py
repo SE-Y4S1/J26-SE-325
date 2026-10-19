@@ -30,14 +30,34 @@ def database_url() -> str:
     """Resolve the database URL, defaulting to a local SQLite file."""
     configured = os.getenv("DATABASE_URL")
     if configured:
-        return configured
+        return normalise_url(configured)
     DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     return f"sqlite:///{DEFAULT_DB_PATH}"
 
 
+def normalise_url(url: str) -> str:
+    """Point a plain Postgres URL at the psycopg 3 driver.
+
+    Hosted providers (Prisma Postgres, Render, Neon) hand out `postgres://` or
+    `postgresql://`; SQLAlchemy would read either as psycopg2, which is not installed.
+    Hosts with an ephemeral disk -- Render's free tier wipes it on every spin-down -- need
+    one of these, or every account and portfolio vanishes with the instance.
+    """
+    if url.startswith("prisma+postgres://"):
+        # Prisma's Accelerate URL speaks Prisma's own protocol, not Postgres wire protocol.
+        raise ValueError(
+            "DATABASE_URL is a Prisma Accelerate URL (prisma+postgres://). Use the database's "
+            "direct connection string instead: postgres://USER:PASSWORD@db.prisma.io:5432/postgres?sslmode=require"
+        )
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
 def create_db_engine(url: str | None = None):
     """Build an engine with the SQLite-specific settings this app needs."""
-    resolved = url or database_url()
+    resolved = normalise_url(url) if url else database_url()
     is_sqlite = resolved.startswith("sqlite")
     # "sqlite://" with no path is in-memory, and each connection would otherwise get its OWN
     # empty database -- so create_all() lands on one connection and requests hit another,
@@ -52,6 +72,11 @@ def create_db_engine(url: str | None = None):
         kwargs["connect_args"] = {"check_same_thread": False}
     if is_memory:
         kwargs["poolclass"] = StaticPool
+    if not is_sqlite:
+        # Hosted Postgres closes idle connections, and a free-tier instance sleeps between
+        # requests; checking each connection on checkout avoids a failed first request.
+        kwargs["pool_pre_ping"] = True
+        kwargs["pool_recycle"] = 300
 
     engine = create_engine(resolved, **kwargs)
 
