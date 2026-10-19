@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from evidence_validator import validate_evidence_claims
-from fastapi import FastAPI
+from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -28,6 +28,7 @@ from preferences_context import (
 )
 from responsible_ai import record_research_telemetry, run_responsible_ai_checks
 from timing_context import start_request_timing, end_request_timing
+from request_auth import set_caller_authorization, reset_caller_authorization
 from tools.portfolio_tools import init_request_portfolio_cache, clear_request_portfolio_cache
 
 app = FastAPI(
@@ -143,7 +144,7 @@ def root():
 # --------------------------------------------------
 
 @app.post("/assistant/chat")
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, authorization: str | None = Header(default=None)):
 
     timing_ctx, timing_token = start_request_timing()
     cache_token = init_request_portfolio_cache()
@@ -155,6 +156,8 @@ def chat(request: ChatRequest):
     }
 
     token = set_current_preferences(pref_dict)
+    # The caller's own token, so get_execution_explanation reads their trace as them.
+    auth_token = set_caller_authorization(authorization)
     timing_summary = None
     try:
         # ----------------------------------------------
@@ -323,5 +326,6 @@ def chat(request: ChatRequest):
     finally:
         clear_request_portfolio_cache(cache_token)
         reset_current_preferences(token)
+        reset_caller_authorization(auth_token)
         if timing_summary is None:
             end_request_timing(timing_token)

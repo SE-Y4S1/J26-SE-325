@@ -183,7 +183,9 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
             r"asset allocation",
             r"verified live holdings",
         ]
-        if any(
+        # An execution trace is the user's own executed plan, so allocation language in its
+        # explanation is grounded evidence, not a leak from the portfolio tool.
+        if "get_execution_explanation" not in tool_names and any(
             re.search(pattern, corrected_answer, re.IGNORECASE)
             for pattern in portfolio_leak_patterns
         ):

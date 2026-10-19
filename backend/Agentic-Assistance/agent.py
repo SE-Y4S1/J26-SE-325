@@ -166,7 +166,7 @@ def is_arithmetic_query(text: str) -> bool:
     clean = text.strip().lower()
 
     # If query explicitly targets specific financial entities, it is not a pure arithmetic question.
-    if re.search(r"\b(?:tx\d*|transaction|portfolio|fraud|blockchain|audit)\b", clean):
+    if re.search(r"\b(?:tx\d*|exe-[0-9a-f]+|transaction|portfolio|fraud|blockchain|audit)\b", clean):
         return False
 
     arithmetic_patterns = [
@@ -194,6 +194,9 @@ def has_financial_intent(text: str) -> bool:
     financial_keywords = [
         # Explicit transaction and entity references
         r"\btx\d*\b",
+        r"\bexe-[0-9a-f]+\b",
+        r"\bexecutions?\b",
+        r"\bwithdrawals?\b",
         r"\btransactions?\b",
         r"\btransfers?\b",
         r"\bpayments?\b",
@@ -256,6 +259,7 @@ def has_fraud_or_audit_intent(text: str) -> bool:
     clean = text.strip().lower()
     patterns = [
         r"\btx\d*\b",
+        r"\bexe-[0-9a-f]+\b",
         r"\bfraud\b",
         r"\bscams?\b",
         r"\bblocked\b",
@@ -350,11 +354,12 @@ If the user sends a greeting (such as "Hello", "Hi", "Good morning")
 or asks about your general capabilities (such as "What can you help me with?",
 "What can you do?", "How do you work?"):
 - DO NOT CALL ANY TOOLS.
-- Do NOT invoke get_fraud_analysis, get_portfolio_analysis, or get_blockchain_audit.
+- Do NOT invoke get_fraud_analysis, get_portfolio_analysis, get_blockchain_audit, or get_execution_explanation.
 - Provide a normal, friendly greeting and describe your capabilities:
   1. Explaining fraud decisions, recorded risk scores, and contributing factors.
   2. Analyzing portfolio allocation, diversification, and liquidity risk.
   3. Verifying blockchain audit records and transaction ledger status.
+  4. Explaining an executed withdrawal or rebalance end to end, from its execution ID.
 
 --------------------------------------------------
 NON-FINANCIAL AND GENERAL QUESTIONS
@@ -364,7 +369,7 @@ If the user asks a question unrelated to finance, such as simple arithmetic
 (e.g., "what is 2 + 2", "what is 2 +2", "calculate 15 * 4"), general knowledge (e.g.,
 "what is the capital of France?"), definitions, or casual conversation:
 - DO NOT CALL ANY TOOLS.
-- Do NOT invoke get_fraud_analysis, get_portfolio_analysis, or get_blockchain_audit.
+- Do NOT invoke get_fraud_analysis, get_portfolio_analysis, get_blockchain_audit, or get_execution_explanation.
 - Provide a direct, correct, and concise answer without inventing transactions,
   mock records, or unnecessary financial disclaimers.
 
@@ -389,6 +394,7 @@ You have access to these tools:
 1. get_fraud_analysis
 2. get_portfolio_analysis
 3. get_blockchain_audit
+4. get_execution_explanation
 
 MINIMAL INVOCATION RULE:
 For specific financial questions, invoke ONLY the tools needed to answer the user's intent:
@@ -430,6 +436,16 @@ Do not default to TX1001 if the user provided a different transaction ID.
 If no transaction ID is mentioned by the user, call get_blockchain_audit with the default mock transaction:
 
 TX1001
+
+When the user mentions an execution ID (it starts with EXE-), or asks why their
+withdrawal or rebalance was executed, blocked, held, or sent for verification,
+call ONLY:
+
+get_execution_explanation
+
+Pass the exact EXE- identifier as execution_id. It already combines the portfolio plan,
+the fraud decision and the audit verification, so do not also call the other three tools.
+If the user gives no execution ID, ask for it; never invent one.
 
 Call multiple tools ONLY if the question explicitly asks for multiple types of information (e.g. asking for both fraud analysis and blockchain audit verification).
 
@@ -593,6 +609,7 @@ Analyze the user request and select the required financial tool:
 - Portfolio allocation, risk score, holdings, diversification, or liquidity: call get_portfolio_analysis.
 - Blocked transaction, fraud score, or suspicious payment: call get_fraud_analysis (default transaction_id='TX1001' if unspecified).
 - Blockchain audit, ledger verification, or transaction log: call get_blockchain_audit (default transaction_id='TX1001' if unspecified).
+- An execution ID (starts with EXE-), or why a withdrawal or rebalance was executed, blocked or held: call get_execution_explanation with that exact ID.
 MINIMAL INVOCATION RULE: Call ONLY the single tool needed to answer the request.
 """
 

@@ -28,6 +28,31 @@ def load_data():
         return json.load(file)
 
 
+def _normalise_engine_response(body: dict) -> dict:
+    """Map Component 2's /v1/transactions/{id} response onto the entry fields used below."""
+    explanation = body.get("explanation") or {}
+    streams = explanation.get("streams") or {}
+    rules = [str(r) for r in explanation.get("rules") or []]
+    notes = [str(n) for n in explanation.get("notes") or []]
+    decision = str(body.get("decision", "UNKNOWN"))
+    return {
+        "transaction_id": body.get("transaction_id"),
+        # The engine never returns a user identifier; it is keyed by a pseudonymous account.
+        "user_id": "not disclosed by Component 2",
+        "risk_score": body.get("fraud_score", 0.0),
+        # The gateway spells it STEP_UP; the risk mapping below uses the older STEP-UP.
+        "decision": "STEP-UP" if decision == "STEP_UP" else decision,
+        "reason": "; ".join(rules) if rules else "; ".join(notes) or "No gateway rule fired",
+        "behavioral_score": streams.get("lstm", streams.get("heuristic", 0.0)),
+        "graph_score": streams.get("gnn", 0.0),
+        "timestamp": "N/A",
+        "model_version": body.get("model_version", "unknown"),
+        "benchmark_model": bool(body.get("benchmark_model", False)),
+        "top_factors": explanation.get("top_factors") or [],
+        "attack_type": None,
+    }
+
+
 def query_live_fraud_service(
     transaction_id: str,
     base_url: str = FRAUD_SERVICE_URL,
@@ -35,9 +60,10 @@ def query_live_fraud_service(
 ) -> dict:
     """
     Query Component 2's live service using a safe read-only request.
-    Does NOT invoke POST /score (no state mutation, no decision triggering).
+    Does NOT invoke POST /v1/transactions/score (no state mutation, no decision triggering).
 
-    Queries GET {base_url}/audit?limit=200 to inspect the gateway's recorded decisions.
+    Queries GET {base_url}/v1/transactions/{transaction_id}, which returns the decision and
+    explanation the gateway already produced for that transaction.
     Returns:
         {
             "available": bool,
@@ -47,14 +73,14 @@ def query_live_fraud_service(
             "reason": str,
         }
     """
-    url = f"{base_url}/audit?limit=200"
+    target_id = str(transaction_id).strip()
+    url = f"{base_url}/v1/transactions/{urllib.parse.quote(target_id, safe='')}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
 
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
             status_code = getattr(response, "status", 200)
-            raw_bytes = response.read()
-            text = raw_bytes.decode("utf-8")
+            text = response.read().decode("utf-8")
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
@@ -62,36 +88,36 @@ def query_live_fraud_service(
                     "available": True,
                     "status_code": status_code,
                     "entry": None,
-                    "error": "Malformed JSON returned by Component 2 audit service",
+                    "error": "Malformed JSON returned by Component 2",
                     "reason": "Component 2 returned non-JSON payload",
                 }
-
-            entries = data.get("entries", []) if isinstance(data, dict) else []
-            target_id = str(transaction_id).strip()
-
-            for entry in entries:
-                if str(entry.get("transaction_id", "")).strip() == target_id:
-                    return {
-                        "available": True,
-                        "status_code": status_code,
-                        "entry": entry,
-                        "error": None,
-                        "reason": "Record found in Component 2 live audit log",
-                    }
-
+            if not isinstance(data, dict) or "decision" not in data:
+                return {
+                    "available": True,
+                    "status_code": status_code,
+                    "entry": None,
+                    "error": "Unexpected payload returned by Component 2",
+                    "reason": "Component 2 returned a payload without a decision",
+                }
             return {
                 "available": True,
                 "status_code": status_code,
-                "entry": None,
+                "entry": _normalise_engine_response(data),
                 "error": None,
-                "reason": f"Transaction '{target_id}' not found in Component 2 live audit log ({len(entries)} recent entries checked)",
+                "reason": "Record found in Component 2 live decision store",
             }
 
     except urllib.error.HTTPError as err:
+        if err.code == 404:
+            return {
+                "available": True,
+                "status_code": 404,
+                "entry": None,
+                "error": None,
+                "reason": f"Transaction '{target_id}' not found in Component 2 live decision store",
+            }
         try:
-            err_body = err.read().decode("utf-8")
-            err_data = json.loads(err_body)
-            detail = err_data.get("detail", str(err))
+            detail = json.loads(err.read().decode("utf-8")).get("detail", str(err))
         except Exception:
             detail = str(err)
         return {
@@ -133,7 +159,7 @@ def get_fraud_analysis(transaction_id: str = "TX1001") -> str:
     explanation_enabled = prefs.get("explanation_enabled", True)
     target_id = str(transaction_id).strip() if transaction_id else "TX1001"
 
-    # Query Component 2's live audit service (safe read-only GET /audit)
+    # Query Component 2's live decision store (safe read-only GET /v1/transactions/{id})
     live_res = query_live_fraud_service(target_id)
 
     # 1. LIVE SERVICE RECORD FOUND
@@ -148,6 +174,9 @@ def get_fraud_analysis(transaction_id: str = "TX1001") -> str:
         graph_score = float(entry.get("graph_score", 0.0))
         timestamp = str(entry.get("timestamp", "N/A"))
         attack_type = entry.get("attack_type")
+        model_version = str(entry.get("model_version", "unknown"))
+        benchmark_model = bool(entry.get("benchmark_model", False))
+        top_factors = entry.get("top_factors") or []
 
         # Deterministic risk level mapping from gateway decision
         if decision == "BLOCK":
@@ -160,12 +189,22 @@ def get_fraud_analysis(transaction_id: str = "TX1001") -> str:
             risk_level = "UNKNOWN"
 
         attack_line = f"- Tagged Scenario: {attack_type}\n" if attack_type else ""
+        factor_lines = "\n".join(
+            f"- {f.get('name')}: contribution {float(f.get('contribution', 0.0)):+.4f} "
+            f"({'increases' if float(f.get('contribution', 0.0)) > 0 else 'decreases'} fraud risk)"
+            for f in top_factors
+        ) or "- None returned (the untrained heuristic scores on amount and reputation only)"
+        model_line = (
+            "trained bundle validated on a public benchmark"
+            if benchmark_model
+            else "NOT a benchmark model (untrained heuristic or unvalidated bundle)"
+        )
 
         return f"""
 FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD
 
 Data Source:
-Live Component 2 Gateway Audit Log ({FRAUD_SERVICE_URL}/audit).
+Live Component 2 Gateway Decision Store ({FRAUD_SERVICE_URL}/v1/transactions).
 This record is live governance evidence from Component 2's real-time fraud engine.
 
 Transaction ID:
@@ -187,11 +226,15 @@ RECORDED CONTRIBUTING FACTORS:
 - {reason}
 
 COMPONENT 2 DUAL-STREAM MODEL SIGNALS:
-- Behavioral Stream Anomaly Score (Simulated LSTM Autoencoder): {behavioral_score:.4f}
-- Relational Stream Risk Score (Simulated GNN): {graph_score:.4f}
+- Behavioral Stream Anomaly Score (LSTM Autoencoder): {behavioral_score:.4f}
+- Relational Stream Risk Score (GNN): {graph_score:.4f}
 - Fused Final Risk Score: {risk_score:.4f}
+- Model Version: {model_version} ({model_line})
 - Audit Timestamp: {timestamp}
 {attack_line}
+COMPONENT 2 FEATURE ATTRIBUTIONS (the engine's own linear attributions, largest first):
+{factor_lines}
+
 TRANSACTION TELEMETRY NOTE:
 Raw transaction telemetry (amount, device fingerprint, geographic location, keystroke dynamics) is evaluated during ingestion and is not retained in the gateway audit trail.
 

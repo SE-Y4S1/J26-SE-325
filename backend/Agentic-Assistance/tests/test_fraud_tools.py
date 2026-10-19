@@ -1,6 +1,6 @@
 """
 Focused unit tests for Component 4 live fraud detection integration:
-- Safe read-only lookup via Component 2 audit log (GET /audit?limit=200)
+- Safe read-only lookup via Component 2 decision store (GET /v1/transactions/{id})
 - Missing transaction in live audit log -> fallback to mock data
 - Service timeout -> graceful fallback
 - Malformed response -> graceful fallback
@@ -34,27 +34,27 @@ from tools.fraud_tools import (
 class TestFraudToolsIntegration(unittest.TestCase):
 
     def test_successful_live_lookup(self):
-        """Test successful retrieval of an existing transaction from Component 2 audit log."""
-        live_audit_payload = {
-            "count": 1,
-            "entries": [
-                {
-                    "timestamp": "2026-10-14T18:30:00Z",
-                    "transaction_id": "TX1001",
-                    "user_id": "u_live_user_42",
-                    "behavioral_score": 0.8750,
-                    "graph_score": 0.9120,
-                    "risk_score": 0.9410,
-                    "decision": "BLOCK",
-                    "reason": "Relational risk corroborated by anomalous device and location",
-                    "attack_type": None,
-                }
-            ],
+        """Test successful retrieval of an existing transaction from Component 2's decision store."""
+        engine_payload = {
+            "transaction_id": "TX1001",
+            "fraud_score": 0.9410,
+            "decision": "BLOCK",
+            "model_version": "ieee-cis-dev-20k",
+            "benchmark_model": True,
+            "explanation": {
+                "rules": ["Relational risk corroborated by anomalous device and location"],
+                "streams": {"lstm": 0.8750, "gnn": 0.9120, "fused": 0.9410},
+                "top_factors": [
+                    {"name": "TransactionAmt", "contribution": 1.25},
+                    {"name": "freq__card1", "contribution": -0.40},
+                ],
+                "notes": [],
+            },
         }
 
         mock_response = MagicMock()
         mock_response.status = 200
-        mock_response.read.return_value = json.dumps(live_audit_payload).encode("utf-8")
+        mock_response.read.return_value = json.dumps(engine_payload).encode("utf-8")
         mock_response.__enter__.return_value = mock_response
 
         with patch("urllib.request.urlopen", return_value=mock_response) as mock_urlopen:
@@ -63,14 +63,14 @@ class TestFraudToolsIntegration(unittest.TestCase):
             # Verify safe read-only URL and GET method used
             mock_urlopen.assert_called_once()
             called_req = mock_urlopen.call_args[0][0]
-            self.assertIn("/audit?limit=200", called_req.full_url)
+            self.assertIn("/v1/transactions/TX1001", called_req.full_url)
             self.assertNotIn("/score", called_req.full_url)
+            self.assertEqual(called_req.get_method(), "GET")
 
             # Verify provenance and live data mapping
             self.assertIn("FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD", output)
-            self.assertIn("Live Component 2 Gateway Audit Log", output)
+            self.assertIn("Live Component 2 Gateway Decision Store", output)
             self.assertIn("Transaction ID:\nTX1001", output)
-            self.assertIn("User ID:\nu_live_user_42", output)
             self.assertIn("Recorded Fraud Score:\n0.9410", output)
             self.assertIn("Recorded Status:\nBLOCK", output)
             self.assertIn("Recorded Risk Level:\nHIGH", output)
@@ -79,44 +79,48 @@ class TestFraudToolsIntegration(unittest.TestCase):
             self.assertIn("0.8750", output)
             self.assertIn("Relational Stream Risk Score", output)
             self.assertIn("0.9120", output)
+            self.assertIn("ieee-cis-dev-20k", output)
+            self.assertIn("TransactionAmt: contribution +1.2500 (increases fraud risk)", output)
+            self.assertIn("freq__card1: contribution -0.4000 (decreases fraud risk)", output)
 
             # Verify Random Forest SHAP is NOT claimed to explain Component 2 model
             self.assertIn("Component 4's local synthetic Random Forest prototype is NOT used for this live transaction", output)
             self.assertIn("Probability calibration not established", output)
             self.assertNotIn("FALLBACK NOTICE", output)
 
-    def test_missing_transaction_live_fallback(self):
-        """Test when live audit service is active but doesn't have the requested transaction."""
-        live_audit_payload = {
-            "count": 1,
-            "entries": [
-                {
-                    "timestamp": "2026-10-14T18:25:00Z",
-                    "transaction_id": "TX9999",
-                    "user_id": "u_other",
-                    "behavioral_score": 0.2,
-                    "graph_score": 0.1,
-                    "risk_score": 0.15,
-                    "decision": "ALLOW",
-                    "reason": "Normal transaction",
-                    "attack_type": None,
-                }
-            ],
+    def test_step_up_maps_to_moderate(self):
+        """The engine spells STEP_UP; it must still map to a MODERATE risk level."""
+        engine_payload = {
+            "transaction_id": "EXE-1", "fraud_score": 0.6, "decision": "STEP_UP",
+            "model_version": "heuristic-untrained", "benchmark_model": False,
+            "explanation": {"rules": [], "streams": {"heuristic": 0.6}, "top_factors": [], "notes": ["n"]},
         }
-
         mock_response = MagicMock()
         mock_response.status = 200
-        mock_response.read.return_value = json.dumps(live_audit_payload).encode("utf-8")
+        mock_response.read.return_value = json.dumps(engine_payload).encode("utf-8")
         mock_response.__enter__.return_value = mock_response
 
         with patch("urllib.request.urlopen", return_value=mock_response):
+            output = get_fraud_analysis.invoke({"transaction_id": "EXE-1"})
+
+        self.assertIn("Recorded Risk Level:\nMODERATE", output)
+        self.assertIn("NOT a benchmark model", output)
+
+    def test_missing_transaction_live_fallback(self):
+        """Test when the live service is up but holds no decision for the transaction."""
+        not_found = urllib.error.HTTPError(
+            "http://localhost:8001/v1/transactions/TX1001", 404, "Not Found", {},
+            io.BytesIO(b'{"detail": "No decision is held for this transaction."}'),
+        )
+
+        with patch("urllib.request.urlopen", side_effect=not_found):
             output = get_fraud_analysis.invoke({"transaction_id": "TX1001"})
 
             # Must fall back to mock data with explicit labeling
             self.assertIn("FRAUD ANALYSIS — FALLBACK MOCK DATA", output)
             self.assertIn("FALLBACK NOTICE", output)
             self.assertIn("This record is NOT a live lookup result from Component 2", output)
-            self.assertIn("not found in Component 2 live audit log", output)
+            self.assertIn("not found in Component 2 live decision store", output)
 
             # Mock data values preserved
             self.assertIn("Transaction ID:\nTX1001", output)
