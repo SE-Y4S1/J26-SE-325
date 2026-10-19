@@ -17,6 +17,9 @@ try {
   }
 }
 
+// Component 2's enforced decision and Component 1's plan hash; see hashService.
+const PROVENANCE_COLUMNS = ["upstreamSource", "upstreamDecision", "upstreamModelVersion", "planHash"];
+
 class DuplicateTransactionError extends Error {
   constructor(message) {
     super(message);
@@ -90,6 +93,15 @@ class AuditDatabase {
       CREATE INDEX IF NOT EXISTS idx_audits_timestamp ON audits(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_audits_status ON audits(verificationStatus);
     `);
+
+    // Cross-component provenance columns, added after the first release. Nullable, so rows
+    // written before them stay valid, and added in place so an existing audits.sqlite upgrades.
+    const columns = new Set(this.db.prepare("PRAGMA table_info(audits)").all().map((c) => c.name));
+    for (const column of PROVENANCE_COLUMNS) {
+      if (!columns.has(column)) {
+        this.db.exec(`ALTER TABLE audits ADD COLUMN ${column} TEXT`);
+      }
+    }
   }
 
   prepareStatements() {
@@ -101,14 +113,16 @@ class AuditDatabase {
           reviewRequired, reviewerDecision, riskScore, confidence, amount,
           transactionType, reason, timestamp, reviewedAt, blockchainTxId,
           blockNumber, verificationStatus, isTampered, tamperedAt, tamperedField,
-          previousValue, lastVerifiedAt, createdAt, updatedAt
+          previousValue, lastVerifiedAt, createdAt, updatedAt,
+          upstreamSource, upstreamDecision, upstreamModelVersion, planHash
         ) VALUES (
           @transactionId, @auditId, @salt, @policyHash, @recordHash,
           @policyId, @policyVersion, @modelVersion, @aiDecision, @finalDecision,
           @reviewRequired, @reviewerDecision, @riskScore, @confidence, @amount,
           @transactionType, @reason, @timestamp, @reviewedAt, @blockchainTxId,
           @blockNumber, @verificationStatus, @isTampered, @tamperedAt, @tamperedField,
-          @previousValue, @lastVerifiedAt, @createdAt, @updatedAt
+          @previousValue, @lastVerifiedAt, @createdAt, @updatedAt,
+          @upstreamSource, @upstreamDecision, @upstreamModelVersion, @planHash
         )
       `),
       update: this.db.prepare(`
@@ -187,7 +201,11 @@ class AuditDatabase {
       previousValue: record.previousValue !== undefined ? String(record.previousValue) : null,
       lastVerifiedAt: record.lastVerifiedAt || null,
       createdAt: record.createdAt || now,
-      updatedAt: now
+      updatedAt: now,
+      upstreamSource: record.upstreamSource || null,
+      upstreamDecision: record.upstreamDecision || null,
+      upstreamModelVersion: record.upstreamModelVersion || null,
+      planHash: record.planHash || null
     };
   }
 
