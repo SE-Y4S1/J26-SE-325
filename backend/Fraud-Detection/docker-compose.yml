@@ -1,0 +1,40 @@
+# Component 02 only. Other team services are not defined here.
+# API alone:        docker compose up fraud-api
+# API plus Kafka:   docker compose --profile kafka up
+services:
+  fraud-api:
+    build: .
+    ports:
+      - "8082:8082"
+    environment:
+      FRAUD_ENABLE_KAFKA: "false"
+
+  kafka:
+    profiles: ["kafka"]
+    image: apache/kafka:3.9.1
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+
+  fraud-api-kafka:
+    profiles: ["kafka"]
+    build: .
+    depends_on:
+      - kafka
+    environment:
+      FRAUD_ENABLE_KAFKA: "true"
+      FRAUD_KAFKA_BOOTSTRAP: kafka:9092
+    ports:
+      - "8083:8082"

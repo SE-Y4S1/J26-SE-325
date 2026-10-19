@@ -1,0 +1,581 @@
+{
+  "dataset": "synthetic-fixture",
+  "benchmark_valid": false,
+  "results_are_research_benchmark": false,
+  "split_strategy": "time-ordered TransactionDT with no shared timestamp across splits",
+  "time_splits_are_ordered": true,
+  "rows": 360,
+  "features": [
+    "TransactionAmt",
+    "dist1",
+    "C1",
+    "freq__ProductCD",
+    "freq__DeviceType",
+    "freq__DeviceInfo",
+    "freq__card1"
+  ],
+  "class_balance": {
+    "train_fraud_rate": 0.16666666666666666,
+    "validation_fraud_rate": 0.18518518518518517,
+    "test_fraud_rate": 0.24074074074074073
+  },
+  "imbalance_method": "sklearn class_weight on training rows; neural pos_weight clipped by max_pos_weight; LSTM autoencoder trained on legitimate training sequences. The test split is not resampled.",
+  "gateway_thresholds": {
+    "step_up": 0.5579159051179886,
+    "block": 0.5599891090393067,
+    "step_up_fpr_budget": 0.05,
+    "block_fpr_budget": 0.01,
+    "legitimate_validation_rows": 22
+  },
+  "device_feature_lift": {
+    "auroc_with_device_features": 0.9831144465290806,
+    "auroc_without_device_features": 0.9849906191369606,
+    "lift": -0.0018761726078799779,
+    "device_columns": [
+      "freq__DeviceType",
+      "freq__DeviceInfo"
+    ],
+    "notes": [
+      "Lift is the test AUROC of logistic regression with device/identity columns minus the same model without those columns. Columns are freq__DeviceType, freq__DeviceInfo.",
+      "No simulated biometric column was included in this lift."
+    ]
+  },
+  "slice_block_rates": {
+    "desktop": {
+      "legitimate_rows": 20,
+      "block_rate": 0.1
+    },
+    "mobile": {
+      "legitimate_rows": 21,
+      "block_rate": 0.047619047619047616
+    }
+  },
+  "adversarial": {
+    "scored_model": "logistic_regression",
+    "fused_clean_auroc": 0.48968105065666034,
+    "why_tabular_scorer": "Camouflage, drift, and structuring are applied to feature rows and rescored with the trained logistic regression model. Rebuilding the full graph for every altered row is recorded as a limitation; the fused clean AUROC is included for comparison.",
+    "camouflage": {
+      "attack": "camouflage",
+      "auroc": 0.9193245778611632,
+      "clean_auroc": 0.9831144465290806,
+      "auroc_change": -0.06378986866791747,
+      "fraud_still_blocked": 1,
+      "fraud_rows": 13,
+      "notes": []
+    },
+    "slow_drift": {
+      "attack": "slow_drift",
+      "auroc": 0.9774859287054409,
+      "clean_auroc": 0.9831144465290806,
+      "auroc_change": -0.0056285178236397115,
+      "fraud_still_blocked": 12,
+      "fraud_rows": 13,
+      "notes": []
+    },
+    "structuring": {
+      "attack": "structuring",
+      "cases": 13,
+      "parts": 4,
+      "fully_allowed": 8,
+      "fully_allowed_rate": 0.6153846153846154,
+      "any_part_blocked": 3,
+      "notes": [
+        "Each fraud row is replaced by equal amount-parts in feature space. A case is fully allowed only when every part receives ALLOW."
+      ]
+    }
+  },
+  "scoring_latency": {
+    "logistic_regression": {
+      "batch_throughput_rows_per_s": 74906.36519496862,
+      "single_row_latency_ms_p50": 0.25934993755072355,
+      "timed_rows": 54,
+      "single_row_samples": 30
+    },
+    "gnn_only_full_graph": {
+      "batch_throughput_rows_per_s": 129594.2994971205,
+      "batch_seconds": 0.00277789996471256,
+      "rows": 360,
+      "notes": [
+        "One forward pass over the whole causal graph. This is not the time to score one transaction on its own."
+      ]
+    }
+  },
+  "models": [
+    {
+      "model": "logistic_regression",
+      "dataset": "synthetic-fixture",
+      "benchmark_valid": false,
+      "parameters": {
+        "C": 1.0,
+        "class_weight": "balanced",
+        "dual": false,
+        "fit_intercept": true,
+        "intercept_scaling": 1,
+        "l1_ratio": 0.0,
+        "max_iter": 300,
+        "penalty": "deprecated",
+        "random_state": 42,
+        "solver": "liblinear",
+        "tol": 0.0001,
+        "verbose": 0,
+        "warm_start": false
+      },
+      "features": "single-transaction tabular features; scaler and class weights fit on the training split only",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.9831144465290806,
+      "average_precision": 0.9583092346250239,
+      "precision": 0.8571428571428571,
+      "recall": 0.9230769230769231,
+      "f1": 0.8888888888888888,
+      "confusion_matrix": {
+        "tn": 39,
+        "fp": 2,
+        "fn": 1,
+        "tp": 12
+      },
+      "threshold": 0.5889589812515159,
+      "gateway": {
+        "fraud_rows": 13,
+        "legitimate_rows": 41,
+        "fraud_blocked": 10,
+        "fraud_blocked_rate": 0.7692307692307693,
+        "fraud_step_up": 2,
+        "legitimate_challenged": 2,
+        "legitimate_challenged_rate": 0.04878048780487805,
+        "legitimate_blocked": 0,
+        "legitimate_blocked_rate": 0.0,
+        "allow": 40,
+        "step_up": 4,
+        "block": 10,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.5882665130090814,
+          "block": 0.6536456690779001,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 22
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "svm",
+      "dataset": "synthetic-fixture",
+      "benchmark_valid": false,
+      "parameters": {
+        "C": 1.0,
+        "class_weight": "balanced",
+        "dual": "auto",
+        "fit_intercept": true,
+        "intercept_scaling": 1,
+        "loss": "squared_hinge",
+        "max_iter": 200,
+        "multi_class": "ovr",
+        "penalty": "l2",
+        "random_state": 42,
+        "tol": 0.0001,
+        "verbose": 0
+      },
+      "features": "single-transaction tabular features; scaler and class weights fit on the training split only",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.9831144465290806,
+      "average_precision": 0.9558091481168403,
+      "precision": 1.0,
+      "recall": 0.6923076923076923,
+      "f1": 0.8181818181818182,
+      "confusion_matrix": {
+        "tn": 41,
+        "fp": 0,
+        "fn": 4,
+        "tp": 9
+      },
+      "threshold": 0.353499192281885,
+      "gateway": {
+        "fraud_rows": 13,
+        "legitimate_rows": 41,
+        "fraud_blocked": 10,
+        "fraud_blocked_rate": 0.7692307692307693,
+        "fraud_step_up": 1,
+        "legitimate_challenged": 2,
+        "legitimate_challenged_rate": 0.04878048780487805,
+        "legitimate_blocked": 1,
+        "legitimate_blocked_rate": 0.024390243902439025,
+        "allow": 41,
+        "step_up": 2,
+        "block": 11,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.17465896903474384,
+          "block": 0.24927369309085073,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 22
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "random_forest",
+      "dataset": "synthetic-fixture",
+      "benchmark_valid": false,
+      "parameters": {
+        "bootstrap": true,
+        "ccp_alpha": 0.0,
+        "class_weight": "balanced_subsample",
+        "criterion": "gini",
+        "max_depth": 6,
+        "max_features": "sqrt",
+        "min_impurity_decrease": 0.0,
+        "min_samples_leaf": 5,
+        "min_samples_split": 2,
+        "min_weight_fraction_leaf": 0.0,
+        "n_estimators": 20,
+        "n_jobs": 1,
+        "oob_score": false,
+        "random_state": 42,
+        "verbose": 0,
+        "warm_start": false
+      },
+      "features": "single-transaction tabular features; scaler and class weights fit on the training split only",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.9249530956848031,
+      "average_precision": 0.8451447306535689,
+      "precision": 0.6,
+      "recall": 0.6923076923076923,
+      "f1": 0.6428571428571429,
+      "confusion_matrix": {
+        "tn": 35,
+        "fp": 6,
+        "fn": 4,
+        "tp": 9
+      },
+      "threshold": 0.40699708954501557,
+      "gateway": {
+        "fraud_rows": 13,
+        "legitimate_rows": 41,
+        "fraud_blocked": 0,
+        "fraud_blocked_rate": 0.0,
+        "fraud_step_up": 9,
+        "legitimate_challenged": 6,
+        "legitimate_challenged_rate": 0.14634146341463414,
+        "legitimate_blocked": 0,
+        "legitimate_blocked_rate": 0.0,
+        "allow": 39,
+        "step_up": 15,
+        "block": 0,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.411820063985301,
+          "block": 0.6896715211406699,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 22
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "static_gcn",
+      "dataset": "synthetic-fixture",
+      "benchmark_valid": false,
+      "parameters": {
+        "hidden": 8,
+        "epochs_ran": 3,
+        "learning_rate": 0.01
+      },
+      "features": "Directed edges go from earlier transactions to later ones that share card1 or DeviceInfo. Training edges stay inside the training split.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.5384615384615384,
+      "average_precision": 0.35982891306921966,
+      "precision": 0.22916666666666666,
+      "recall": 0.8461538461538461,
+      "f1": 0.36065573770491804,
+      "confusion_matrix": {
+        "tn": 4,
+        "fp": 37,
+        "fn": 2,
+        "tp": 11
+      },
+      "threshold": 0.6049488127231598,
+      "gateway": {
+        "fraud_rows": 13,
+        "legitimate_rows": 41,
+        "fraud_blocked": 5,
+        "fraud_blocked_rate": 0.38461538461538464,
+        "fraud_step_up": 0,
+        "legitimate_challenged": 15,
+        "legitimate_challenged_rate": 0.36585365853658536,
+        "legitimate_blocked": 11,
+        "legitimate_blocked_rate": 0.2682926829268293,
+        "allow": 34,
+        "step_up": 4,
+        "block": 16,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.6345178037881851,
+          "block": 0.6379574656486511,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 22
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "static_gat",
+      "dataset": "synthetic-fixture",
+      "benchmark_valid": false,
+      "parameters": {
+        "hidden": 8,
+        "epochs_ran": 3,
+        "learning_rate": 0.01
+      },
+      "features": "Directed edges go from earlier transactions to later ones that share card1 or DeviceInfo. Training edges stay inside the training split.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.425891181988743,
+      "average_precision": 0.2623834931446285,
+      "precision": 0.2,
+      "recall": 0.7692307692307693,
+      "f1": 0.31746031746031744,
+      "confusion_matrix": {
+        "tn": 1,
+        "fp": 40,
+        "fn": 3,
+        "tp": 10
+      },
+      "threshold": 0.4970008984208107,
+      "gateway": {
+        "fraud_rows": 13,
+        "legitimate_rows": 41,
+        "fraud_blocked": 2,
+        "fraud_blocked_rate": 0.15384615384615385,
+        "fraud_step_up": 1,
+        "legitimate_challenged": 7,
+        "legitimate_challenged_rate": 0.17073170731707318,
+        "legitimate_blocked": 6,
+        "legitimate_blocked_rate": 0.14634146341463414,
+        "allow": 44,
+        "step_up": 2,
+        "block": 8,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.5175229042768479,
+          "block": 0.5181119263172149,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 22
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "gnn_only",
+      "dataset": "synthetic-fixture",
+      "benchmark_valid": false,
+      "parameters": {
+        "hidden": 8,
+        "epochs_ran": 3,
+        "learning_rate": 0.01
+      },
+      "features": "Directed edges go from earlier transactions to later ones that share card1 or DeviceInfo. Training edges stay inside the training split.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.48968105065666034,
+      "average_precision": 0.2907527155947962,
+      "precision": 0.24444444444444444,
+      "recall": 0.8461538461538461,
+      "f1": 0.3793103448275862,
+      "confusion_matrix": {
+        "tn": 7,
+        "fp": 34,
+        "fn": 2,
+        "tp": 11
+      },
+      "threshold": 0.5440168678760529,
+      "gateway": {
+        "fraud_rows": 13,
+        "legitimate_rows": 41,
+        "fraud_blocked": 1,
+        "fraud_blocked_rate": 0.07692307692307693,
+        "fraud_step_up": 1,
+        "legitimate_challenged": 5,
+        "legitimate_challenged_rate": 0.12195121951219512,
+        "legitimate_blocked": 3,
+        "legitimate_blocked_rate": 0.07317073170731707,
+        "allow": 47,
+        "step_up": 3,
+        "block": 4,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.5579159051179886,
+          "block": 0.5599891090393067,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 22
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "lstm_only",
+      "dataset": "synthetic-fixture",
+      "benchmark_valid": false,
+      "parameters": {
+        "hidden": 8,
+        "sequence_length": 4,
+        "epochs_ran": 3,
+        "trained_on": "legitimate training sequences only"
+      },
+      "features": "Reconstruction error is scaled with the 5th and 95th percentiles of legitimate training errors.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.6744840525328331,
+      "average_precision": 0.37486520863532247,
+      "precision": 0.24074074074074073,
+      "recall": 1.0,
+      "f1": 0.3880597014925373,
+      "confusion_matrix": {
+        "tn": 0,
+        "fp": 41,
+        "fn": 0,
+        "tp": 13
+      },
+      "threshold": 0.07817570389693809,
+      "gateway": {
+        "fraud_rows": 13,
+        "legitimate_rows": 41,
+        "fraud_blocked": 1,
+        "fraud_blocked_rate": 0.07692307692307693,
+        "fraud_step_up": 0,
+        "legitimate_challenged": 1,
+        "legitimate_challenged_rate": 0.024390243902439025,
+        "legitimate_blocked": 1,
+        "legitimate_blocked_rate": 0.024390243902439025,
+        "allow": 52,
+        "step_up": 0,
+        "block": 2,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.9901710324967498,
+          "block": 1.0,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 22
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    },
+    {
+      "model": "fused_lstm_gnn",
+      "dataset": "synthetic-fixture",
+      "benchmark_valid": false,
+      "parameters": {
+        "fusion": {
+          "fallback": "validation_mixture",
+          "weights": [
+            0.0,
+            1.0
+          ],
+          "alpha_on_lstm": 0.0,
+          "flip_lstm": true,
+          "flip_gnn": false,
+          "seed": 42
+        },
+        "threshold_rule": "BLOCK starts at the validation legitimate-score quantile 1 - 0.01. STEP_UP starts at 1 - 0.05. Selected step_up=0.5579159051179886, block=0.5599891090393067."
+      },
+      "features": "The LSTM/GNN mixture weight is chosen on the earlier validation slice. A stream that ranks backwards there is reversed. Gateway cut-points use the later validation slice.",
+      "split_strategy": "see experiment summary",
+      "auroc": 0.48968105065666034,
+      "average_precision": 0.2907527155947962,
+      "precision": 0.24444444444444444,
+      "recall": 0.8461538461538461,
+      "f1": 0.3793103448275862,
+      "confusion_matrix": {
+        "tn": 7,
+        "fp": 34,
+        "fn": 2,
+        "tp": 11
+      },
+      "threshold": 0.5440168678760529,
+      "gateway": {
+        "fraud_rows": 13,
+        "legitimate_rows": 41,
+        "fraud_blocked": 1,
+        "fraud_blocked_rate": 0.07692307692307693,
+        "fraud_step_up": 1,
+        "legitimate_challenged": 5,
+        "legitimate_challenged_rate": 0.12195121951219512,
+        "legitimate_blocked": 3,
+        "legitimate_blocked_rate": 0.07317073170731707,
+        "allow": 47,
+        "step_up": 3,
+        "block": 4,
+        "notes": [],
+        "thresholds": {
+          "step_up": 0.5579159051179886,
+          "block": 0.5599891090393067,
+          "step_up_fpr_budget": 0.05,
+          "block_fpr_budget": 0.01,
+          "legitimate_validation_rows": 22
+        }
+      },
+      "timing": {
+        "notes": [
+          "This table records ranking quality. Single-request scoring latency is measured on the API service."
+        ]
+      },
+      "notes": [],
+      "error": null
+    }
+  ],
+  "source_metadata": {
+    "origin": "synthetic-fixture"
+  },
+  "artifact": "C:\\Users\\dhush\\Downloads\\research_project\\J26-SE-325\\Fraud-Detection\\experiments\\results\\synthetic-fixture\\fraud_bundle.joblib",
+  "notes": [
+    "Precision, recall, F1, and the confusion matrix use a threshold chosen by validation F1.",
+    "ALLOW, STEP_UP, and BLOCK use a separate false-positive budget on a later validation slice.",
+    "Simulated biometric columns are not part of this run unless they were already present in the frame.",
+    "This run is not a research benchmark. Do not cite these scores as IEEE-CIS, DGraphFin, or Elliptic results."
+  ]
+}

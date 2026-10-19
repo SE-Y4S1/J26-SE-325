@@ -2,8 +2,12 @@
 .claude/
 
 # Repo-root secrets read by docker-compose.yml. JWT_SECRET lives here and must never be
-# committed; .env.example carries the template.
+# committed; .env.example carries the template. Never commit Kaggle tokens either.
 .env
+.env.*
+!.env.example
+kaggle.json
+**/.kaggle/
 
 # Build artefacts. Added because integration work created a virtualenv and bytecode inside
 # backend/Agentic-Assistance/, which would otherwise have been committed into someone else's
@@ -15,4 +19,27 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
 node_modules/
+
+# Component 02 datasets, processed extracts, decision logs, and model weights.
+# Small metric JSON/CSV files under experiments/results may be kept locally.
+backend/Fraud-Detection/data/raw/
+backend/Fraud-Detection/data/processed/
+backend/Fraud-Detection/data/interim/
+backend/Fraud-Detection/artifacts/
+backend/Fraud-Detection/experiments/decision_log.jsonl
+backend/Fraud-Detection/experiments/logs/
+backend/Fraud-Detection/experiments/demo_stream.csv
+*.pt
+*.pth
+*.joblib
+
+# Local scan previews
+_taf_preview/
+_extract_taf.py
+
+# Playwright MCP scratch output
+.playwright-mcp/

@@ -1,0 +1,14 @@
+# Larger experiment. Still caps the multi-million-node graphs.
+# Set graph_limits.*_max_nodes to null only if you have enough RAM.
+dataset_name: ieee-cis
+benchmark_valid: true
+max_rows: null
+models:
+  rf_trees: 80
+  rf_depth: 12
+  hidden: 32
+  epochs: 8
+  seq_len: 8
+graph_limits:
+  dgraph_max_nodes: 20000
+  elliptic_max_nodes: 50000

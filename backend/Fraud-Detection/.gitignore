@@ -1,10 +1,13 @@
-# Local virtual environment - never commit this to the group repository.
-venv/
+data/raw/
+data/processed/
+data/interim/
+artifacts/
+experiments/decision_log.jsonl
+experiments/logs/
+experiments/demo_stream.csv
 .venv/
-
-# Python bytecode
 __pycache__/
-*.py[cod]
-
-# Generated at runtime by audit_log.py
-audit_log.jsonl
+.pytest_cache/
+*.pt
+*.pth
+*.joblib

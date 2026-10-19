@@ -1,0 +1,9 @@
+.venv
+data/raw
+data/processed
+artifacts
+experiments/results
+experiments/logs
+__pycache__
+.pytest_cache
+*.joblib
