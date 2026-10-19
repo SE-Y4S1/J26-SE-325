@@ -321,6 +321,10 @@ export function ChatScreen({
 
     try {
       const preferences = getValidatedResponsibleAIPreferences();
+      const historyPayload = messages.map((m) => ({
+        role: m.sender === "assistant" ? "assistant" : "user",
+        content: m.text,
+      }));
 
       // Call live FastAPI backend at http://localhost:8003/assistant/chat
       const response = await request<{
@@ -340,7 +344,7 @@ export function ChatScreen({
         responsible_ai?: Record<string, unknown>;
       }>("assistant", "/assistant/chat", {
         method: "POST",
-        body: { message: text, preferences },
+        body: { message: text, history: historyPayload, preferences },
         auth: false,
       });
 

@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from agent import agent, get_deterministic_fast_path
 from preferences_context import (
@@ -113,6 +113,7 @@ class ResponsibleAIPreferences(BaseModel):
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     message: str
+    history: list[dict[str, Any]] = Field(default_factory=list)
     preferences: ResponsibleAIPreferences = Field(default_factory=ResponsibleAIPreferences)
 
     @model_validator(mode="before")
@@ -122,6 +123,24 @@ class ChatRequest(BaseModel):
             prefs = data.get("preferences")
             if prefs is None or not isinstance(prefs, (dict, ResponsibleAIPreferences)):
                 data["preferences"] = ResponsibleAIPreferences()
+            raw_hist = data.get("history")
+            if not isinstance(raw_hist, list):
+                data["history"] = []
+            else:
+                cleaned_hist = []
+                for item in raw_hist:
+                    if isinstance(item, dict):
+                        role = str(item.get("role") or item.get("sender") or "user").strip().lower()
+                        content = str(item.get("content") or item.get("text") or "").strip()
+                        if role in ("assistant", "bot"):
+                            norm_role = "assistant"
+                        elif role == "system":
+                            norm_role = "system"
+                        else:
+                            norm_role = "user"
+                        if content:
+                            cleaned_hist.append({"role": norm_role, "content": content})
+                data["history"] = cleaned_hist
         return data
 
 
@@ -247,10 +266,10 @@ def chat(request: ChatRequest, authorization: str | None = Header(default=None))
     try:
         # ----------------------------------------------
         # Deterministic fast path for greetings, thanks,
-        # and simple conversational messages.
+        # contextual follow-ups, and simple conversational messages.
         # These requests must not call Ollama or financial tools.
         # ----------------------------------------------
-        fast_reply = get_deterministic_fast_path(request.message)
+        fast_reply = get_deterministic_fast_path(request.message, history=request.history)
         if fast_reply is not None:
             tools_used = []
             evidence = []
@@ -289,14 +308,21 @@ def chat(request: ChatRequest, authorization: str | None = Header(default=None))
             }
 
         # ----------------------------------------------
-        # Send user message to agent
+        # Send conversation history + current message to agent
         # ----------------------------------------------
+        langchain_msgs = []
+        for hist_item in request.history[-6:]:
+            h_role = hist_item.get("role")
+            h_content = hist_item.get("content", "")
+            if h_role in ("assistant", "bot"):
+                langchain_msgs.append(AIMessage(content=h_content))
+            else:
+                langchain_msgs.append(HumanMessage(content=h_content))
+        langchain_msgs.append(HumanMessage(content=request.message))
 
         result = agent.invoke(
             {
-                "messages": [
-                    HumanMessage(content=request.message)
-                ]
+                "messages": langchain_msgs
             }
         )
 

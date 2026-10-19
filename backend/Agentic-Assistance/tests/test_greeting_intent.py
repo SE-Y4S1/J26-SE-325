@@ -11,10 +11,13 @@ from agent import (
     is_farewell,
     is_conversational_acknowledgment,
     get_deterministic_fast_path,
+    classify_domain_gate,
     GREETING_FAST_RESPONSE,
     THANKS_FAST_RESPONSE,
     FAREWELL_FAST_RESPONSE,
     CONVERSATIONAL_FAST_RESPONSE,
+    OUT_OF_DOMAIN_RESPONSE,
+    AMBIGUOUS_CLARIFICATION_RESPONSE,
     is_arithmetic_query,
     has_financial_intent,
     should_route_to_financial_tools,
@@ -154,9 +157,23 @@ class TestFastPathIntentClassification(unittest.TestCase):
                 )
 
     def test_get_deterministic_fast_path_returns_expected_content(self):
-        # Greetings
-        for q in ["Hello", "Hi there", "Good morning", "What can you help me with?", "Who are you?"]:
+        # Greetings - general capability
+        for q in ["Hello", "What can you help me with?", "Who are you?"]:
             self.assertEqual(get_deterministic_fast_path(q), GREETING_FAST_RESPONSE)
+
+        # Contextual greetings specified in Section 4
+        self.assertEqual(
+            get_deterministic_fast_path("Good morning"),
+            "Good morning! What would you like to explore about the stock market or your portfolio?",
+        )
+        self.assertEqual(
+            get_deterministic_fast_path("Hi"),
+            "Hi! I'm FinTrust Agent. How can I help you with your investments, portfolio, or financial risk today?",
+        )
+        self.assertEqual(
+            get_deterministic_fast_path("Hi there"),
+            "Hi! I'm FinTrust Agent. How can I help you with your investments, portfolio, or financial risk today?",
+        )
 
         # Thanks
         for q in ["Thanks", "Thank you so much", "Appreciate it", "Many thanks"]:
@@ -186,19 +203,32 @@ class TestFastPathIntentClassification(unittest.TestCase):
                     f"Financial query '{query}' must NOT be fast-pathed",
                 )
 
-    def test_arithmetic_and_general_knowledge_never_fast_pathed(self):
-        general_queries = [
+    def test_out_of_domain_and_ambiguous_queries_fast_pathed_with_appropriate_responses(self):
+        ood_queries = [
             "what is 2 + 2",
             "calculate 15 * 4",
             "What is the capital of France?",
             "Who was Albert Einstein?",
-            "Can you check it?",
         ]
-        for query in general_queries:
+        for query in ood_queries:
             with self.subTest(query=query):
-                self.assertIsNone(
+                self.assertEqual(
                     get_deterministic_fast_path(query),
-                    f"General query '{query}' must NOT be fast-pathed",
+                    OUT_OF_DOMAIN_RESPONSE,
+                    f"Out-of-domain query '{query}' must receive polite domain refusal directly",
+                )
+
+        ambiguous_queries = [
+            "Can you check it?",
+            "What happened?",
+            "Why did this occur?",
+        ]
+        for query in ambiguous_queries:
+            with self.subTest(query=query):
+                self.assertEqual(
+                    get_deterministic_fast_path(query),
+                    AMBIGUOUS_CLARIFICATION_RESPONSE,
+                    f"Ambiguous query '{query}' must receive clarifying response directly",
                 )
 
 
@@ -378,7 +408,7 @@ class TestAgentInvocationAndToolRouting(unittest.TestCase):
                     [],
                     f"Greeting '{greeting}' must contain 0 tool calls",
                 )
-                self.assertIn("FinAgent", response_msg.content)
+                self.assertTrue(any(marker in response_msg.content for marker in ["FinTrust Agent", "portfolio", "investments"]))
                 self.assertNotIn("SYSTEM PROMPT", response_msg.content)
 
     def test_thanks_and_conversational_fast_path_zero_tools_zero_llm_calls(self):
@@ -436,10 +466,9 @@ class TestAgentInvocationAndToolRouting(unittest.TestCase):
             self.assertEqual(len(response_msg.tool_calls), 1)
             self.assertEqual(response_msg.tool_calls[0]["name"], "get_fraud_analysis")
 
-    def test_arithmetic_routes_to_unbound_llm_zero_tools(self):
-        """Simple arithmetic (e.g. 'what is 2 + 2') must route to llm.invoke with 0 tool calls."""
+    def test_arithmetic_routes_to_out_of_domain_refusal_zero_tools(self):
+        """Pure non-financial arithmetic (e.g. 'what is 2 + 2') must return polite domain refusal directly with 0 tool calls."""
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = AIMessage(content="2 + 2 = 4")
         mock_binding = MagicMock()
 
         with patch.object(agent, "llm", mock_llm), patch.object(agent, "llm_with_tools", mock_binding):
@@ -455,26 +484,21 @@ class TestAgentInvocationAndToolRouting(unittest.TestCase):
 
                 result = call_llm(state)
 
-                self.assertTrue(
-                    mock_llm.invoke.called,
-                    f"Base LLM without tools should be invoked for arithmetic query '{query}'",
-                )
                 self.assertFalse(
                     mock_binding.invoke.called,
                     f"Tool-bound LLM must NOT be invoked for arithmetic query '{query}'",
                 )
-
                 response_msg = result["messages"][0]
                 self.assertEqual(
                     getattr(response_msg, "tool_calls", []),
                     [],
                     f"Arithmetic query '{query}' must have 0 tool calls",
                 )
+                self.assertEqual(response_msg.content, OUT_OF_DOMAIN_RESPONSE)
 
-    def test_general_knowledge_routes_to_unbound_llm_zero_tools(self):
-        """General knowledge question must route to llm.invoke with 0 tool calls."""
+    def test_general_knowledge_routes_to_out_of_domain_refusal_zero_tools(self):
+        """General knowledge question must return polite domain refusal with 0 tool calls."""
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = AIMessage(content="The capital of France is Paris.")
         mock_binding = MagicMock()
 
         with patch.object(agent, "llm", mock_llm), patch.object(agent, "llm_with_tools", mock_binding):
@@ -486,28 +510,21 @@ class TestAgentInvocationAndToolRouting(unittest.TestCase):
 
             result = call_llm(state)
 
-            self.assertTrue(
-                mock_llm.invoke.called,
-                "Base LLM without tools should be invoked for general knowledge",
-            )
             self.assertFalse(
                 mock_binding.invoke.called,
                 "Tool-bound LLM must NOT be invoked for general knowledge",
             )
-
             response_msg = result["messages"][0]
             self.assertEqual(
                 getattr(response_msg, "tool_calls", []),
                 [],
                 "General knowledge question must contain 0 tool calls",
             )
+            self.assertEqual(response_msg.content, OUT_OF_DOMAIN_RESPONSE)
 
-    def test_ambiguous_question_routes_to_unbound_llm_zero_tools(self):
-        """Ambiguous non-financial question must route to llm.invoke to ask clarification without tools."""
+    def test_ambiguous_question_routes_to_clarification_zero_tools(self):
+        """Ambiguous non-financial question must return clarifying question directly without tools."""
         mock_llm = MagicMock()
-        mock_llm.invoke.return_value = AIMessage(
-            content="Could you please clarify what you would like me to check?"
-        )
         mock_binding = MagicMock()
 
         with patch.object(agent, "llm", mock_llm), patch.object(agent, "llm_with_tools", mock_binding):
@@ -519,21 +536,17 @@ class TestAgentInvocationAndToolRouting(unittest.TestCase):
 
             result = call_llm(state)
 
-            self.assertTrue(
-                mock_llm.invoke.called,
-                "Base LLM should be invoked for ambiguous questions to ask clarification",
-            )
             self.assertFalse(
                 mock_binding.invoke.called,
                 "Tool-bound LLM must NOT be invoked for ambiguous questions lacking financial context",
             )
-
             response_msg = result["messages"][0]
             self.assertEqual(
                 getattr(response_msg, "tool_calls", []),
                 [],
                 "Ambiguous query must contain 0 tool calls",
             )
+            self.assertEqual(response_msg.content, AMBIGUOUS_CLARIFICATION_RESPONSE)
 
     def test_fraud_query_routes_to_fraud_tool(self):
         """Questions about blocked transactions or fraud risk should use get_fraud_analysis."""
@@ -734,8 +747,26 @@ class TestAgentInvocationAndToolRouting(unittest.TestCase):
             self.assertIn("transparency", res["responsible_ai"])
 
             # Must be friendly fast path answer
-            self.assertIn("FinAgent", res["answer"])
+            self.assertIn("FinTrust Agent", res["answer"])
             self.assertEqual(res["answer"], GREETING_FAST_RESPONSE)
+
+    def test_main_chat_fast_path_out_of_domain_zero_tools(self):
+        """Calling /assistant/chat with out-of-domain query must return polite refusal with 0 tools directly."""
+        with patch.object(agent, "agent") as mock_agent_workflow:
+            for query in ["What is the capital of France?", "Tell me a joke", "Write a python function"]:
+                res = main.chat(ChatRequest(message=query))
+                self.assertFalse(mock_agent_workflow.invoke.called, "agent.invoke must not be called for out-of-domain")
+                self.assertEqual(res["agent_execution"]["number_of_tools"], 0)
+                self.assertEqual(res["agent_execution"]["tools_used"], [])
+                self.assertEqual(res["answer"], OUT_OF_DOMAIN_RESPONSE)
+
+    def test_main_chat_fast_path_ambiguous_clarification_zero_tools(self):
+        """Calling /assistant/chat with ambiguous query must return clarifying question with 0 tools."""
+        with patch.object(agent, "agent") as mock_agent_workflow:
+            res = main.chat(ChatRequest(message="Can you check it?"))
+            self.assertFalse(mock_agent_workflow.invoke.called)
+            self.assertEqual(res["agent_execution"]["number_of_tools"], 0)
+            self.assertEqual(res["answer"], AMBIGUOUS_CLARIFICATION_RESPONSE)
 
     def test_main_chat_fast_path_thanks_and_farewell(self):
         """Calling /assistant/chat with thanks or farewells must resolve via fast path."""

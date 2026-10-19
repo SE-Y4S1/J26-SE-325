@@ -28,13 +28,19 @@ export interface AssistantReply {
   responsible_ai: Record<string, unknown>;
 }
 
+export interface ChatHistoryItem {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
 export function askAssistant(
   message: string,
-  preferences?: ResponsibleAIPreferences
+  preferences?: ResponsibleAIPreferences,
+  history?: ChatHistoryItem[]
 ): Promise<AssistantReply> {
   return request<AssistantReply>("assistant", "/assistant/chat", {
     method: "POST",
-    body: { message, preferences },
+    body: { message, preferences, history: history || [] },
     // The user's own token, forwarded so get_execution_explanation can read THEIR execution
     // trace from the platform service. The assistant never mints one for another user.
     auth: true,

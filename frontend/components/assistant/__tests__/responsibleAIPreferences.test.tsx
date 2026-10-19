@@ -227,7 +227,7 @@ describe("Responsible AI Preferences - Frontend Enforcement", () => {
         "/assistant/chat",
         expect.objectContaining({
           method: "POST",
-          body: {
+          body: expect.objectContaining({
             message:
               "Analyze my investment portfolio. Show my current holdings and total valuation.",
             preferences: {
@@ -235,7 +235,7 @@ describe("Responsible AI Preferences - Frontend Enforcement", () => {
               personalizedContext: false,
               dataSharingConsent: true,
             },
-          },
+          }),
         })
       );
     });
