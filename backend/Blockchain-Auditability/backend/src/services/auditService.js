@@ -26,36 +26,36 @@ class AuditService {
     return masked;
   }
 
-  createRecord(record) {
+  async createRecord(record) {
     return this.db.createRecord(record);
   }
 
-  updateRecord(record) {
+  async updateRecord(record) {
     return this.db.updateRecord(record);
   }
 
-  saveRecord(record) {
+  async saveRecord(record) {
     return this.db.saveRecord(record);
   }
 
-  getRecord(transactionId) {
+  async getRecord(transactionId) {
     return this.db.getRecord(transactionId);
   }
 
-  getRecordByAuditId(auditId) {
+  async getRecordByAuditId(auditId) {
     return this.db.getRecordByAuditId(auditId);
   }
 
-  getAllRecords(masked = false) {
-    const records = this.db.getAllRecords();
+  async getAllRecords(masked = false) {
+    const records = await this.db.getAllRecords();
     return masked ? records.map((r) => this.maskRecord(r)) : records;
   }
 
-  clearAllRecords() {
+  async clearAllRecords() {
     return this.db.clearAllRecords();
   }
 
-  tamperRecord(transactionId, fieldToTamper, tamperedValue) {
+  async tamperRecord(transactionId, fieldToTamper, tamperedValue) {
     return this.db.tamperRecord(transactionId, fieldToTamper, tamperedValue);
   }
 
@@ -76,10 +76,10 @@ class AuditService {
    * - NOT_FOUND (Transaction not in off-chain database)
    */
   async verifyRecord(transactionId) {
-    let record = this.getRecord(transactionId);
+    let record = await this.getRecord(transactionId);
     if (!record) {
       // Check if transactionId might actually be an auditId
-      record = this.getRecordByAuditId(transactionId);
+      record = await this.getRecordByAuditId(transactionId);
       if (!record) {
         return {
           verified: false,
@@ -94,7 +94,7 @@ class AuditService {
     if (expectedAuditId.toLowerCase() !== record.auditId.toLowerCase()) {
       record.verificationStatus = "MODIFIED";
       record.lastVerifiedAt = new Date().toISOString();
-      this.db.saveRecord(record);
+      await this.db.saveRecord(record);
 
       return {
         verified: false,
@@ -136,7 +136,7 @@ class AuditService {
     if (!onChainAudit.exists) {
       record.verificationStatus = "ON_CHAIN_MISSING";
       record.lastVerifiedAt = new Date().toISOString();
-      this.db.saveRecord(record);
+      await this.db.saveRecord(record);
 
       return {
         verified: false,
@@ -163,7 +163,7 @@ class AuditService {
 
     record.verificationStatus = finalStatus;
     record.lastVerifiedAt = new Date().toISOString();
-    this.db.saveRecord(record);
+    await this.db.saveRecord(record);
 
     return {
       verified: isIntegrityValid,
@@ -194,7 +194,7 @@ class AuditService {
    * Retries publishing an on-chain commitment for records that previously failed.
    */
   async retryBlockchainCommitment(transactionId) {
-    const record = this.getRecord(transactionId);
+    const record = await this.getRecord(transactionId);
     if (!record) {
       throw new Error(`Record ${transactionId} not found`);
     }
@@ -203,7 +203,7 @@ class AuditService {
     const onChain = await blockchainService.getAudit(record.auditId);
     if (onChain.exists) {
       record.verificationStatus = onChain.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
-      this.db.saveRecord(record);
+      await this.db.saveRecord(record);
       return {
         success: true,
         reconciled: true,
@@ -222,7 +222,7 @@ class AuditService {
     record.blockNumber = blockchainRes.blockNumber;
     record.verificationStatus = blockchainRes.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
 
-    this.db.saveRecord(record);
+    await this.db.saveRecord(record);
 
     return {
       success: true,

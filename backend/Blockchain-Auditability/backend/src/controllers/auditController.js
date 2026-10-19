@@ -144,7 +144,7 @@ class AuditController {
         };
 
         try {
-          auditService.saveRecord(pendingRecord);
+          await auditService.saveRecord(pendingRecord);
         } catch (dbErr) {
           if (dbErr instanceof DuplicateTransactionError) {
             return res.status(409).json({ success: false, message: dbErr.message });
@@ -195,7 +195,7 @@ class AuditController {
         auditRecord.blockNumber = blockchainRes.blockNumber;
         auditRecord.verificationStatus = blockchainRes.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
 
-        auditService.createRecord(auditRecord);
+        await auditService.createRecord(auditRecord);
 
         return res.status(200).json({
           success: true,
@@ -207,7 +207,7 @@ class AuditController {
       } catch (chainErr) {
         if (chainErr instanceof BlockchainUnavailableError) {
           auditRecord.verificationStatus = "BLOCKCHAIN_FAILED";
-          auditService.saveRecord(auditRecord);
+          await auditService.saveRecord(auditRecord);
 
           return res.status(503).json({
             success: false,
@@ -219,7 +219,7 @@ class AuditController {
 
         if (chainErr instanceof BlockchainTransactionError) {
           auditRecord.verificationStatus = "BLOCKCHAIN_FAILED";
-          auditService.saveRecord(auditRecord);
+          await auditService.saveRecord(auditRecord);
 
           return res.status(502).json({
             success: false,
@@ -254,7 +254,7 @@ class AuditController {
         });
       }
 
-      const existingRecord = auditService.getRecord(transactionId);
+      const existingRecord = await auditService.getRecord(transactionId);
       if (!existingRecord) {
         return res.status(404).json({ success: false, message: `Record ${transactionId} not found.` });
       }
@@ -287,7 +287,7 @@ class AuditController {
         existingRecord.blockNumber = blockchainRes.blockNumber;
         existingRecord.verificationStatus = blockchainRes.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
 
-        auditService.saveRecord(existingRecord);
+        await auditService.saveRecord(existingRecord);
 
         return res.status(200).json({
           success: true,
@@ -298,7 +298,7 @@ class AuditController {
       } catch (chainErr) {
         if (chainErr instanceof BlockchainUnavailableError) {
           existingRecord.verificationStatus = "BLOCKCHAIN_FAILED";
-          auditService.saveRecord(existingRecord);
+          await auditService.saveRecord(existingRecord);
 
           return res.status(503).json({
             success: false,
@@ -372,7 +372,7 @@ class AuditController {
       const { transactionId } = req.params;
       const { field, tamperedValue } = req.body || {};
 
-      const result = auditService.tamperRecord(
+      const result = await auditService.tamperRecord(
         transactionId,
         field || "riskScore",
         tamperedValue !== undefined ? tamperedValue : 20
@@ -392,7 +392,7 @@ class AuditController {
    */
   async clearRecords(req, res) {
     try {
-      const result = auditService.clearAllRecords();
+      const result = await auditService.clearAllRecords();
       return res.status(200).json(result);
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });
@@ -404,7 +404,7 @@ class AuditController {
    */
   async getRecords(req, res) {
     try {
-      const records = auditService.getAllRecords(true); // true = mask salts
+      const records = await auditService.getAllRecords(true); // true = mask salts
       return res.status(200).json({ success: true, count: records.length, records });
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });
@@ -416,7 +416,7 @@ class AuditController {
    */
   async getStats(req, res) {
     try {
-      const records = auditService.getAllRecords(false);
+      const records = await auditService.getAllRecords(false);
       const blockchainStatus = blockchainService.getStatus();
 
       let approved = 0;

@@ -4,29 +4,30 @@ const fs = require("fs");
 let DatabaseEngine;
 let engineType = "";
 
-try {
-  DatabaseEngine = require("better-sqlite3");
-  engineType = "better-sqlite3";
-} catch {
+/**
+ * Resolved on first SQLite use, not at load: a Postgres deployment must boot even where
+ * better-sqlite3 failed to build and node:sqlite does not exist (Node < 22.5).
+ */
+function loadSqliteEngine() {
+  if (DatabaseEngine) return;
   try {
-    const nodeSqlite = require("node:sqlite");
-    DatabaseEngine = nodeSqlite.DatabaseSync;
-    engineType = "node:sqlite";
-  } catch (err) {
-    throw new Error("Neither better-sqlite3 nor node:sqlite is available in this Node runtime: " + err.message);
+    DatabaseEngine = require("better-sqlite3");
+    engineType = "better-sqlite3";
+  } catch {
+    try {
+      const nodeSqlite = require("node:sqlite");
+      DatabaseEngine = nodeSqlite.DatabaseSync;
+      engineType = "node:sqlite";
+    } catch (err) {
+      throw new Error("Neither better-sqlite3 nor node:sqlite is available in this Node runtime: " + err.message);
+    }
   }
 }
 
 // Component 2's enforced decision and Component 1's plan hash; see hashService.
 const PROVENANCE_COLUMNS = ["upstreamSource", "upstreamDecision", "upstreamModelVersion", "planHash"];
 
-class DuplicateTransactionError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "DuplicateTransactionError";
-    this.statusCode = 409;
-  }
-}
+const { DuplicateTransactionError } = require("./errors");
 
 class AuditDatabase {
   constructor(customDbPath = null) {
@@ -37,6 +38,7 @@ class AuditDatabase {
 
     const dbPath = customDbPath || process.env.DB_PATH || path.join(defaultDataDir, "audits.sqlite");
     this.dbPath = dbPath;
+    loadSqliteEngine();
     this.engineType = engineType;
     this.db = new DatabaseEngine(dbPath);
 
@@ -328,7 +330,21 @@ class AuditDatabase {
 
 let instance = null;
 
+/** Postgres when DATABASE_URL names one (hosted deployments); SQLite otherwise. */
+function postgresUrl() {
+  const url = process.env.DATABASE_URL || "";
+  return /^postgres(ql)?:\/\//.test(url) ? url : null;
+}
+
 function getDatabase(customPath = null) {
+  if (!customPath && postgresUrl()) {
+    if (!instance) {
+      // Required lazily so SQLite-only installs never need the pg package.
+      const { PostgresAuditDatabase } = require("./postgresDatabase");
+      instance = new PostgresAuditDatabase(postgresUrl());
+    }
+    return instance;
+  }
   if (!instance || customPath) {
     const db = new AuditDatabase(customPath);
     if (!customPath) {
@@ -339,8 +355,14 @@ function getDatabase(customPath = null) {
   return instance;
 }
 
+/** Tests only: install a store (e.g. Postgres over pg-mem) as the shared instance. */
+function useDatabase(db) {
+  instance = db;
+}
+
 module.exports = {
   AuditDatabase,
   DuplicateTransactionError,
-  getDatabase
+  getDatabase,
+  useDatabase
 };
