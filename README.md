@@ -1,4 +1,6 @@
-# An Integrated AI-Driven Smart Finance Platform
+# Nexa
+
+*An Integrated AI-Driven Smart Finance Platform*
 
 Liquidity-aware portfolio optimization, real-time fraud detection, blockchain auditability and
 explainable agentic assistance for stock, crypto and forex markets, delivered as one running
@@ -69,10 +71,10 @@ planning has not been operationalized as a real-time, user-facing service."*
 | # | Component | Owner | Location | Port | Stack | Status |
 |---|---|---|---|---|---|---|
 | 1 | Liquidity-aware forecasting and portfolio optimization | Nivakaran S. | [`backend/Portfolio-Optimization`](backend/Portfolio-Optimization) | 8000 | FastAPI, PyTorch, pymoo, scikit-fuzzy, Kafka | Built, 636 tests |
-| 2 | Real-time fraud detection | Dhushanthini R. | [`backend/Fraud-Detection`](backend/Fraud-Detection) | 8001 | FastAPI | Built; model streams are **simulated** (see 14) |
+| 2 | Real-time fraud detection | Dhushanthini R. | [`backend/Fraud-Detection`](backend/Fraud-Detection) | 8001 | FastAPI, PyTorch (LSTM-AE, GNN) | Built, 33 tests; untrained heuristic until a bundle is trained (see 14) |
 | 3 | Blockchain auditability | Abeysekara W.C.S.M | [`backend/Blockchain-Auditability`](backend/Blockchain-Auditability) | 8002 | Express, Solidity, Hardhat | Built; mock ledger when no node is running |
 | 4 | Explainable agentic assistance | W.V.A.D.K. Chamara | [`backend/Agentic-Assistance`](backend/Agentic-Assistance) | 8003 | FastAPI, LangGraph, Ollama, SHAP | Built; needs a local Ollama model |
-| - | Shared platform service (auth, portfolios) | - | [`backend/Platform`](backend/Platform) | 8100 | FastAPI, SQLAlchemy, SQLite | Built, 40 tests |
+| - | Shared platform service (auth, portfolios, executions) | - | [`backend/Platform`](backend/Platform) | 8100 | FastAPI, SQLAlchemy, SQLite | Built, 64 tests |
 | - | Web frontend | - | [`frontend`](frontend) | 3000 | Next.js 16, React 19, Tailwind v4 | Built |
 
 Each component directory has its own README with deeper detail. Component 1's is the most
@@ -109,8 +111,9 @@ portfolios    optimize +      + deterministic  hash, anchor,    + SHAP + RAI
 2. **The browser calls each backend directly.** No Next.js proxy. Every service therefore
    needs CORS, and the access token lives in the browser (a deliberate trade-off, see 13).
 3. **Tokens are issued once and verified everywhere.** The platform service signs JWTs; each
-   component verifies them with the shared `JWT_SECRET`. No service calls another on the
-   request path, so one being slow or restarting cannot take the others down.
+   component verifies them with the shared `JWT_SECRET`. Services do not call each other on
+   the request path, with one deliberate exception: executing a plan (see *Cross-component
+   data flow*), where the platform service must screen and anchor before holdings change.
 4. **Asynchronous decision events.** Component 1 publishes every optimize and withdraw
    decision to Kafka with a top-level `model_version`. The producer is fire-and-forget; a
    consumer being down never blocks a user request.
@@ -140,6 +143,67 @@ payload, and resolve it against the registry in `forecasting/model_registry.py`
 fingerprint, git commit, creation time). Every withdrawal response also carries
 `fuzzy_rule_trace` and, optionally, `agent_reasoning_trace`, which Component 4 turns into
 user-facing explanation.
+
+### Cross-component data flow
+
+A plan from Component 1 is a recommendation until it is executed. Executing it is the one
+path that crosses every component, and the platform service drives it because it owns the
+holdings that change:
+
+```
+ Component 1  /portfolio/withdraw  -> assets_to_sell            (sells, native quantities)
+              /portfolio/optimize  -> rebalance_orders          (buys and sells, FX-sized)
+      |
+      v   POST /portfolios/{id}/executions   {kind, plan}
+ Platform     derives orders from the plan, checks them against holdings, hashes plan+orders
+      |
+      v   POST /v1/transactions/score        transaction_id = execution id, pseudonymous account_key
+ Component 2  ALLOW / STEP_UP / BLOCK, score, gateway rules, feature attributions
+      |
+      v   POST /api/audit/evaluate           riskScore, upstreamDecision, planHash, c1+c2 model versions
+ Component 3  final decision = stricter of P001 and Component 2; canonical hash anchored on-chain
+      |
+      v
+ Platform     EXECUTED (holdings change) | PENDING_REVIEW | BLOCKED | HELD
+      .
+      .   read-only, by execution id
+ Component 4  get_execution_explanation: why the plan (C1 rule trace), why the decision
+              (C2 rules and attributions), proof it is unaltered (C3 verify)
+```
+
+| Outcome | When | Holdings |
+|---|---|---|
+| `EXECUTED` | Component 2 ALLOW and Component 3 anchored APPROVE | change |
+| `BLOCKED` | Component 2 BLOCK (enforced even if Component 3 is down), or Component 3 REJECT | unchanged |
+| `PENDING_REVIEW` | Component 2 STEP_UP, or P001 requires human review; the account holder re-enters their password to approve or reject, and the review is anchored before anything moves | unchanged until approved |
+| `HELD` | Component 2 or 3 unreachable. Fail closed: nothing executes unscreened or unanchored. `POST /executions/{id}/retry` resumes without rescoring | unchanged |
+
+The execution id doubles as Component 2's `transaction_id` and Component 3's `transactionId`,
+so any component can join the three records without a lookup table.
+
+**Corrections made to the originally proposed flow** (portfolio -> fraud -> blockchain, plus
+explainable AI):
+
+1. *Component 3 re-decided instead of recording Component 2's decision.* P001 looked only at
+   risk score and confidence, so a transaction Component 2 BLOCKED on a rule (structuring,
+   rate limit, reputation) at a moderate score was anchored as APPROVE: a ledger contradicting
+   the enforcement it is meant to prove. Component 3 now takes `upstreamDecision` and anchors
+   the stricter of the two, with the upstream decision inside the hash.
+2. *Component 1's decision was not on the ledger at all; only the fraud verdict was.* The
+   anchored record now carries the plan hash and Component 1's model version, so "which plan,
+   produced by which model, was screened" is provable, not only "what the fraud score was".
+3. *Explainable AI is a reader of all three, not a fourth stage after the blockchain.* It
+   explains why the plan, why the decision and whether the record verifies, using each
+   component's own evidence: Component 1's fuzzy rule trace, Component 2's attributions and
+   Component 3's verification. Component 4's synthetic SHAP model explains none of these and
+   is not used for them.
+4. *Rebalance trades must be sized by Component 1.* Its weights are fractions of an
+   FX-converted total; the platform stores no currency per holding, so it would mis-size every
+   trade in a mixed-currency portfolio. `/portfolio/optimize` now returns `rebalance_orders`.
+
+Not done: Kafka. Component 1 still publishes `portfolio.decisions` and Component 2 can consume
+`finance.transactions.raw`, but the execution path is synchronous HTTP because the user waits
+on its outcome. Wiring the topics together is an async alternative, not a dependency.
 
 ---
 
@@ -187,7 +251,7 @@ uv pip install -r requirements.txt
 JWT_SECRET=... AUTH_REQUIRED=true uv run uvicorn service.api:app --port 8000
 
 # components 2-4
-cd backend/Fraud-Detection      && pip install -r requirements.txt && uvicorn app:app --port 8001
+cd backend/Fraud-Detection      && pip install -r requirements.txt && FRAUD_API_PORT=8001 python scripts/run_api.py
 cd backend/Blockchain-Auditability/backend && npm install && PORT=8002 node src/index.js
 cd backend/Agentic-Assistance   && pip install -r requirements.txt && uvicorn main:app --port 8003
 
@@ -478,68 +542,26 @@ followed as written.
 
 ### 5.3 Component 2: real-time fraud detection with deterministic enforcement
 
-> **Principle:** the machine-learning side never decides anything. It produces a number. A
+> **Principle:** the machine-learning side never decides anything. It produces a score. A
 > deterministic gateway is the only component allowed to choose an action.
 
-```
- Transaction (validated)
-        |
-  +-----+------+
-  |            |
-Behavioural  Relational        amount, typing biometrics, navigation, frequency,
-analysis     analysis          device fingerprint  |  users / devices / beneficiaries /
-  |            |                                    locations / IPs graph
-LSTM-like    GNN-like
-score        score
-  +-----+------+
-        |  late fusion --> risk score
-  DETERMINISTIC SECURITY GATEWAY (thresholds + policy rules G1..G7)
-        |
- ALLOW / STEP-UP / BLOCK  -->  append-only audit log
-```
+Full method, datasets and executed benchmarks: [`backend/Fraud-Detection/README.md`](backend/Fraud-Detection/README.md)
+and `experiments/EXPERIMENT_REPORT.md` there.
 
-**Dual-stream design.** The behavioural stream scores deviation from a per-user baseline
-(EWMA sequence memory, max-pooled deviation, plus a drift term of short-term memory against a
-long-term anchor). The relational stream scores graph risk over a real entity graph (decayed
-two-hop risk propagation, device fan-out, shared beneficiaries and IPs). Late fusion combines
-them. The research design is an LSTM autoencoder and a GNN; the streams implement a narrow
-`Stream.score / Stream.commit` contract so trained PyTorch models drop in without touching the
-gateway, API or audit log.
-
-**Deterministic gateway** (`gateway.py`, thresholds in `config.py`):
-
-| Band | Condition | Action |
-|---|---|---|
-| Low | risk < 0.35 | ALLOW |
-| Medium | 0.35 <= risk < 0.70 | STEP-UP (OTP / biometric) |
-| High | risk >= 0.70 | BLOCK |
-
-Policy rules then run in a fixed order. Escalation rules can only raise severity; the single
-de-escalation rule can only lower it and can never undo a hard block.
-
-| Rule | Meaning | Effect |
-|---|---|---|
-| G1 | Amount >= 250,000 on a new device/payee while risk is elevated | BLOCK |
-| G2 | Device change with amount >= 25,000 | at least STEP-UP |
-| G3 | Relational risk >= 0.75 | at least STEP-UP |
-| G4 | Account <= 7 days old moving >= 10,000 | at least STEP-UP |
-| G5 | Behavioural >= 0.90 and relational >= 0.60 | BLOCK |
-| G7 | Split transfers to one payee total >= the single-transfer limit | BLOCK |
-| G6 | Micro-payment from an established, clean account | capped at STEP-UP |
-
-**Adversarial evaluation** (`adversarial_test.py`, no attack tooling, only synthetic numbers
-fed to the scorer):
-
-| Attack | What it tests | Finding |
-|---|---|---|
-| Camouflage | Attacker imitates normal behaviour but keeps mule device, beneficiary and IP | Behaviour can be faked, relationships cannot. A behaviour-only model would ALLOW the final stage (0.098); the dual stream still returns STEP-UP |
-| Slow drift | Small daily behaviour nudges | The drift term accumulates what reconstruction error alone would miss. The anchor learns only from ALLOWed transactions, so an attacker cannot redefine "normal" |
-| Structuring | 360,000 split into eight 45,000 transfers | At split 6 fused risk is only 0.603 (medium band), yet rule G7 BLOCKs because the running total reached the single-transfer limit. The clearest argument for keeping enforcement out of the model |
-
-**Explainability.** Every response lists plain-English reasons ranked by contribution (new
-device, unusual typing, impossible travel, structuring, connection to previously blocked
-entities) plus the rules that fired. Every response is tagged
-`"model_mode": "SIMULATED_PROTOTYPE"`.
+* **Models.** An LSTM autoencoder scores how badly a short per-account sequence reconstructs;
+  GCN/GAT graph models pass messages from earlier transactions sharing an account or device.
+  A fusion weight chosen on the validation slice combines them. Plain PyTorch, no PyTorch
+  Geometric. Baselines: logistic regression, SVM, random forest.
+* **Benchmarks.** IEEE-CIS (20k and 100k earliest rows by `TransactionDT`), Elliptic, with
+  time-ordered splits, train-only scalers and an untouched test slice. Results in
+  `experiments/results/`.
+* **Gateway** (`fraud_engine/gateway`). Cut-points are chosen from **legitimate validation
+  scores**: about 5% of legitimate traffic may reach STEP_UP, about 1% BLOCK. Amount, rate
+  limit, IP reputation and concept drift can only make the action stricter.
+* **Privacy.** Requests carrying a name, email, card number, password or raw network address
+  are rejected; callers send pseudonymous `account_key` / `device_key` values.
+* **Honesty.** Without a trained bundle the service answers with `heuristic-untrained` and
+  says so in every response (`benchmark_model: false`); that score is not a research result.
 
 ---
 
@@ -614,7 +636,7 @@ integration touched as little as possible.
 | Component | What it needed to join |
 |---|---|
 | C1 Portfolio | nothing: CORS, JWT and `/health` were designed in |
-| C2 Fraud | nothing: already had CORS and `/health` |
+| C2 Fraud | CORS (from `ALLOWED_ORIGINS`) and a read-only `GET /v1/transactions/{id}` so Component 4 can read the enforced decision |
 | C3 Audit | nothing: already had CORS, `/api/health`, and read `PORT` from the environment |
 | C4 Assistant | CORS middleware and a `/health` endpoint: 39 added lines, 0 removed |
 
@@ -696,7 +718,7 @@ backend/
     configs/                  universe, news channels, keyword overrides
     docker/                   Dockerfile, Prometheus config
     tests/
-  Fraud-Detection/          Component 2 (app, pipeline, fraud_model, gateway, audit_log)
+  Fraud-Detection/          Component 2 (src/fraud_engine: models, gateway, api, evaluation; experiments)
   Blockchain-Auditability/  Component 3
     backend/                  Express API (policy, hashing, ledger adapter)
     blockchain/               AuditRegistry.sol, Hardhat config, tests
@@ -723,13 +745,17 @@ FastAPI service.
 | GET | `/auth/me` | Current user |
 | GET, POST | `/portfolios` | List / create |
 | GET, PUT, DELETE | `/portfolios/{id}` | Read / update / delete |
+| POST | `/portfolios/{id}/executions` | Execute a Component 1 plan through Components 2 and 3 |
+| GET | `/executions`, `/executions/{id}` | List / full cross-component trace |
+| POST | `/executions/{id}/confirm` | Step-up: re-enter password to approve or reject a pending execution |
+| POST | `/executions/{id}/retry` | Resume a HELD execution once Component 2 or 3 is back |
 | GET | `/health` | Liveness and database check |
 
 ### Component 1 (:8000)
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/portfolio/optimize` | MOEA/D allocation with a selection rule |
+| POST | `/portfolio/optimize` | MOEA/D allocation with a selection rule, plus the `rebalance_orders` that realise it |
 | POST | `/portfolio/withdraw` | Fuzzy-GA liquidation plan (optionally agent-driven) |
 | POST | `/forecast` | Quantile forecasts (503 until a head is registered) |
 | GET | `/market/search?q=` | Search across CSE, Binance, Yahoo |
@@ -746,12 +772,14 @@ FastAPI service.
 
 ### Component 2 (:8001)
 
-`GET /health`, `POST /score`, `POST /simulate-attack` (camouflage, slow_drift, structuring),
-`GET /audit`, `GET /config`, `POST /reset`, `GET /pipeline`.
+`GET /health`, `POST /v1/transactions/score`, `GET /v1/transactions/{id}` (read back a
+decision), `GET /v1/decisions/summary`, `POST /v1/feedback`,
+`POST /v1/admin/apply-feedback-calibration`, `GET /v1/dashboard`.
 
 ### Component 3 (:8002)
 
-`GET /api/health`, `POST /api/audit/evaluate`, `POST /api/audit/review`,
+`GET /api/health`, `POST /api/audit/evaluate` (optional `upstreamDecision` and `planHash`),
+`POST /api/audit/review`,
 `GET /api/audit/records`, `GET /api/audit/stats`, `GET /api/audit/:transactionId/verify`,
 `POST /api/audit/:transactionId/tamper`, `POST /api/audit/reset`.
 
@@ -807,8 +835,11 @@ Next.js version differs from older guides.
 | Suite | Count | Run |
 |---|---|---|
 | Component 1 (pytest) | 636 collected | `cd backend/Portfolio-Optimization && uv run pytest -q` |
-| Platform (pytest) | 40 | `cd backend/Platform && uv run pytest -q` |
-| Frontend unit (Jest) | | `cd frontend && npm test` |
+| Platform (pytest) | 64 | `cd backend/Platform && uv run pytest -q` |
+| Component 2 (pytest) | 33 | `cd backend/Fraud-Detection && pytest -q` |
+| Component 3 backend (Jest) | 28 | `cd backend/Blockchain-Auditability/backend && npm test` |
+| Component 4 (pytest) | 107 | `cd backend/Agentic-Assistance && pytest -q tests` |
+| Frontend unit (Jest) | 53 | `cd frontend && npm test` |
 | Frontend end-to-end (Playwright) | | `npm run test:e2e` |
 | Contract (Hardhat) | | `cd backend/Blockchain-Auditability/blockchain && npx hardhat test` |
 
@@ -865,17 +896,21 @@ Stated plainly because each is a deliberate trade-off.
 
 ## 14. Known limitations and honest caveats
 
-1. **Component 2's models are simulated.** No LSTM autoencoder or GNN is trained. The two
-   streams are deterministic heuristics with hand-chosen weights; the gateway, policy rules,
-   explainability and audit trail are real. No false-positive or false-negative rate is claimed.
+1. **Component 2 runs its untrained heuristic unless a bundle is present.** The LSTM
+   autoencoder and GNN are real and benchmarked offline (`experiments/results/`), but trained
+   weights are git-ignored, so a fresh checkout and the Docker image score with
+   `heuristic-untrained` until `scripts/train_benchmark.py` writes `artifacts/fraud_bundle.joblib`.
+   Every response says which one answered.
 2. **Component 3 anchors hashes, not zero-knowledge proofs.** It uses a SHA-256 commitment
    scheme; Merkle trees and ZKPs are not implemented. Without a Hardhat node it uses an
    in-memory mock ledger.
-3. **Component 3 and 4 do not yet consume the Kafka topic.** Component 1 publishes
-   `portfolio.decisions`; the downstream consumers are designed but the integration today is
-   through the HTTP screens.
-4. **Component 4 evidence is mock data.** Its fraud tool is a Random Forest trained on a
-   dozen mock rows, the fairness check is a placeholder, and the trust study, Trust Panel
+3. **Kafka is not on the execution path.** Component 1 publishes `portfolio.decisions` and
+   Component 2 can consume `finance.transactions.raw`, but plans move through Components 2 and
+   3 by synchronous HTTP from the platform service (see *Cross-component data flow*).
+   STEP_UP is satisfied by password re-entry; an OTP or device biometric is not built.
+4. **Component 4's SHAP model is a prototype.** For executions and live Component 2
+   decisions it reports the components' own evidence; the Random Forest trained on a dozen
+   mock rows only explains its mock fallback records, the fairness check is a placeholder, and the trust study, Trust Panel
    confirmation/rollback and consent flows are not built.
 5. **Component 4 model alias on the development machine.** `llama3.2:3b` is an alias for
    `gemma4-e4b` there; do not attribute outputs to Llama 3.2.
