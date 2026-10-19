@@ -1,146 +1,235 @@
-const fs = require("fs");
-const path = require("path");
+const { getDatabase, DuplicateTransactionError } = require("../db/database");
 const hashService = require("./hashService");
-const blockchainService = require("./blockchainService");
+const { blockchainService, BlockchainUnavailableError, BlockchainTransactionError } = require("./blockchainService");
+const { computePolicyHash } = require("./policyDefinition");
 
 /**
- * Off-Chain Audit Service & Data Repository
- * Handles persistent storage, verification logic, and tamper simulation.
+ * Off-Chain Audit Service & Verification Engine
+ * Backed by durable SQLite storage and connected to live EVM smart contract commitments.
  */
 class AuditService {
   constructor() {
-    this.dataDir = path.join(__dirname, "../../data");
-    this.filePath = path.join(this.dataDir, "audits.json");
-    this.memoryStore = new Map();
-    this.initStorage();
-  }
-
-  initStorage() {
-    try {
-      if (!fs.existsSync(this.dataDir)) {
-        fs.mkdirSync(this.dataDir, { recursive: true });
-      }
-      if (fs.existsSync(this.filePath)) {
-        const rawData = fs.readFileSync(this.filePath, "utf8");
-        const list = JSON.parse(rawData);
-        list.forEach(record => this.memoryStore.set(record.transactionId, record));
-      }
-    } catch (err) {
-      console.error("[AuditService] Error initializing storage:", err.message);
-    }
-  }
-
-  persist() {
-    try {
-      const records = Array.from(this.memoryStore.values());
-      fs.writeFileSync(this.filePath, JSON.stringify(records, null, 2), "utf8");
-    } catch (err) {
-      console.error("[AuditService] Error persisting audits:", err.message);
-    }
-  }
-
-  saveRecord(record) {
-    this.memoryStore.set(record.transactionId, record);
-    this.persist();
-    return record;
-  }
-
-  clearAllRecords() {
-    this.memoryStore.clear();
-    this.persist();
-    return { success: true, message: "All off-chain audit records cleared successfully." };
-  }
-
-  getRecord(transactionId) {
-    return this.memoryStore.get(transactionId) || null;
-  }
-
-  getAllRecords() {
-    const list = Array.from(this.memoryStore.values());
-    // Sort descending by timestamp
-    return list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    this.db = getDatabase();
   }
 
   /**
-   * Verification Logic:
-   * 1. Retrieve the off-chain audit record.
-   * 2. Reconstruct the canonical audit data structure.
-   * 3. Calculate SHA-256 hash again.
-   * 4. Retrieve stored hash from blockchain commitment.
-   * 5. Compare calculated hash with blockchain hash.
-   * 6. Return VERIFIED or INTEGRITY_FAILED.
+   * Helper to mask cryptographic salt before returning to external callers.
+   * Full salt is stored in SQLite for integrity verification.
+   */
+  maskRecord(record) {
+    if (!record) return null;
+    const masked = { ...record };
+    if (masked.salt && masked.salt.length > 8) {
+      masked.saltMasked = `${masked.salt.substring(0, 8)}…`;
+      delete masked.salt;
+    }
+    return masked;
+  }
+
+  createRecord(record) {
+    return this.db.createRecord(record);
+  }
+
+  updateRecord(record) {
+    return this.db.updateRecord(record);
+  }
+
+  saveRecord(record) {
+    return this.db.saveRecord(record);
+  }
+
+  getRecord(transactionId) {
+    return this.db.getRecord(transactionId);
+  }
+
+  getRecordByAuditId(auditId) {
+    return this.db.getRecordByAuditId(auditId);
+  }
+
+  getAllRecords(masked = false) {
+    const records = this.db.getAllRecords();
+    return masked ? records.map((r) => this.maskRecord(r)) : records;
+  }
+
+  clearAllRecords() {
+    return this.db.clearAllRecords();
+  }
+
+  tamperRecord(transactionId, fieldToTamper, tamperedValue) {
+    return this.db.tamperRecord(transactionId, fieldToTamper, tamperedValue);
+  }
+
+  /**
+   * Strict Cryptographic Verification Engine
+   * Validates:
+   * 1. Audit ID derivation (sha256(txId:salt))
+   * 2. Canonical SHA-256 record hash over current off-chain state
+   * 3. On-chain commitment retrieval from AuditRegistry smart contract
+   * 4. Cryptographic equivalence: calculatedHash === onChainRecordHash
+   * 5. Policy specification equivalence: record.policyHash === onChainPolicyHash
+   * 
+   * Returns one of:
+   * - VERIFIED_ON_CHAIN (Live blockchain match)
+   * - VERIFIED_SIMULATED (Mock environment match)
+   * - MODIFIED (Integrity failure / hash mismatch)
+   * - ON_CHAIN_MISSING (No commitment found on-chain)
+   * - NOT_FOUND (Transaction not in off-chain database)
    */
   async verifyRecord(transactionId) {
-    const record = this.getRecord(transactionId);
+    let record = this.getRecord(transactionId);
     if (!record) {
+      // Check if transactionId might actually be an auditId
+      record = this.getRecordByAuditId(transactionId);
+      if (!record) {
+        return {
+          verified: false,
+          status: "NOT_FOUND",
+          message: `Audit record for '${transactionId}' was not found in off-chain database.`
+        };
+      }
+    }
+
+    // 1. Verify internal pseudonymous auditId derivation
+    const expectedAuditId = hashService.computeAuditId(record.transactionId, record.salt);
+    if (expectedAuditId.toLowerCase() !== record.auditId.toLowerCase()) {
+      record.verificationStatus = "MODIFIED";
+      record.lastVerifiedAt = new Date().toISOString();
+      this.db.saveRecord(record);
+
       return {
         verified: false,
-        status: "NOT_FOUND",
-        message: `Audit record for transaction ${transactionId} was not found in off-chain database.`
+        status: "MODIFIED",
+        message: "ALERT: Cryptographic auditId derivation mismatch. The transaction salt or ID has been tampered with.",
+        details: {
+          transactionId: record.transactionId,
+          auditId: record.auditId,
+          expectedAuditId,
+          isTampered: true
+        }
       };
     }
 
-    // 1. Reconstruct canonical representation & compute hash
-    const { hash: calculatedHash, canonicalPayload } = hashService.generateCanonicalHash(record);
+    // 2. Reconstruct canonical representation & compute fresh SHA-256
+    const { hash: calculatedCurrentHash, canonicalPayload } = hashService.generateCanonicalHash(record);
 
-    // 2. Retrieve on-chain commitment from blockchain
-    const onChainAudit = await blockchainService.getAudit(transactionId);
+    // 3. Query on-chain commitment from AuditRegistry contract
+    let onChainAudit;
+    try {
+      onChainAudit = await blockchainService.getAudit(record.auditId);
+    } catch (err) {
+      if (err instanceof BlockchainUnavailableError) {
+        return {
+          verified: false,
+          status: "BLOCKCHAIN_UNAVAILABLE",
+          message: `Cannot verify on-chain integrity: ${err.message}`,
+          details: {
+            transactionId: record.transactionId,
+            auditId: record.auditId,
+            calculatedCurrentHash
+          }
+        };
+      }
+      throw err;
+    }
 
-    const blockchainHash = onChainAudit.exists ? onChainAudit.recordHash : record.hash;
-    const storedHash = record.hash;
+    // 4. Verification decisions
+    if (!onChainAudit.exists) {
+      record.verificationStatus = "ON_CHAIN_MISSING";
+      record.lastVerifiedAt = new Date().toISOString();
+      this.db.saveRecord(record);
 
-    // 3. Integrity comparison
-    const hashesMatch = calculatedHash === blockchainHash && calculatedHash === storedHash;
+      return {
+        verified: false,
+        status: "ON_CHAIN_MISSING",
+        message: `No on-chain commitment exists for auditId ${record.auditId}. Record has not been anchored to the blockchain.`,
+        details: {
+          transactionId: record.transactionId,
+          auditId: record.auditId,
+          storedOffChainHash: record.recordHash || record.hash,
+          calculatedCurrentHash,
+          onChainData: null
+        }
+      };
+    }
 
-    const resultStatus = hashesMatch ? "VERIFIED" : "INTEGRITY_FAILED";
-    
-    // Update local record verification status
-    record.verificationStatus = resultStatus;
+    const hashesMatch = calculatedCurrentHash.toLowerCase() === onChainAudit.recordHash.toLowerCase();
+    const policyMatches = record.policyHash.toLowerCase() === onChainAudit.policyHash.toLowerCase();
+    const isIntegrityValid = hashesMatch && policyMatches;
+
+    let finalStatus = "MODIFIED";
+    if (isIntegrityValid) {
+      finalStatus = onChainAudit.isMock ? "VERIFIED_SIMULATED" : "VERIFIED_ON_CHAIN";
+    }
+
+    record.verificationStatus = finalStatus;
     record.lastVerifiedAt = new Date().toISOString();
-    this.saveRecord(record);
+    this.db.saveRecord(record);
 
     return {
-      verified: hashesMatch,
-      status: resultStatus,
-      message: hashesMatch
-        ? "Audit record integrity successfully verified against blockchain commitment."
-        : "ALERT: Cryptographic integrity failure detected! Calculated SHA-256 does not match blockchain commitment.",
+      verified: isIntegrityValid,
+      status: finalStatus,
+      message: isIntegrityValid
+        ? (onChainAudit.isMock
+            ? "Record integrity verified against simulated blockchain adapter."
+            : "Cryptographic integrity successfully verified against immutable on-chain smart contract commitment.")
+        : "ALERT: Cryptographic integrity failure detected! Current record data does not match on-chain commitment.",
       details: {
-        transactionId,
-        storedOffChainHash: storedHash,
-        calculatedCurrentHash: calculatedHash,
-        blockchainOnChainHash: blockchainHash,
-        isTampered: record.isTampered || false,
+        transactionId: record.transactionId,
+        auditId: record.auditId,
+        storedOffChainHash: record.recordHash || record.hash,
+        calculatedCurrentHash,
+        blockchainOnChainHash: onChainAudit.recordHash,
+        policyHash: record.policyHash,
+        onChainPolicyHash: onChainAudit.policyHash,
+        blockTimestamp: onChainAudit.timestamp,
+        submitter: onChainAudit.submitter,
+        isTampered: record.isTampered || !isIntegrityValid,
         canonicalPayload,
-        onChainData: onChainAudit.exists ? onChainAudit : null
+        onChainData: onChainAudit
       }
     };
   }
 
   /**
-   * Simulate Tampering (Development Feature for Research Demo)
-   * Modifies an off-chain audit field (e.g. riskScore) WITHOUT updating the blockchain hash.
+   * Retries publishing an on-chain commitment for records that previously failed.
    */
-  tamperRecord(transactionId, fieldToTamper = "riskScore", tamperedValue = 20) {
+  async retryBlockchainCommitment(transactionId) {
     const record = this.getRecord(transactionId);
     if (!record) {
-      throw new Error(`Record ${transactionId} not found.`);
+      throw new Error(`Record ${transactionId} not found`);
     }
 
-    const previousValue = record[fieldToTamper];
-    record[fieldToTamper] = tamperedValue;
-    record.isTampered = true;
-    record.tamperedAt = new Date().toISOString();
-    record.tamperedField = fieldToTamper;
-    record.previousValue = previousValue;
-    record.verificationStatus = "TAMPER_SUSPECTED";
+    // Reconciliation: check if it was already recorded on-chain
+    const onChain = await blockchainService.getAudit(record.auditId);
+    if (onChain.exists) {
+      record.verificationStatus = onChain.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
+      this.db.saveRecord(record);
+      return {
+        success: true,
+        reconciled: true,
+        message: "Record was already committed on-chain.",
+        record: this.maskRecord(record)
+      };
+    }
 
-    this.saveRecord(record);
+    const blockchainRes = await blockchainService.recordAudit(
+      record.auditId,
+      record.recordHash,
+      record.policyHash
+    );
+
+    record.blockchainTxId = blockchainRes.blockchainTxId;
+    record.blockNumber = blockchainRes.blockNumber;
+    record.verificationStatus = blockchainRes.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
+
+    this.db.saveRecord(record);
 
     return {
       success: true,
-      message: `Tampering simulated successfully on transaction ${transactionId}. Field '${fieldToTamper}' modified from ${previousValue} to ${tamperedValue}.`,
-      tamperedRecord: record
+      reconciled: false,
+      message: "Successfully published commitment to smart contract.",
+      blockchain: blockchainRes,
+      record: this.maskRecord(record)
     };
   }
 }

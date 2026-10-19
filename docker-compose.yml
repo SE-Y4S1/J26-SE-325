@@ -56,11 +56,13 @@ services:
         # compose service names, which only resolve inside the network.
         NEXT_PUBLIC_PLATFORM_URL: http://localhost:8100
         NEXT_PUBLIC_PORTFOLIO_URL: http://localhost:8000
+        NEXT_PUBLIC_FRAUD_URL: http://localhost:8001
+        NEXT_PUBLIC_AUDIT_URL: http://localhost:8002
+        NEXT_PUBLIC_ASSISTANT_URL: http://localhost:8003
     ports:
       - "3000:3000"
     depends_on:
       - platform
-      - component1
     restart: unless-stopped
 
   # --- supporting infrastructure ---------------------------------------------------------
@@ -162,34 +164,74 @@ services:
       start_period: 90s
     restart: unless-stopped
 
-  component4:                      # Agentic Assistance  (W V A D K Chamara)
-    image: python:3.12-slim
-    working_dir: /app
+  # --- Ollama Local LLM Engine -----------------------------------------------------------
+  # Internal only: port 11434 is exposed to the Docker network but NOT published to host
+  # to prevent port conflicts with any native Ollama instance running on the host.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: finagent-ollama
+    restart: unless-stopped
     volumes:
-      - ./backend/Agentic-Assistance:/app
-    # Its own requirements.txt, rather than a guessed package list. An earlier version of
-    # this file installed langchain-openai and shap: neither is used by the service, and it
-    # omitted langchain-ollama, which is.
-    command: >
-      sh -c "pip install --quiet --no-cache-dir -r requirements.txt &&
-             uvicorn main:app --host 0.0.0.0 --port 8003"
-    ports: ["8003:8003"]
-    environment:
-      ALLOWED_ORIGINS: http://localhost:3000
-      # The agent talks to OLLAMA, not OpenAI -- agent.py uses ChatOllama. Inside a
-      # container "localhost" is the container, so it has to be pointed at the host
-      # explicitly or every chat call fails with a connection error.
-      OLLAMA_HOST: http://host.docker.internal:11434
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - ollama_data:/root/.ollama
+    expose:
+      - "11434"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8003/health')\""]
-      interval: 15s
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 5s
       timeout: 5s
       retries: 10
-      start_period: 120s
+      start_period: 10s
+
+  # --- Ollama Model Initializer ----------------------------------------------------------
+  # Automatically downloads llama3.2:3b if not already present in the persistent volume.
+  # Exits cleanly with code 0 once the model is confirmed available.
+  ollama-model-pull:
+    image: ollama/ollama:latest
+    container_name: finagent-ollama-pull
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for Ollama service to become healthy..."
+        until ollama list > /dev/null 2>&1; do
+          sleep 1
+        done
+        echo "Checking and pulling llama3.2:3b model into persistent storage..."
+        ollama pull llama3.2:3b
+        echo "llama3.2:3b model is ready for Component 4."
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  component4:                      # Agentic Assistance  (W V A D K Chamara)
+    build:
+      context: ./backend/Agentic-Assistance
+    ports: ["8003:8003"]
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in a repo-root .env}
+      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      OLLAMA_HOST: http://ollama:11434
+      PLATFORM_SERVICE_URL: http://platform:8100
+      AUDIT_SERVICE_URL: http://component3:8002
+      FRAUD_SERVICE_URL: http://component2:8001
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-model-pull:
+        condition: service_completed_successfully
+      platform:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8003/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
 volumes:
   platform_data:
   kafka_data:
+  ollama_data:

@@ -1,16 +1,15 @@
 const policyEngine = require("../services/policyEngine");
 const hashService = require("../services/hashService");
-const blockchainService = require("../services/blockchainService");
+const { blockchainService, BlockchainUnavailableError, BlockchainTransactionError } = require("../services/blockchainService");
 const auditService = require("../services/auditService");
+const { computePolicyHash } = require("../services/policyDefinition");
+const { DuplicateTransactionError } = require("../db/database");
 
 /**
  * Controller handling API requests for AI decision evaluations, human reviews,
- * audit storage, integrity verification, and tamper simulation.
+ * audit storage, integrity verification, retries, and tamper simulation.
  */
 class AuditController {
-  /**
-   * Validate Mock AI Decision Input
-   */
   validateInput(data) {
     const errors = [];
 
@@ -38,12 +37,11 @@ class AuditController {
 
   /**
    * POST /api/audit/evaluate
-   * Input: transactionId, riskScore, confidence, amount, transactionType, modelVersion
    */
   async evaluateDecision(req, res) {
     try {
       const inputData = req.body;
-      
+
       // 1. Input Validation
       const validationErrors = this.validateInput(inputData);
       if (validationErrors.length > 0) {
@@ -61,12 +59,19 @@ class AuditController {
       });
 
       const timestamp = new Date().toISOString();
+      const salt = hashService.generateSalt();
+      const auditId = hashService.computeAuditId(inputData.transactionId, salt);
+      const policyHash = computePolicyHash();
       const reviewRequired = policyResult.action === "HUMAN_REVIEW";
 
       if (reviewRequired) {
-        // If HUMAN_REVIEW is required, save intermediate state
+        // Pending human review state
         const pendingRecord = {
           transactionId: inputData.transactionId,
+          auditId,
+          salt,
+          policyHash,
+          recordHash: "PENDING_REVIEW",
           riskScore: inputData.riskScore,
           confidence: inputData.confidence,
           amount: inputData.amount,
@@ -80,25 +85,33 @@ class AuditController {
           timestamp,
           reviewRequired: true,
           reviewerDecision: null,
-          hash: "PENDING_REVIEW",
-          blockchainTransactionId: "PENDING",
           verificationStatus: "PENDING_HUMAN_REVIEW",
           isTampered: false
         };
 
-        auditService.saveRecord(pendingRecord);
+        try {
+          auditService.saveRecord(pendingRecord);
+        } catch (dbErr) {
+          if (dbErr instanceof DuplicateTransactionError) {
+            return res.status(409).json({ success: false, message: dbErr.message });
+          }
+          throw dbErr;
+        }
 
         return res.status(200).json({
           success: true,
           status: "HUMAN_REVIEW_REQUIRED",
           policyResult,
-          record: pendingRecord
+          record: auditService.maskRecord(pendingRecord)
         });
       }
 
       // Automated decision (APPROVE or REJECT)
       const auditRecord = {
         transactionId: inputData.transactionId,
+        auditId,
+        salt,
+        policyHash,
         riskScore: inputData.riskScore,
         confidence: inputData.confidence,
         amount: inputData.amount,
@@ -115,33 +128,58 @@ class AuditController {
         isTampered: false
       };
 
-      // 3. Generate SHA-256 Hash
-      const { hash } = hashService.generateCanonicalHash(auditRecord);
-      auditRecord.hash = hash;
+      // 3. Generate Canonical SHA-256 Hash
+      const { hash: recordHash } = hashService.generateCanonicalHash(auditRecord);
+      auditRecord.recordHash = recordHash;
 
-      // 4. Commit Hash to Smart Contract Blockchain
-      const blockchainRes = await blockchainService.recordAudit(
-        auditRecord.transactionId,
-        auditRecord.finalDecision,
-        auditRecord.policyVersion,
-        auditRecord.modelVersion,
-        hash
-      );
+      // 4. Commit to Smart Contract
+      let blockchainRes = null;
+      try {
+        blockchainRes = await blockchainService.recordAudit(auditId, recordHash, policyHash);
+        auditRecord.blockchainTxId = blockchainRes.blockchainTxId;
+        auditRecord.blockNumber = blockchainRes.blockNumber;
+        auditRecord.verificationStatus = blockchainRes.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
 
-      auditRecord.blockchainTransactionId = blockchainRes.blockchainTxId;
-      auditRecord.verificationStatus = "RECORDED_ON_CHAIN";
+        auditService.createRecord(auditRecord);
 
-      // 5. Store Off-Chain Record
-      auditService.saveRecord(auditRecord);
+        return res.status(200).json({
+          success: true,
+          status: "COMPLETED",
+          policyResult,
+          blockchain: blockchainRes,
+          record: auditService.maskRecord(auditRecord)
+        });
+      } catch (chainErr) {
+        if (chainErr instanceof BlockchainUnavailableError) {
+          auditRecord.verificationStatus = "BLOCKCHAIN_FAILED";
+          auditService.saveRecord(auditRecord);
 
-      return res.status(200).json({
-        success: true,
-        status: "COMPLETED",
-        policyResult,
-        blockchain: blockchainRes,
-        record: auditRecord
-      });
+          return res.status(503).json({
+            success: false,
+            status: "BLOCKCHAIN_UNAVAILABLE",
+            message: `Record saved locally, but smart contract anchoring failed: ${chainErr.message}. Use /api/audit/${auditRecord.transactionId}/retry to publish once the blockchain is online.`,
+            record: auditService.maskRecord(auditRecord)
+          });
+        }
+
+        if (chainErr instanceof BlockchainTransactionError) {
+          auditRecord.verificationStatus = "BLOCKCHAIN_FAILED";
+          auditService.saveRecord(auditRecord);
+
+          return res.status(502).json({
+            success: false,
+            status: "BLOCKCHAIN_ERROR",
+            message: chainErr.message,
+            record: auditService.maskRecord(auditRecord)
+          });
+        }
+
+        throw chainErr;
+      }
     } catch (err) {
+      if (err instanceof DuplicateTransactionError) {
+        return res.status(409).json({ success: false, message: err.message });
+      }
       console.error("Evaluation Error:", err);
       return res.status(500).json({ success: false, message: err.message });
     }
@@ -149,7 +187,6 @@ class AuditController {
 
   /**
    * POST /api/audit/review
-   * Body: { transactionId, reviewerDecision: "APPROVE" | "REJECT" }
    */
   async submitHumanReview(req, res) {
     try {
@@ -180,29 +217,43 @@ class AuditController {
       existingRecord.reviewedAt = new Date().toISOString();
 
       // Regenerate Canonical SHA-256 Hash including human decision
-      const { hash } = hashService.generateCanonicalHash(existingRecord);
-      existingRecord.hash = hash;
+      const { hash: recordHash } = hashService.generateCanonicalHash(existingRecord);
+      existingRecord.recordHash = recordHash;
 
       // Commit to Smart Contract Blockchain
-      const blockchainRes = await blockchainService.recordAudit(
-        existingRecord.transactionId,
-        existingRecord.finalDecision,
-        existingRecord.policyVersion,
-        existingRecord.modelVersion,
-        hash
-      );
+      try {
+        const blockchainRes = await blockchainService.recordAudit(
+          existingRecord.auditId,
+          recordHash,
+          existingRecord.policyHash
+        );
 
-      existingRecord.blockchainTransactionId = blockchainRes.blockchainTxId;
-      existingRecord.verificationStatus = "RECORDED_ON_CHAIN";
+        existingRecord.blockchainTxId = blockchainRes.blockchainTxId;
+        existingRecord.blockNumber = blockchainRes.blockNumber;
+        existingRecord.verificationStatus = blockchainRes.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
 
-      auditService.saveRecord(existingRecord);
+        auditService.saveRecord(existingRecord);
 
-      return res.status(200).json({
-        success: true,
-        message: "Human review recorded and on-chain commitment published successfully.",
-        blockchain: blockchainRes,
-        record: existingRecord
-      });
+        return res.status(200).json({
+          success: true,
+          message: "Human review recorded and on-chain commitment published successfully.",
+          blockchain: blockchainRes,
+          record: auditService.maskRecord(existingRecord)
+        });
+      } catch (chainErr) {
+        if (chainErr instanceof BlockchainUnavailableError) {
+          existingRecord.verificationStatus = "BLOCKCHAIN_FAILED";
+          auditService.saveRecord(existingRecord);
+
+          return res.status(503).json({
+            success: false,
+            status: "BLOCKCHAIN_UNAVAILABLE",
+            message: `Human review saved locally, but smart contract anchoring failed: ${chainErr.message}. Retry via /api/audit/${existingRecord.transactionId}/retry.`,
+            record: auditService.maskRecord(existingRecord)
+          });
+        }
+        throw chainErr;
+      }
     } catch (err) {
       console.error("Human Review Error:", err);
       return res.status(500).json({ success: false, message: err.message });
@@ -223,11 +274,39 @@ class AuditController {
   }
 
   /**
+   * GET /api/audit/by-audit-id/:auditId/verify
+   */
+  async verifyByAuditId(req, res) {
+    try {
+      const { auditId } = req.params;
+      const verificationResult = await auditService.verifyRecord(auditId);
+      return res.status(200).json(verificationResult);
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  /**
+   * POST /api/audit/:transactionId/retry
+   */
+  async retryCommitment(req, res) {
+    try {
+      const { transactionId } = req.params;
+      const result = await auditService.retryBlockchainCommitment(transactionId);
+      return res.status(200).json(result);
+    } catch (err) {
+      if (err instanceof BlockchainUnavailableError) {
+        return res.status(503).json({ success: false, message: err.message });
+      }
+      return res.status(400).json({ success: false, message: err.message });
+    }
+  }
+
+  /**
    * POST /api/audit/:transactionId/tamper
    */
   async simulateTampering(req, res) {
     try {
-      // Dev/Demo Environment Gating Check
       if (process.env.NODE_ENV === "production" && process.env.ALLOW_DEMO_TAMPER !== "true") {
         return res.status(403).json({
           success: false,
@@ -244,7 +323,10 @@ class AuditController {
         tamperedValue !== undefined ? tamperedValue : 20
       );
 
-      return res.status(200).json(result);
+      return res.status(200).json({
+        ...result,
+        tamperedRecord: auditService.maskRecord(result.tamperedRecord)
+      });
     } catch (err) {
       return res.status(400).json({ success: false, message: err.message });
     }
@@ -252,7 +334,6 @@ class AuditController {
 
   /**
    * DELETE /api/audit/records (or POST /api/audit/reset)
-   * Reseed/Clear demo records for clean evaluation runs
    */
   async clearRecords(req, res) {
     try {
@@ -268,7 +349,7 @@ class AuditController {
    */
   async getRecords(req, res) {
     try {
-      const records = auditService.getAllRecords();
+      const records = auditService.getAllRecords(true); // true = mask salts
       return res.status(200).json({ success: true, count: records.length, records });
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });
@@ -280,7 +361,7 @@ class AuditController {
    */
   async getStats(req, res) {
     try {
-      const records = auditService.getAllRecords();
+      const records = auditService.getAllRecords(false);
       const blockchainStatus = blockchainService.getStatus();
 
       let approved = 0;
@@ -288,13 +369,15 @@ class AuditController {
       let humanReview = 0;
       let verified = 0;
       let integrityFailures = 0;
+      let onChainMissing = 0;
 
-      records.forEach(r => {
+      records.forEach((r) => {
         if (r.finalDecision === "APPROVE" || r.finalDecision === "HUMAN_APPROVED") approved++;
         if (r.finalDecision === "REJECT" || r.finalDecision === "HUMAN_REJECTED") rejected++;
         if (r.reviewRequired) humanReview++;
-        if (r.verificationStatus === "VERIFIED") verified++;
-        if (r.verificationStatus === "INTEGRITY_FAILED" || r.isTampered) integrityFailures++;
+        if (r.verificationStatus === "VERIFIED_ON_CHAIN" || r.verificationStatus === "VERIFIED_SIMULATED") verified++;
+        if (r.verificationStatus === "MODIFIED" || r.isTampered) integrityFailures++;
+        if (r.verificationStatus === "ON_CHAIN_MISSING" || r.verificationStatus === "BLOCKCHAIN_FAILED") onChainMissing++;
       });
 
       return res.status(200).json({
@@ -306,6 +389,7 @@ class AuditController {
           humanReview,
           verified,
           integrityFailures,
+          onChainMissing,
           blockchainStatus
         }
       });
@@ -321,6 +405,8 @@ module.exports = {
   evaluateDecision: controller.evaluateDecision.bind(controller),
   submitHumanReview: controller.submitHumanReview.bind(controller),
   verifyAudit: controller.verifyAudit.bind(controller),
+  verifyByAuditId: controller.verifyByAuditId.bind(controller),
+  retryCommitment: controller.retryCommitment.bind(controller),
   simulateTampering: controller.simulateTampering.bind(controller),
   clearRecords: controller.clearRecords.bind(controller),
   getRecords: controller.getRecords.bind(controller),

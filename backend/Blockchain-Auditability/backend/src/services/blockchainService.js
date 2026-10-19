@@ -3,138 +3,218 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
+class BlockchainUnavailableError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "BlockchainUnavailableError";
+    this.statusCode = 503;
+  }
+}
+
+class BlockchainTransactionError extends Error {
+  constructor(message, details = null) {
+    super(message);
+    this.name = "BlockchainTransactionError";
+    this.statusCode = 502;
+    this.details = details;
+  }
+}
+
 /**
  * Blockchain Service connecting to local Hardhat node via ethers.js.
- * Includes an automatic fallback mock adapter if local Hardhat RPC is unavailable.
+ * Strictly operates in LIVE mode by default.
+ * Mock mode is ONLY active when explicitly set via BLOCKCHAIN_MODE=mock.
  */
 class BlockchainService {
   constructor() {
-    this.configPath = path.join(__dirname, "../config/contractConfig.json");
+    this.configPath = process.env.CONTRACT_CONFIG_PATH || path.join(__dirname, "../config/contractConfig.json");
     this.provider = null;
     this.contract = null;
     this.signer = null;
-    this.isLiveNetwork = false;
+    this.config = null;
     this.mockLedger = new Map();
+    this.mockPolicies = new Set();
+  }
 
-    this.init();
+  isMockMode() {
+    return process.env.BLOCKCHAIN_MODE === "mock";
+  }
+
+  getConfigPath() {
+    return process.env.CONTRACT_CONFIG_PATH || path.join(__dirname, "../config/contractConfig.json");
   }
 
   async init() {
+    if (this.isMockMode()) {
+      return;
+    }
+
+    const configPath = this.getConfigPath();
+    if (!fs.existsSync(configPath)) {
+      throw new BlockchainUnavailableError(
+        `Contract configuration not found at ${configPath}. Ensure the Hardhat node is running and deploy script has executed.`
+      );
+    }
+
     try {
-      if (fs.existsSync(this.configPath)) {
-        const config = JSON.parse(fs.readFileSync(this.configPath, "utf8"));
-        this.provider = new ethers.JsonRpcProvider(config.networkUrl || "http://127.0.0.1:8545");
-        
-        // Quick probe to test connection
-        await this.provider.getBlockNumber();
-        
-        this.signer = await this.provider.getSigner(0);
-        this.contract = new ethers.Contract(config.address, config.abi, this.signer);
-        this.isLiveNetwork = true;
-        console.log(`[BlockchainService] Connected to Live Local Blockchain at ${config.address}`);
+      const configRaw = fs.readFileSync(configPath, "utf8");
+      this.config = JSON.parse(configRaw);
+
+      const rpcUrl = process.env.BLOCKCHAIN_RPC_URL || this.config.networkUrl || "http://127.0.0.1:8545";
+      this.provider = new ethers.JsonRpcProvider(rpcUrl);
+
+      // Verify node connectivity
+      await this.provider.getBlockNumber();
+
+      // Retrieve first local signer (or configured private key)
+      if (process.env.SIGNER_PRIVATE_KEY) {
+        this.signer = new ethers.Wallet(process.env.SIGNER_PRIVATE_KEY, this.provider);
       } else {
-        console.log("[BlockchainService] No contractConfig.json found. Operating in Mock Blockchain mode.");
+        this.signer = await this.provider.getSigner(0);
       }
+
+      this.contract = new ethers.Contract(this.config.address, this.config.abi, this.signer);
     } catch (err) {
-      console.log(`[BlockchainService] Live RPC unavailable (${err.message}). Using Mock Blockchain fallback.`);
-      this.isLiveNetwork = false;
+      this.contract = null;
+      this.provider = null;
+      this.signer = null;
+      throw new BlockchainUnavailableError(
+        `Failed to connect to local blockchain RPC: ${err.message}`
+      );
     }
   }
 
-  async recordAudit(transactionId, decision, policyVersion, modelVersion, recordHash) {
-    await this.init(); // Refresh connection if needed
+  /**
+   * Records an immutable audit commitment to the smart contract.
+   * @param {string} auditId 0x-prefixed 32-byte hex string
+   * @param {string} recordHash 0x-prefixed 32-byte hex string
+   * @param {string} policyHash 0x-prefixed 32-byte hex string
+   */
+  async recordAudit(auditId, recordHash, policyHash) {
+    if (this.isMockMode()) {
+      const mockTxHash = "0x" + crypto.createHash("sha256").update(auditId + recordHash + Date.now()).digest("hex");
+      const blockTimestamp = Math.floor(Date.now() / 1000);
+      const mockBlockNumber = Math.floor(1000 + Math.random() * 9000);
 
-    if (this.isLiveNetwork && this.contract) {
-      try {
-        const tx = await this.contract.recordAudit(
-          transactionId,
-          decision,
-          policyVersion,
-          modelVersion,
-          recordHash
-        );
-        const receipt = await tx.wait();
-        return {
-          success: true,
-          blockchainTxId: receipt.hash,
-          blockNumber: receipt.blockNumber,
-          isMock: false,
-          network: "Hardhat Local Network (ChainId: 31337)"
-        };
-      } catch (err) {
-        console.error("[BlockchainService] Smart contract execution error, falling back to mock:", err.message);
-      }
-    }
-
-    // Fallback Mock Recording
-    const mockTxHash = "0x" + crypto.createHash("sha256").update(transactionId + recordHash + Date.now()).digest("hex");
-    this.mockLedger.set(transactionId, {
-      transactionId,
-      recordHash,
-      decision,
-      policyVersion,
-      modelVersion,
-      timestamp: Math.floor(Date.now() / 1000),
-      blockchainTxId: mockTxHash
-    });
-
-    return {
-      success: true,
-      blockchainTxId: mockTxHash,
-      blockNumber: Math.floor(1000 + Math.random() * 9000),
-      isMock: true,
-      network: "Simulated Local Blockchain Adapter"
-    };
-  }
-
-  async getAudit(transactionId) {
-    await this.init();
-
-    if (this.isLiveNetwork && this.contract) {
-      try {
-        const exists = await this.contract.hasAudit(transactionId);
-        if (exists) {
-          const audit = await this.contract.getAudit(transactionId);
-          return {
-            exists: true,
-            recordHash: audit[0],
-            decision: audit[1],
-            policyVersion: audit[2],
-            modelVersion: audit[3],
-            timestamp: Number(audit[4]),
-            submitter: audit[5],
-            isMock: false
-          };
-        }
-      } catch (err) {
-        console.error("[BlockchainService] Error fetching audit from contract:", err.message);
-      }
-    }
-
-    if (this.mockLedger.has(transactionId)) {
-      const mockRecord = this.mockLedger.get(transactionId);
-      return {
-        exists: true,
-        recordHash: mockRecord.recordHash,
-        decision: mockRecord.decision,
-        policyVersion: mockRecord.policyVersion,
-        modelVersion: mockRecord.modelVersion,
-        timestamp: mockRecord.timestamp,
+      this.mockLedger.set(auditId, {
+        auditId,
+        recordHash,
+        policyHash,
+        timestamp: blockTimestamp,
         submitter: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-        isMock: true
+        blockchainTxId: mockTxHash,
+        blockNumber: mockBlockNumber
+      });
+
+      return {
+        success: true,
+        blockchainTxId: mockTxHash,
+        blockNumber: mockBlockNumber,
+        blockTimestamp,
+        isMock: true,
+        network: "Simulated Local Blockchain Adapter (BLOCKCHAIN_MODE=mock)"
       };
     }
 
-    return { exists: false };
+    await this.init();
+
+    try {
+      const tx = await this.contract.recordAudit(auditId, recordHash, policyHash);
+      const receipt = await tx.wait();
+
+      const block = await this.provider.getBlock(receipt.blockNumber);
+      const blockTimestamp = block ? block.timestamp : Math.floor(Date.now() / 1000);
+
+      return {
+        success: true,
+        blockchainTxId: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        blockTimestamp,
+        isMock: false,
+        network: `Hardhat Local Network (ChainId: ${this.config.chainId || 31337})`
+      };
+    } catch (err) {
+      console.error("[BlockchainService] Transaction Error:", err.message);
+      throw new BlockchainTransactionError(
+        `Smart contract transaction failed: ${err.message}`,
+        err.shortMessage || err.message
+      );
+    }
+  }
+
+  /**
+   * Retrieves an on-chain commitment by auditId.
+   * @param {string} auditId 0x-prefixed 32-byte hex string
+   */
+  async getAudit(auditId) {
+    if (this.isMockMode()) {
+      if (this.mockLedger.has(auditId)) {
+        const item = this.mockLedger.get(auditId);
+        return {
+          exists: true,
+          recordHash: item.recordHash,
+          policyHash: item.policyHash,
+          timestamp: item.timestamp,
+          submitter: item.submitter,
+          isMock: true
+        };
+      }
+      return { exists: false, isMock: true };
+    }
+
+    await this.init();
+
+    try {
+      const result = await this.contract.getAudit(auditId);
+      return {
+        exists: Boolean(result[0]),
+        recordHash: result[1],
+        policyHash: result[2],
+        timestamp: Number(result[3]),
+        submitter: result[4],
+        isMock: false
+      };
+    } catch (err) {
+      console.error("[BlockchainService] getAudit error:", err.message);
+      throw new BlockchainUnavailableError(`Failed to fetch audit from smart contract: ${err.message}`);
+    }
+  }
+
+  /**
+   * Checks whether a policy hash is active on-chain.
+   * @param {string} policyHash 0x-prefixed 32-byte hex string
+   */
+  async isPolicyActive(policyHash) {
+    if (this.isMockMode()) {
+      return true;
+    }
+
+    await this.init();
+
+    try {
+      return await this.contract.isPolicyActive(policyHash);
+    } catch (err) {
+      throw new BlockchainUnavailableError(`Failed to query policy status from contract: ${err.message}`);
+    }
   }
 
   getStatus() {
+    const isMock = this.isMockMode();
     return {
-      isLiveNetwork: this.isLiveNetwork,
-      mode: this.isLiveNetwork ? "Hardhat Local Blockchain (Ethers.js)" : "Simulated Blockchain Adapter",
-      rpcUrl: "http://127.0.0.1:8545"
+      isMock,
+      mode: isMock ? "Simulated Blockchain Adapter (Mock)" : "Live Hardhat Blockchain (Ethers.js)",
+      rpcUrl: isMock ? null : (process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545"),
+      contractAddress: this.config ? this.config.address : null,
+      isConfigured: fs.existsSync(this.getConfigPath())
     };
   }
 }
 
-module.exports = new BlockchainService();
+const blockchainService = new BlockchainService();
+
+module.exports = {
+  blockchainService,
+  BlockchainService,
+  BlockchainUnavailableError,
+  BlockchainTransactionError
+};

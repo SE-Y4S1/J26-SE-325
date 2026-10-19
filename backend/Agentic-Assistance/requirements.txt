@@ -4,3 +4,8 @@ langchain-core
 langchain-ollama
 langgraph
 pydantic
+python-dotenv
+PyJWT
+numpy>=2.0.0
+scikit-learn>=1.5.0
+shap>=0.45.0

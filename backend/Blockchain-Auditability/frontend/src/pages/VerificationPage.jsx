@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Binary, ShieldCheck, ShieldAlert, AlertTriangle, RefreshCw, Lock, ArrowRight, Zap, CheckCircle2, XCircle } from 'lucide-react';
+import { Binary, ShieldCheck, ShieldAlert, AlertTriangle, RefreshCw, Lock, ArrowRight, Zap, CheckCircle2, XCircle, Database, HelpCircle } from 'lucide-react';
 import { fetchAuditRecords, verifyAuditRecord, simulateTamperRecord } from '../services/api';
 
 export default function VerificationPage({ selectedTxForVerify }) {
@@ -51,7 +51,6 @@ export default function VerificationPage({ selectedTxForVerify }) {
     setTamperingLoading(true);
     try {
       await simulateTamperRecord(selectedTxId, 'riskScore', 20);
-      // Re-run verification automatically to demonstrate failure instantly!
       await runVerification(selectedTxId);
       await loadRecords();
     } catch (err) {
@@ -62,6 +61,48 @@ export default function VerificationPage({ selectedTxForVerify }) {
   };
 
   const currentRecord = records.find(r => r.transactionId === selectedTxId);
+
+  const getStatusBadge = (status, verified) => {
+    switch (status) {
+      case 'VERIFIED_ON_CHAIN':
+        return {
+          bannerBg: 'bg-emerald-950/50 border-emerald-500/50 text-emerald-300',
+          badgeBg: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40',
+          icon: <CheckCircle2 className="w-10 h-10 text-emerald-400 shrink-0" />,
+          title: 'VERIFIED ON-CHAIN'
+        };
+      case 'VERIFIED_SIMULATED':
+        return {
+          bannerBg: 'bg-cyan-950/50 border-cyan-500/50 text-cyan-300',
+          badgeBg: 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40',
+          icon: <ShieldCheck className="w-10 h-10 text-cyan-400 shrink-0" />,
+          title: 'VERIFIED (SIMULATED)'
+        };
+      case 'MODIFIED':
+        return {
+          bannerBg: 'bg-rose-950/50 border-rose-500/50 text-rose-300',
+          badgeBg: 'bg-rose-500/20 text-rose-300 border border-rose-500/40',
+          icon: <XCircle className="w-10 h-10 text-rose-400 shrink-0" />,
+          title: 'INTEGRITY FAILED (MODIFIED)'
+        };
+      case 'ON_CHAIN_MISSING':
+        return {
+          bannerBg: 'bg-amber-950/50 border-amber-500/50 text-amber-300',
+          badgeBg: 'bg-amber-500/20 text-amber-300 border border-amber-500/40',
+          icon: <AlertTriangle className="w-10 h-10 text-amber-400 shrink-0" />,
+          title: 'ON-CHAIN COMMITMENT MISSING'
+        };
+      default:
+        return {
+          bannerBg: 'bg-slate-900 border-slate-700 text-slate-300',
+          badgeBg: 'bg-slate-800 text-slate-400 border border-slate-700',
+          icon: <HelpCircle className="w-10 h-10 text-slate-400 shrink-0" />,
+          title: status || 'UNKNOWN'
+        };
+    }
+  };
+
+  const statusConfig = verificationResult ? getStatusBadge(verificationResult.status, verificationResult.verified) : null;
 
   return (
     <div className="space-y-6">
@@ -107,6 +148,7 @@ export default function VerificationPage({ selectedTxForVerify }) {
 
             {currentRecord && (
               <div className="bg-slate-900/60 p-3.5 rounded-xl border border-slate-800 font-mono text-xs space-y-1 text-slate-300">
+                <div className="truncate">Audit ID: <strong className="text-purple-300">{currentRecord.auditId}</strong></div>
                 <div>Model: <strong className="text-slate-100">{currentRecord.modelVersion}</strong></div>
                 <div>Risk / Conf: <strong className="text-rose-400">{currentRecord.riskScore}</strong> / <strong className="text-amber-400">{currentRecord.confidence}%</strong></div>
                 <div>Amount: <strong>${currentRecord.amount?.toLocaleString()}</strong></div>
@@ -148,7 +190,7 @@ export default function VerificationPage({ selectedTxForVerify }) {
                 <span>{tamperingLoading ? 'Simulating Tamper...' : 'Simulate Tampering'}</span>
               </button>
               <p className="text-[10px] text-slate-500 mt-1.5 leading-snug">
-                Modifies off-chain risk score from {currentRecord?.riskScore || 92} to 20 without altering blockchain hash commitment.
+                Modifies off-chain risk score to 20 without altering blockchain hash commitment.
               </p>
             </div>
           </div>
@@ -168,26 +210,14 @@ export default function VerificationPage({ selectedTxForVerify }) {
           ) : (
             <div className="space-y-6">
               {/* Visual State Banner */}
-              <div className={`p-5 rounded-2xl border flex items-center space-x-4 ${
-                verificationResult.verified
-                  ? 'bg-emerald-950/50 border-emerald-500/50 text-emerald-300 glow-emerald'
-                  : 'bg-rose-950/50 border-rose-500/50 text-rose-300 glow-rose'
-              }`}>
-                {verificationResult.verified ? (
-                  <CheckCircle2 className="w-10 h-10 text-emerald-400 shrink-0" />
-                ) : (
-                  <XCircle className="w-10 h-10 text-rose-400 shrink-0" />
-                )}
+              <div className={`p-5 rounded-2xl border flex items-center space-x-4 ${statusConfig?.bannerBg}`}>
+                {statusConfig?.icon}
                 <div>
                   <div className="flex items-center space-x-2">
                     <h2 className="text-xl font-black tracking-tight">
-                      {verificationResult.verified ? 'VERIFIED' : 'INTEGRITY FAILED'}
+                      {statusConfig?.title}
                     </h2>
-                    <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase ${
-                      verificationResult.verified
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                        : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                    }`}>
+                    <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase ${statusConfig?.badgeBg}`}>
                       {verificationResult.status}
                     </span>
                   </div>
@@ -205,12 +235,12 @@ export default function VerificationPage({ selectedTxForVerify }) {
 
                 <div className="bg-slate-900/80 p-3.5 rounded-xl border border-slate-800">
                   <span className="text-[11px] text-slate-400 block font-sans mb-1">
-                    1. Recomputed Off-Chain SHA-256 Hash (Current DB State):
+                    1. Recomputed Off-Chain SHA-256 Hash (Current SQLite State):
                   </span>
                   <p className={`p-2 rounded font-bold break-all ${
                     verificationResult.verified ? 'bg-slate-950 text-emerald-300' : 'bg-rose-950/80 text-rose-300 border border-rose-500/30'
                   }`}>
-                    {verificationResult.details?.calculatedCurrentHash}
+                    {verificationResult.details?.calculatedCurrentHash || 'N/A'}
                   </p>
                 </div>
 
@@ -219,16 +249,31 @@ export default function VerificationPage({ selectedTxForVerify }) {
                     2. Stored Blockchain Hash Commitment (Immutable Smart Contract):
                   </span>
                   <p className="p-2 rounded bg-slate-950 text-purple-300 font-bold break-all border border-slate-800">
-                    {verificationResult.details?.blockchainOnChainHash}
+                    {verificationResult.details?.blockchainOnChainHash || 'NO COMMITMENT ON-CHAIN'}
                   </p>
                 </div>
               </div>
+
+              {/* Commitment Metadata */}
+              {verificationResult.details?.auditId && (
+                <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800 font-mono text-xs space-y-1.5 text-slate-300">
+                  <div className="text-[11px] font-semibold text-slate-400 font-sans uppercase tracking-wider mb-2">On-Chain Commitment Metadata</div>
+                  <div className="break-all">Audit ID (bytes32): <span className="text-purple-300">{verificationResult.details.auditId}</span></div>
+                  <div className="break-all">Policy Hash (bytes32): <span className="text-blue-300">{verificationResult.details.policyHash}</span></div>
+                  {verificationResult.details.blockTimestamp && (
+                    <div>Block Mined Timestamp: <span className="text-slate-100">{new Date(verificationResult.details.blockTimestamp * 1000).toLocaleString()}</span></div>
+                  )}
+                  {verificationResult.details.submitter && (
+                    <div className="break-all">Submitter Account: <span className="text-emerald-300">{verificationResult.details.submitter}</span></div>
+                  )}
+                </div>
+              )}
 
               {/* Canonical Payload Inspection */}
               {verificationResult.details?.canonicalPayload && (
                 <div className="space-y-2">
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block">
-                    Canonical Payload Used for Hashing
+                    Canonical Payload Used for SHA-256 Hashing
                   </span>
                   <pre className="bg-[#070a12] p-4 rounded-xl border border-slate-800 text-[11px] font-mono text-slate-300 overflow-x-auto max-h-48">
                     {JSON.stringify(verificationResult.details.canonicalPayload, null, 2)}

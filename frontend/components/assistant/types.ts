@@ -35,6 +35,7 @@ export interface WorkflowStep {
   status: "completed" | "in_progress" | "pending";
 }
 
+
 export interface ChatMessage {
   id: string;
   sender: "user" | "assistant";
@@ -42,8 +43,14 @@ export interface ChatMessage {
   timestamp: string;
   toolsCalled?: string[];
   evidenceUsed?: string[];
+  evidenceDetails?: Array<{
+    tool: string;
+    result: string;
+  }>;
   hasWhyButton?: boolean;
+  isError?: boolean;
 }
+
 
 export type TrustActionState = "pending" | "confirmed" | "rejected" | "more_explanation_requested";
 

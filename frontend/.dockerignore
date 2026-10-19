@@ -3,6 +3,7 @@
 # binaries that must not leak into a linux image.
 node_modules
 .next
+.git
 out
 
 # Test output, never part of a build.

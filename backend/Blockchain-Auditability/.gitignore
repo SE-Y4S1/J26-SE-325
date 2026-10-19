@@ -33,7 +33,11 @@ backend/src/config/contractConfig.json
 
 # Local Runtime Audit Data
 backend/data/*.json
+backend/data/*.sqlite*
 !backend/data/.gitkeep
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
 # IDEs, Editors & OS Files
 .vscode/
