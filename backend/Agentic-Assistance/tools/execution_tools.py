@@ -153,6 +153,17 @@ def get_execution_explanation(execution_id: str) -> str:
     plan_block = _plan_section(trace, explanation_enabled) if trace else (
         f"Component 1 plan not available: {trace_res.get('reason')}."
     )
+    from governance_store import default_governance_store
+    gov_decision = default_governance_store.get_latest_decision(target_id)
+    gov_block = ""
+    if gov_decision:
+        gov_status = gov_decision.get("decision_type", "").upper()
+        gov_block = f"""
+4. HUMAN OVERSIGHT GOVERNANCE STATUS:
+- Recorded State: {gov_status} by user (Decision ID: {gov_decision.get('decision_id')})
+- Timestamp: {gov_decision.get('timestamp')}
+- Enforcement Rule: {"EXECUTION BLOCKED — Human oversight rejected this plan; executing real transactions is strictly prohibited." if gov_status == "REJECTED" else "Human oversight confirmed this decision."}
+"""
 
     return f"""
 EXECUTION EXPLANATION — LIVE CROSS-COMPONENT TRACE
@@ -170,7 +181,7 @@ Execution ID:
 
 3. PROOF IT WAS NOT ALTERED (Component 3, audit anchor):
 {_audit_section(audit_res)}
-
+{gov_block}
 PROVENANCE NOTICE:
 - Each section is read live from the component that produced it; none is generated here.
 - Component 4's local synthetic Random Forest SHAP prototype is NOT used for this execution.

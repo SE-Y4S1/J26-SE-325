@@ -165,11 +165,23 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
 
             # Check whether the answer begins with a notice that no live portfolio was retrieved
             has_starting_notice = bool(
-                re.search(r"^\s*(?:Notice|Please note|Important Notice|Disclaimer|Status|Note):.*(?:no live portfolio|live portfolio (?:was )?not (?:found|retrieved)|not found on platform)", corrected_answer, re.IGNORECASE)
-                or re.search(r"(?:no live portfolio|live portfolio (?:was )?not (?:found|retrieved))", corrected_answer[:250], re.IGNORECASE)
+                re.search(r"^\s*(?:Notice|Please note|Important Notice|Disclaimer|Status|Note):.*(?:no live portfolio|live portfolio (?:was )?not (?:found|retrieved)|not found on platform|live portfolio data could not be retrieved|service (?:is |was )?(?:unreachable|unavailable)|personalized financial context (?:is )?disabled|no personalized portfolio)", corrected_answer, re.IGNORECASE)
+                or re.search(r"(?:no live portfolio|live portfolio (?:was )?not (?:found|retrieved)|live portfolio data could not be retrieved|personalized financial context (?:is )?disabled|no personalized portfolio)", corrected_answer[:250], re.IGNORECASE)
             )
             if not has_starting_notice:
                 issues.append("Missing required opening notice that no live portfolio was retrieved")
+        else:
+            checks_applied.append("live_portfolio_verified")
+            # In Scenario 1, live portfolio data must be used; synthetic baseline figures must NOT be substituted
+            synthetic_leak_patterns = [
+                r"\b1,?000,?000\b",
+                r"\b11\.8%\b",
+                r"\bRisk Score:\s*38\b",
+                r"\bDiversification Score:\s*74\b",
+                r"\bMock Baseline\b",
+            ]
+            if any(re.search(pattern, corrected_answer, re.IGNORECASE) for pattern in synthetic_leak_patterns):
+                issues.append("Synthetic baseline values substituted into live portfolio response")
     else:
         checks_applied.append("portfolio_absence_verified")
         portfolio_leak_patterns = [
@@ -201,22 +213,36 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
                     "Notice: Personalized financial context is disabled by user preference. "
                     "Account-specific portfolio lookup was not performed, and no personalized holdings or balance were retrieved."
                 )
+            elif "PORTFOLIO ANALYSIS — LIVE PLATFORM RECORD" in p_text:
+                from agent import synthesize_portfolio_response
+                corrected_answer = synthesize_portfolio_response(p_text)
             else:
                 reason_match = re.search(r"Platform service note:\s*([^\n\r]+)", p_text, re.IGNORECASE)
                 reason_str = reason_match.group(1).strip() if reason_match else "Portfolio not found on platform service"
 
-                corrected_answer = (
-                    f"Notice: No live portfolio was retrieved for this account from the platform service ({reason_str}). "
-                    "The user has zero verified live holdings on record.\n\n"
-                    "For illustrative demonstration only, the local mock baseline example lists:\n"
-                    "- Baseline Valuation: LKR 1,000,000 (Mock Baseline Demonstration Only)\n"
-                    "- Expected Annual Return: 11.8% (Synthetic Example)\n"
-                    "- Risk Score: 38/100 (Moderate, Synthetic Example)\n"
-                    "- Diversification Score: 74/100 (Synthetic Example)\n"
-                    "- Liquidity: High (Synthetic Example)\n"
-                    "- Mock Allocation: 35% Technology, 25% Banking, 15% Healthcare, 15% Government Bonds, 10% Cash (Sample Example)\n\n"
-                    "Please note: These figures and recommendations are synthetic baseline examples for demonstration only and do not reflect your actual portfolio or verified balance."
-                )
+                is_service_err = bool(
+                    re.search(r"unreachable|timed out|timeout|connection refused|500|502|503|504|Service unavailable", reason_str, re.IGNORECASE)
+                    or re.search(r"Service unavailable|SERVICE UNAVAILABLE", p_text, re.IGNORECASE)
+                ) and not bool(re.search(r"Empty portfolio list|no registered portfolios", reason_str, re.IGNORECASE))
+
+                if is_service_err:
+                    corrected_answer = (
+                        f"Notice: Live portfolio data could not be retrieved because the platform service is unreachable or timed out ({reason_str}). "
+                        "This does not indicate an empty portfolio; live holdings could not be verified due to a service error or timeout."
+                    )
+                else:
+                    corrected_answer = (
+                        f"Notice: No live portfolio was retrieved for this account from the platform service ({reason_str}). "
+                        "The user has zero verified live holdings on record.\n\n"
+                        "For illustrative demonstration only, the local mock baseline example lists:\n"
+                        "- Baseline Valuation: LKR 1,000,000 (Mock Baseline Demonstration Only)\n"
+                        "- Expected Annual Return: 11.8% (Synthetic Example)\n"
+                        "- Risk Score: 38/100 (Moderate, Synthetic Example)\n"
+                        "- Diversification Score: 74/100 (Synthetic Example)\n"
+                        "- Liquidity: High (Synthetic Example)\n"
+                        "- Mock Allocation: 35% Technology, 25% Banking, 15% Healthcare, 15% Government Bonds, 10% Cash (Sample Example)\n\n"
+                        "Please note: These figures and recommendations are synthetic baseline examples for demonstration only and do not reflect your actual portfolio or verified balance."
+                    )
         elif "get_blockchain_audit" in tool_names and not ({"get_fraud_analysis", "get_portfolio_analysis"} & tool_names):
             audit_item = next((item for item in evidence if item.get("tool") == "get_blockchain_audit"), None)
             audit_text = str(audit_item.get("result", "")) if audit_item else ""

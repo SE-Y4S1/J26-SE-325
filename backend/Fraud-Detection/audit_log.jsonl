@@ -1,0 +1,1 @@
+{"timestamp": "2026-10-16T10:33:40+00:00", "transaction_id": "PP1-DEMO-001", "user_id": "pp1_demo_user", "behavioral_score": 0.9115, "graph_score": 0.3686, "risk_score": 0.7005, "decision": "BLOCK", "reason": "BLOCK - risk 0.70 >= 0.70 (high band)", "attack_type": "PP1 demo"}

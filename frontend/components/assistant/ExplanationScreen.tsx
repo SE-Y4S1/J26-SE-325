@@ -36,7 +36,9 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
 
   useEffect(() => {
     try {
-      const stored = localStorage.getItem("finagent_responsible_ai_prefs");
+      const stored =
+        localStorage.getItem("finagent_responsible_ai_preferences") ||
+        localStorage.getItem("finagent_responsible_ai_prefs");
       if (stored) {
         const parsed = JSON.parse(stored);
         if (typeof parsed?.personalizedContext === "boolean") {

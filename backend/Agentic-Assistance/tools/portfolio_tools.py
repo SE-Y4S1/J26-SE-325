@@ -441,39 +441,62 @@ Live holdings: Unverified (Personalized context disabled).
         name = p.get("name", "Unnamed Portfolio")
         currency = p.get("base_currency", "USD")
         total_val_raw = p.get("total_value")
+        total_value_known = False
         try:
-            total_value = float(total_val_raw) if total_val_raw is not None else 0.0
+            if total_val_raw is not None:
+                total_value = float(total_val_raw)
+                total_value_known = True
+            else:
+                total_value = None
         except (ValueError, TypeError):
-            total_value = 0.0
+            total_value = None
 
         raw_holdings = p.get("holdings")
         holdings = raw_holdings if isinstance(raw_holdings, list) else []
 
+        has_partial_fields = False
         if holdings:
             holdings_lines = []
             parsed_holdings = []
             calculated_total = 0.0
+            all_prices_available = True
+
             for h in holdings:
                 if not isinstance(h, dict):
                     continue
                 sym = str(h.get("symbol", "UNKNOWN")).strip().upper()
+
+                # Parse quantity
+                qty_raw = h.get("quantity")
                 try:
-                    qty = float(h.get("quantity") if h.get("quantity") is not None else 0.0)
+                    qty = float(qty_raw) if qty_raw is not None else None
                 except (ValueError, TypeError):
-                    qty = 0.0
+                    qty = None
+
+                # Parse current price
+                price_raw = h.get("current_price")
                 try:
-                    price = float(h.get("current_price") if h.get("current_price") is not None else 0.0)
+                    price = float(price_raw) if price_raw is not None else None
                 except (ValueError, TypeError):
-                    price = 0.0
-                val = qty * price
-                calculated_total += val
+                    price = None
+
+                if qty is not None and price is not None:
+                    val = qty * price
+                    calculated_total += val
+                    val_str = f"{currency} {val:,.2f}"
+                else:
+                    val = None
+                    all_prices_available = False
+                    has_partial_fields = True
+                    val_str = "Value: Unavailable"
 
                 cost = h.get("cost_basis")
                 if cost is not None:
                     try:
                         cost_str = f"Cost Basis: {currency} {float(cost):,.2f}; "
                     except (ValueError, TypeError):
-                        cost_str = ""
+                        cost_str = "Cost Basis: Unavailable; "
+                        has_partial_fields = True
                 else:
                     cost_str = ""
 
@@ -486,25 +509,44 @@ Live holdings: Unverified (Personalized context disabled).
                 else:
                     adv_str = ""
 
-                parsed_holdings.append((sym, qty, price, val, cost_str, adv_str))
+                parsed_holdings.append((sym, qty, price, val, val_str, cost_str, adv_str))
 
-            if total_value <= 0.0 and calculated_total > 0.0:
+            if not total_value_known and all_prices_available and calculated_total > 0.0:
                 total_value = calculated_total
+                total_value_known = True
 
-            for sym, qty, price, val, cost_str, adv_str in parsed_holdings:
-                wt = (val / total_value * 100.0) if total_value > 0 else 0.0
+            for sym, qty, price, val, val_str, cost_str, adv_str in parsed_holdings:
+                qty_display = f"{qty:,.2f} units" if qty is not None else "Quantity: Unavailable"
+                price_display = f"@{currency} {price:,.2f}" if price is not None else "@ Price: Unavailable"
+
+                if val is not None and total_value_known and total_value and total_value > 0:
+                    wt = (val / total_value * 100.0)
+                    wt_str = f"({wt:.1f}% of portfolio)"
+                else:
+                    wt_str = "(Weight: Unavailable)"
+
+                cost_adv_part = f"; {cost_str}{adv_str}".rstrip("; ") if (cost_str or adv_str) else ""
                 holdings_lines.append(
-                    f"- {sym}: {qty:,.2f} units @ {currency} {price:,.2f} = {currency} {val:,.2f} ({wt:.1f}% of portfolio); {cost_str}{adv_str}".strip()
+                    f"- {sym}: {qty_display} {price_display} = {val_str} {wt_str}{cost_adv_part}".strip()
                 )
             holdings_text = "\n".join(holdings_lines)
+
+            if total_value_known and total_value is not None:
+                total_val_display = f"{currency} {total_value:,.2f}"
+            else:
+                total_val_display = "Unavailable / Not recorded"
+                has_partial_fields = True
+
+            partial_note = "\n- Notice: Some fields (such as valuation, price, or cost basis) are not recorded on the platform and are explicitly marked as Unavailable." if has_partial_fields else ""
             observations_text = f"""- Live holdings and asset valuations retrieved directly from the platform portfolio store.
-- Total recorded market value: {currency} {total_value:,.2f}.
-- Largest recorded positions: {', '.join(h[0] for h in parsed_holdings[:3]) or 'None'}."""
-            lookup_status = "Active live portfolio record retrieved from platform service."
+- Total recorded market value: {total_val_display}.
+- Largest recorded positions: {', '.join(h[0] for h in parsed_holdings[:3]) or 'None'}.{partial_note}"""
+            lookup_status = "Active live portfolio record retrieved (partial fields marked)" if has_partial_fields else "Active live portfolio record retrieved from platform service."
         else:
+            total_val_display = f"{currency} 0.00" if (total_value_known and total_value == 0.0) else (f"{currency} {total_value:,.2f}" if total_value_known and total_value is not None else f"{currency} 0.00")
             holdings_text = "- No holdings recorded in this portfolio. Live API confirms 0 active positions."
             observations_text = f"""- Active portfolio record exists on the platform, but currently contains 0 assets/holdings.
-- Total recorded market value: {currency} 0.00."""
+- Total recorded market value: {total_val_display}."""
             lookup_status = "Active live portfolio record retrieved (0 holdings recorded)."
 
         return f"""
@@ -529,7 +571,7 @@ Base Currency:
 {currency}
 
 Total Portfolio Value:
-{currency} {total_value:,.2f}
+{total_val_display}
 
 Holding Count:
 {len(holdings)}
@@ -554,6 +596,7 @@ Optimization metrics (such as expected annual return and risk scores) require ru
         lookup_status = "Empty portfolio list (User has no portfolios on platform)"
         holdings_disclosure = "Live holdings: Unverified (No live portfolio registered on platform)"
         holdings_note = f"No live portfolio was retrieved for user '{resolved_user}' from the platform service (account has no registered portfolios)"
+        account_status_sentence = "The platform service confirmed that no portfolios or active holdings are registered for this account."
     elif status_code == 404:
         err_msg = live_res.get("error")
         if err_msg and not err_msg.startswith("HTTP 404"):
@@ -564,16 +607,19 @@ Optimization metrics (such as expected annual return and risk scores) require ru
             lookup_status = "Portfolio not found on platform service"
         holdings_disclosure = "Live holdings: Unverified (No live portfolio record retrieved)"
         holdings_note = f"No live portfolio was retrieved for user '{resolved_user}' from the platform service"
+        account_status_sentence = "The platform service confirmed that no matching portfolio was found for this user."
     elif status_code in (401, 403):
         reason = f"Platform service authentication required ({live_res.get('error')})"
         lookup_status = f"Platform service authentication required ({live_res.get('error')})"
         holdings_disclosure = "Live holdings: Unverified (Authentication required)"
         holdings_note = f"Platform authentication required for user '{resolved_user}'"
+        account_status_sentence = "Platform authentication credentials are required to access live portfolio records."
     else:
         reason = live_res.get("error") or "Live platform service unreachable"
         lookup_status = f"Service unavailable ({live_res.get('error')})"
-        holdings_disclosure = "Live holdings: Unverified (Service unreachable)"
+        holdings_disclosure = "Live holdings: Unverified (Platform service unreachable or timed out)"
         holdings_note = f"Platform service unreachable for user '{resolved_user}'"
+        account_status_sentence = "This does not indicate an empty portfolio; live holdings could not be retrieved due to a platform service connection failure or timeout."
 
     if mock_portfolio:
         alloc_lines = "\n".join(f"- {k}: {v}% (Mock Baseline)" for k, v in mock_allocation.items())
@@ -595,6 +641,7 @@ Resolved User Identity:
 
 FALLBACK NOTICE:
 {holdings_note} ({reason}).
+{account_status_sentence}
 This record is NOT the user's actual portfolio. All metrics, valuations, and allocations below are synthetic baseline estimates for demonstration only. The user does NOT have a verified balance of LKR {mock_portfolio.get("total_value_lkr", 0):,} or active live holdings on record.
 
 User ID:

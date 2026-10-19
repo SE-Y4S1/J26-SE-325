@@ -44,3 +44,54 @@ export function askAssistant(
 export function assistantHealth(): Promise<{ status: string }> {
   return request<{ status: string }>("assistant", "/health", { auth: false });
 }
+
+export interface GovernanceDecisionRecord {
+  decision_id: string;
+  decision_type: "confirmed" | "rejected";
+  reference_id: string;
+  reference_type: string;
+  user_id?: string | null;
+  user_email?: string | null;
+  timestamp: string;
+  evidence_reference: Record<string, unknown>;
+  rationale?: string | null;
+  status: string;
+  is_duplicate?: boolean;
+}
+
+export interface GovernanceDecisionResponse {
+  status: string;
+  is_duplicate: boolean;
+  decision: GovernanceDecisionRecord;
+}
+
+export interface GovernanceDecisionQueryResponse {
+  found: boolean;
+  decision: GovernanceDecisionRecord | null;
+}
+
+export function recordGovernanceDecision(payload: {
+  decision_type: "confirmed" | "rejected";
+  reference_id: string;
+  reference_type?: string;
+  evidence_reference?: Record<string, unknown>;
+  rationale?: string;
+}): Promise<GovernanceDecisionResponse> {
+  return request<GovernanceDecisionResponse>("assistant", "/assistant/governance/decision", {
+    method: "POST",
+    body: payload,
+    auth: true,
+  });
+}
+
+export function getGovernanceDecision(referenceId: string): Promise<GovernanceDecisionQueryResponse> {
+  return request<GovernanceDecisionQueryResponse>(
+    "assistant",
+    `/assistant/governance/decision/${encodeURIComponent(referenceId)}`,
+    {
+      method: "GET",
+      auth: true,
+    }
+  );
+}
+
