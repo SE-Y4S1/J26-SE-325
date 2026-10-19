@@ -24,7 +24,7 @@ RUN uv pip install --system --index-url https://download.pytorch.org/whl/cpu tor
       numpy pandas pyarrow scipy statsmodels pydantic pydantic-settings PyYAML python-dotenv \
       requests yfinance pandas-ta-openbb scikit-fuzzy networkx deap pymoo mlflow \
       fastapi "uvicorn[standard]" confluent-kafka prometheus-fastapi-instrumentator openai \
-      transformers peft accelerate
+      transformers peft accelerate yt-dlp pypdf laya
 
 COPY . .
 

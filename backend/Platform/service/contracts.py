@@ -10,6 +10,7 @@ that are supposed to be the same shape.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
@@ -104,6 +105,80 @@ class PortfolioSummary(BaseModel):
     holding_count: int
     total_value: float
     updated_at: datetime
+
+
+# --------------------------------------------------------------------------------------
+# Executions: Component 1 plan -> Component 2 fraud gateway -> Component 3 audit anchor
+# --------------------------------------------------------------------------------------
+
+ExecutionKind = Literal["withdrawal", "rebalance"]
+ExecutionStatus = Literal["EXECUTED", "BLOCKED", "PENDING_REVIEW", "HELD", "REJECTED"]
+
+
+class ExecutionRequest(BaseModel):
+    """A Component 1 response, submitted for execution as returned.
+
+    The orders are derived here from `plan`, never accepted from the client: a withdrawal
+    from `assets_to_sell`, a rebalance from `recommended_weights` against current holdings.
+    That way what is screened and anchored is what Component 1 actually produced.
+    """
+
+    kind: ExecutionKind
+    plan: dict
+    # An opaque, pseudonymous device identifier for Component 2's relational stream. Never
+    # a fingerprint, IP address or user-agent string.
+    device_key: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_.:\-]+$")
+
+
+class Order(BaseModel):
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    quantity: float = Field(gt=0)
+    price: float = Field(gt=0)
+
+
+class ExecutionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    portfolio_id: int | None
+    kind: ExecutionKind
+    status: ExecutionStatus
+    status_reason: str
+    amount: float
+    currency: str
+    source_model_version: str
+    plan_hash: str
+    plan: dict
+    orders: list[Order]
+    fraud: dict | None
+    audit: dict | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExecutionSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    portfolio_id: int | None
+    kind: ExecutionKind
+    status: ExecutionStatus
+    amount: float
+    currency: str
+    created_at: datetime
+
+
+class ExecutionConfirm(BaseModel):
+    """Step-up for a PENDING_REVIEW execution: the account holder re-authenticates.
+
+    A password re-entry is the weakest acceptable step-up -- an OTP or device biometric is
+    what Component 2's STEP_UP actually calls for -- but it is a real second check rather
+    than a button anyone holding the session token could press.
+    """
+
+    password: str = Field(min_length=1, max_length=256)
+    approve: bool
 
 
 class HealthResponse(BaseModel):

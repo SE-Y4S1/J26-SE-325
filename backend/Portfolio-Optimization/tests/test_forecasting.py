@@ -271,7 +271,8 @@ def test_residual_head_output_shape_matches_quantile_count() -> None:
 
 
 @pytest.mark.parametrize(
-    "asset_class,expected", [("equity", 0), ("etf", 1), ("forex", 2), ("unknown", 0)]
+    "asset_class,expected",
+    [("equity", 0), ("etf", 1), ("forex", 2), ("cse_equity", 3), ("crypto", 4), ("unknown", 0)],
 )
 def test_asset_class_index_is_stable(asset_class: str, expected: int) -> None:
     """Embedding indices must be stable across runs, or saved checkpoints stop loading."""

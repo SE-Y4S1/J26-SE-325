@@ -79,6 +79,15 @@ class HashService {
       transactionType: String(record.transactionType || "")
     };
 
+    // Cross-component provenance (Component 2's enforced decision and Component 1's plan
+    // hash). Hashed only when present, so records anchored before these fields existed
+    // still verify against the commitments already on-chain.
+    for (const field of ["upstreamSource", "upstreamDecision", "upstreamModelVersion", "planHash"]) {
+      if (record[field] !== null && record[field] !== undefined && record[field] !== "") {
+        canonicalPayload[field] = String(record[field]);
+      }
+    }
+
     // Sort JSON keys deterministically
     const canonicalString = JSON.stringify(canonicalPayload, Object.keys(canonicalPayload).sort());
 

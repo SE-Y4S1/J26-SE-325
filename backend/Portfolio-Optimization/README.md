@@ -611,3 +611,183 @@ configuration RQ2 was measured with — rather than the `MOEADConfig()` research
 component is a *"real-time, user-facing service"*. Profiling showed the cost is pymoo's own
 genetic operators, not the objective functions: objective evaluation accounts for under a
 second of it. Offline analysis should pass its own `MOEADConfig` for a denser front.
+
+## Market data and per-stock sentiment
+
+Holdings can come from any instrument on the **Colombo Stock Exchange** (all ~282
+securities), **Binance** (all spot pairs) or **Yahoo Finance**. Analysis runs only for
+symbols someone holds — the *active set*.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /market/search?q=` | one search across CSE, Binance and Yahoo (CSE wins ticker ties) |
+| `POST /market/quote` | price, 20-day traded value, volatility, in native currency and LKR |
+| `POST /analysis/track` | register a portfolio's symbols; preparation runs in the background |
+| `GET /analysis/status` | `preparing` / `ready` / `partial` / `failed`, per step |
+| `POST /analysis/refresh` | re-run preparation (news goes stale within hours) |
+| `GET /analysis/channels` | every news/social channel, and why any cannot run |
+| `GET`/`PUT /analysis/keywords/{symbol}` | the symbol's keyword profile; edits mark it reviewed |
+| `GET /analysis/sentiment/{symbol}` | per-tier sentiment, attention spike, top sources |
+
+**Preparation steps** (`data/active_set.py::PIPELINE`): `liquidity` (history + volatility
+metrics, which now replace the GA's hard-coded volatility for prepared symbols), `keywords`,
+`sentiment`.
+
+**Keyword profiles** (`news/keywords.py`) are generated per symbol from the exchange's own
+name, sector/macro templates in `configs/news.yaml`, and an optional local-LLM expansion
+(aliases, brands, people, Sinhala/Tamil names). Reviewed profiles are never regenerated;
+`configs/keyword_overrides.yaml` holds version-controlled corrections.
+
+**Channels** (`news/channels/`):
+
+| Channel | Needs | Notes |
+|---|---|---|
+| `google_news` | nothing | keyword search; Sri Lankan edition for CSE symbols |
+| `gdelt` | nothing | throttled to one call per 6 s (GDELT answers faster callers with 429) |
+| `rss` | nothing | 9 verified outlet feeds, region-filtered |
+| `cse_announcements` | nothing | the company's own CSE disclosures (official weight) |
+| `youtube` | `yt-dlp` (optional extra `social`) | titles, descriptions, engagement |
+| `newsapi` | `NEWSAPI_KEY` | |
+| `jina_web` | `JINA_API_KEY` | web + public LinkedIn posts |
+| `twitter`, `reddit`, `instagram`, `facebook`, `linkedin` | Agent-Reach CLIs on the host | command templates in `configs/news.yaml` must be checked against the installed tools |
+
+**Relevance** requires a word-boundary match of the profile's terms; short tickers must be
+upper-case, exclusion terms veto, and for CSE symbols sector/macro items must also carry
+Sri Lankan context (a term or a Sri Lankan outlet). A Laya zero-shot check is added
+automatically once a Laya checkpoint is cached locally.
+
+**Scoring**: English via FinBERT if cached, else the local Ollama model, in batches of 8
+(measured 2026-10-10: gemma4-e4b scores 8 headlines in ~200 s on this CPU vs ~100 s per
+headline unbatched). Sinhala/Tamil items are scored only by Laya-multilingual; without it
+they count toward attention but not sentiment.
+
+**Storage**: the aggregate block in the active set, and per-day per-tier rows in
+`artifacts/sentiment/<symbol>.parquet` for the forecaster. Raw social text is never stored.
+
+## Fundamentals and technical analysis
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /analysis/fundamentals/{symbol}` | latest statements, ratios, F/Z scores, sector percentiles, red flags, outlook tone (tokenomics for crypto) |
+| `GET /analysis/technical/{symbol}` | trend (20/50/200-day MAs, crosses), RSI/MACD/MFI/ATR, Bollinger %B, ADX, OBV trend, 52-week drawdown, support/resistance, 63-day strength vs ASPI / SPY / BTC |
+
+**Sources** (`fundamentals/reports.py`): CSE's per-company report archive (interim PDFs, text
+layer, parsed with `pypdf`; download from `cdn.cse.lk`), yfinance quarterly statements for
+US names, CoinGecko market data for crypto. Every record carries `available_from` (CSE
+upload time; Yahoo period end + 45 days, flagged as estimated) and `fundamentals.pipeline.as_of`
+only ever returns reports available at a given date.
+
+**Extraction** (`fundamentals/extract.py`): statement pages found by heading (group column
+first), lines split into label / note ref / current / comparative, mapped through ranked
+synonym lists, units detected (`Rs '000`), brackets read as negatives. Templates: general,
+bank, finance company, insurance, detected from the income statement itself. Accounting
+identities are checked on every report (assets = liabilities + equity, gross profit,
+profit after tax, net interest income); `confidence` < 0.5 keeps a report out of decisions.
+A local-LLM read of the key fields is tried only when the parser fails. Scanned PDFs are
+recorded as unusable (no OCR). `python -m evaluation.extraction_accuracy` scores the parser
+against hand-checked values in `evaluation/handchecked/extraction.yaml` (2 reports so far,
+both 100% field-accurate; the target is ~30 across all templates).
+
+**Ratios** (`fundamentals/ratios.py`): margins, ROE/ROA (annualised), growth (YoY from the
+comparative column, QoQ between quarters), leverage, interest cover, current ratio, CFO /
+profit, dividend cover, P/E, P/B, yields, bank ratios (NIM on assets, cost/income,
+impairment/loans, loans/deposits), Piotroski F (score only with ≥5 signals computable), and
+Altman's Z''-EM (not for banks/finance/insurance).
+
+Live, only the newest 2 interims per symbol are downloaded. The full archive comes from
+**Colab Part D** (`experiments/colab_fundamentals_backfill.ipynb`, plus SEC EDGAR for the US
+names): `python -m fundamentals.pipeline --import fundamentals_backfill.parquet`.
+
+## Forecasting service (TimesFM + LSTM head)
+
+Colab **Part A** (`experiments/colab_hybrid_heads.ipynb`) trains one residual head per
+horizon (5 and 21 sessions) over frozen TimesFM on every CSE security with ≥200 sessions, the
+top 50 Binance USDT pairs and the US universe. Inputs add the per-tier sentiment and the
+point-in-time fundamentals (`features/enrichment.py`; identical column set everywhere,
+zero-filled with `has_*` flags when absent). Holdout metrics (base vs hybrid pinball loss,
+per asset class) travel in each head's `meta.json` into the model registry.
+
+```bash
+python -m forecasting.serving --install hybrid_heads.zip      # registers hybrid_h5 / hybrid_h21
+huggingface-cli download google/timesfm-2.5-200m-pytorch      # once, ~821 MB
+```
+
+`/forecast` then serves the model and stamps its real `model_version`. Without a head or
+the TimesFM weights it answers 503 with the reason. The analysis pipeline's `forecast` step
+falls back to an **empirical** band (the symbol's own past h-day returns), always labelled
+`method: "empirical"`; `GET /analysis/forecast/{symbol}` shows which one each band is.
+
+Training fix made here: the head's LSTM windows are now cut from the full consecutive
+history before each forecast cut (`HybridForecaster._cut_sequences`). They previously spanned
+only the strided walk-forward rows, so training saw gapped sequences while serving read
+consecutive days.
+
+## Liquidation driven by forecasts, news and fundamentals
+
+`/portfolio/withdraw` reads each holding's prepared snapshot (SQLite only; no model or
+exchange call on the request path) and:
+
+* **converts currencies**: each holding stays in its trading currency (LKR / USD / USDT); the
+  plan is in `base_currency` (default LKR). The conversion spread (`FX_SPREAD_FIAT`,
+  `FX_SPREAD_STABLECOIN`) is charged by the GA on foreign proceeds. Requests naming no
+  base and no holding currency behave exactly as before.
+* **GA terms** (`optimization/ga_withdrawal.py`): forecast return forgone (+) or loss avoided
+  (−) on what is sold through the deadline; timing risk from the forecast band; FX cost;
+  crystallised loss vs cost basis (weight 0.25); `risk_tolerance` now sets timing-risk
+  aversion (it was accepted but unused).
+* **Fuzzy signal layer** (`optimization/fuzzy_withdrawal.py`): an 18-rule Sugeno system over
+  news sentiment × forecast outlook × attention spike adjusts each sell priority; the rules
+  that fired are in `fuzzy_rule_trace[].signal_rules`.
+* **Response** (additive fields only): `market_context` per holding, `currency`,
+  `cost_breakdown`, `baseline_comparison` (the three naive baselines costed by the same
+  simulator), `effective_inputs`.
+* **Penalty scaling fix**: the GA's shortfall and priority penalties were absolute constants
+  while costs scale with money, so at LKR amounts (~300x USD) or large positions the GA
+  preferred under-raising (feasible in 6% of realistic scenarios vs 41-65% for the naive
+  baselines). Both penalties are now proportional to the target; a test asserts the same
+  schedule in USD and x300.
+* Review fixes: `/portfolio/optimize` applies `max_weight` and uses forecast drift as
+  expected return; with `use_agent` the plan returned IS the agent's tool call, so the trace
+  matches the numbers.
+
+## Laya decision model (two stages)
+
+`decision/`: Stage 1 asks technical, fundamental and news questions per holding (background
+preparation, step `laya_analysis`); Stage 2 asks per holding *sell now / spread / defer /
+exclude* and *downside risk*, and per portfolio *urgency* and *risk tolerance* (request
+path, one batched pass). Answers with confidence ≥ 0.6 adjust fuzzy priorities, cap an
+excluded holding at zero (only if the rest can cover), and replace urgency / risk tolerance;
+the GA still computes every amount. Below threshold, or without Laya, the fuzzy rules decide
+and `market_context[symbol].decision` says why.
+
+Colab **Part C** (`experiments/colab_laya_decision.ipynb`) builds outcome-labelled,
+point-in-time training data (`decision/labels.py`), fine-tunes with the encoder frozen,
+evaluates zero-shot vs fine-tuned on the dates after the cutoff, and exports a head-only zip:
+
+```bash
+uv sync --extra decision
+huggingface-cli download convaiinnovations/laya               # once, ~842 MB
+python -m decision.checkpoint --install laya_head.zip         # registers laya_decision
+```
+
+Verified locally: `laya` 0.4.1 installs and imports on Windows / Python 3.12 / CPU torch, and
+every training row passes laya's own `to_internal` / `target_from_gold`. Not verified
+locally: inference with real weights (not downloaded on this link).
+
+## Evaluation (Phase 6)
+
+| Script | Answers |
+|---|---|
+| `python -m experiments.rq_liquidation --bars bars.parquet` | RQ3/RQ5: naive baselines vs fuzzy GA vs + forecast vs + oracle drift vs Laya, scored on **realised** implementation shortfall, stratified by liquidity |
+| `python -m evaluation.extraction_accuracy` | statement-extraction field accuracy and template accuracy |
+| `python -m evaluation.sentiment_precision export … / score` | precision of the keyword + relevance filter on a hand-labelled sample |
+| Part A `meta.json` metrics | RQ1 base vs hybrid pinball per asset class |
+| Part C `evaluation.csv` | RQ5 zero-shot vs fine-tuned Laya per question |
+
+**Indicative local result (2026-10-10, not the RQ3 result).** 80 scenarios over the 5 symbols
+cached locally (JKH, AAPL, SPY, BTC, SOL), empirical bands only: after the penalty fix the GA
+is feasible as often as the best baselines (65%) and within ~1-2 bps of them on realised
+shortfall. On terminal wealth vs holding, the oracle-drift GA beats the plain GA by ~14 bps
+while the empirical band adds nothing -- the forecast pathway works when the forecast is
+right, so RQ3 hinges on the trained hybrid. Run the real ablation on Colab over Part A's
+`bars.parquet` with the head installed.

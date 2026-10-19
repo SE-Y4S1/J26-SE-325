@@ -408,3 +408,55 @@ def test_walk_forward_without_a_checkpoint_is_unchanged(tmp_path, monkeypatch) -
 
     assert not result.empty
     assert list(tmp_path.iterdir()) == [], "no checkpoint should be written when none is asked for"
+
+
+def test_walk_forward_rolls_batch_adapters_per_symbol(monkeypatch) -> None:
+    """The foundation adapters forecast once from the END of a single series. Handed the
+    multi-symbol test frame they spliced every symbol's closes into one series and returned
+    one row per fold -- 24 predictions across a whole RQ1 backtest. They must instead yield
+    one forecast per (symbol, test row), each from that symbol's own past only."""
+    import numpy as np
+    import pandas as pd
+
+    import evaluation.backtest as bt
+    from forecasting.base import ForecastResult
+
+    class _Batch:
+        name, version = "batch", "v1"
+
+        def fit(self, features, *, horizon, **kwargs) -> None:  # noqa: ANN001, ARG002
+            return None
+
+        def predict_quantiles_batch(self, frames, *, horizon, **kwargs):  # noqa: ANN001, ARG002
+            out = []
+            for frame in frames:
+                assert frame["symbol"].nunique() == 1, "symbols must never be spliced together"
+                last = frame["close"].iloc[-1]
+                out.append(ForecastResult(
+                    symbol=str(frame["symbol"].iloc[0]), horizon=horizon,
+                    quantiles=(0.1, 0.5, 0.9), values=np.full((1, 3), last),
+                    timestamps=pd.DatetimeIndex([frame["timestamp"].iloc[-1]]),
+                    model_name=self.name, model_version=self.version,
+                ))
+            return out
+
+    monkeypatch.setattr("forecasting.base.get_forecaster", lambda name, **kw: _Batch())
+
+    stamps = pd.bdate_range("2015-01-01", periods=1200)
+    features = pd.concat([
+        pd.DataFrame({"timestamp": stamps, "symbol": sym, "close": base + np.arange(1200.0)})
+        for sym, base in (("AAA", 100.0), ("BBB", 5000.0))
+    ], ignore_index=True)
+
+    result = bt.run_walk_forward(
+        features, "batch", horizon=5,
+        config=bt.BacktestConfig(train_window_days=365, test_window_days=180,
+                                 step_days=180, embargo_days=5),
+        log_to_mlflow=False,
+    )
+
+    per_fold = result.groupby(["fold", "symbol"]).size()
+    assert (per_fold > 100).all(), f"expected a forecast per test row, got {per_fold.to_dict()}"
+    # Each forecast saw its own symbol's close at the cut, never the other symbol's.
+    merged = result.merge(features, on=["symbol", "timestamp"])
+    assert np.allclose(merged["p50"], merged["close"])

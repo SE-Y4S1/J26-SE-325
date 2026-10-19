@@ -1,0 +1,42 @@
+# Hand-checked statement values for the extraction-accuracy evaluation (Phase 6).
+# Each entry: the report's page texts (a fixture path, or a CSE PDF url fetched and cached),
+# and figures read OFF THE PRINTED STATEMENT by a person, in the report's printed units.
+# `unit` multiplies the printed figures into rupees; per-share fields are never scaled.
+# Target: ~30 reports across general / bank / finance / insurance templates.
+reports:
+  - id: JKH-2026Q1
+    symbol: JKH.N0000
+    company: John Keells Holdings PLC
+    pages_fixture: tests/fixtures/fundamentals/jkh_jun2026_pages.json
+    template: general
+    unit: 1000
+    fields:
+      revenue: 141647460
+      gross_profit: 24584583
+      profit_before_tax: 4080382
+      net_profit: 773225
+      net_profit_parent: 62215
+      total_assets: 934898114
+      current_assets: 236986945
+      total_equity: 440544707
+      cfo: 12334943
+      eps_basic: 0.004
+      naps: 23.46
+  - id: COMB-2026H1
+    symbol: COMB.N0000
+    company: Commercial Bank of Ceylon PLC
+    pages_fixture: tests/fixtures/fundamentals/comb_jun2026_pages.json
+    template: bank
+    unit: 1000
+    fields:
+      net_interest_income: 79693465
+      interest_income: 171648535
+      total_operating_income: 109074161
+      impairment: 14848257
+      net_profit: 35423054
+      total_assets: 3739565733
+      total_equity: 363888905
+      loans: 2212677022
+      deposits: 3015155478
+      eps_basic: 21.14
+      naps: 216.14

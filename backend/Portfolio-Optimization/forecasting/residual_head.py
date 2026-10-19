@@ -22,8 +22,9 @@ from torch import nn
 from forecasting.base import DEFAULT_QUANTILES
 
 # Asset classes, in a fixed order so embedding indices are stable across runs and
-# checkpoints remain loadable.
-ASSET_CLASS_ORDER = ("equity", "etf", "forex")
+# checkpoints remain loadable. New classes are APPENDED, never inserted: CSE equities and
+# Binance crypto came in Phase 3 of the market-data work, after the first three.
+ASSET_CLASS_ORDER = ("equity", "etf", "forex", "cse_equity", "crypto")
 
 
 @dataclass

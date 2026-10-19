@@ -1,0 +1,9 @@
+# artifacts/ is bind-mounted at runtime, so copying it in only bloats the image.
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+artifacts
+notebooks
+test-results

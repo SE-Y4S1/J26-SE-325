@@ -38,5 +38,5 @@ test("the forecast screen explains a 503 instead of showing an error", async ({ 
   await page.getByRole("button", { name: /Forecast \d+ symbols/ }).click();
 
   await expect(page.getByText(/This is expected/i)).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText(/colab_finetune\.ipynb/)).toBeVisible();
+  await expect(page.getByText(/colab_hybrid_heads\.ipynb/)).toBeVisible();
 });

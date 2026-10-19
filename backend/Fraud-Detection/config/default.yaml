@@ -1,0 +1,59 @@
+# Default settings for a real IEEE-CIS run.
+# Thresholds below are selection rules, not the final cut-points.
+# The gateway chooses numeric cut-points from legitimate validation scores.
+seed: 42
+dataset_name: ieee-cis
+benchmark_valid: true
+max_rows: null
+split:
+  train: 0.70
+  val: 0.15
+  test: 0.15
+gateway:
+  # Fraction of legitimate validation transactions allowed into each action.
+  step_up_fpr: 0.05
+  block_fpr: 0.01
+  hard_block_amount: 1000000
+  rate_limit: 30
+  rate_window_seconds: 60
+  rate_limit_block_multiplier: 3
+  # Reputation is a supplied score from 0 (worst) to 1 (trusted).
+  # Missing reputation does not block the transaction.
+  reputation_step_up_below: 0.40
+  reputation_block_below: 0.15
+  drift_delta: 0.15
+  drift_window: 50
+  drift_forces_step_up: true
+  feedback_min_samples: 30
+models:
+  rf_trees: 40
+  rf_depth: 8
+  svm_max_iter: 400
+  hidden: 32
+  epochs: 5
+  patience: 2
+  lr: 0.01
+  seq_len: 8
+  max_neighbors: 5
+  batch_size: 256
+  max_pos_weight: 50
+graph_limits:
+  # Safety caps so a laptop does not load the full multi-million-node graphs
+  # unless you explicitly raise these values.
+  dgraph_max_nodes: 10000
+  elliptic_max_nodes: 20000
+device_lift: true
+adversarial:
+  camouflage_alpha: 0.6
+  drift_magnitude: 0.75
+  structuring_parts: 4
+api:
+  host: 0.0.0.0
+  port: 8082
+kafka:
+  enabled: false
+  bootstrap_servers: localhost:9094
+  topic_in: finance.transactions.raw
+  topic_out: finance.fraud.decisions
+  group_id: fraud-engine
+artifact_path: artifacts/fraud_bundle.joblib

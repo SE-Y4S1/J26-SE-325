@@ -10,6 +10,7 @@
 
 import { Suspense, useState } from "react";
 
+import { ExecutionPanel } from "@/components/ExecutionPanel";
 import { Button, Card, Field, Notice, Spinner, Stat, percent } from "@/components/ui";
 import { optimizeAllocation, type SelectionRule } from "@/lib/api/portfolio";
 import type { OptimizeResponse } from "@/lib/api/types";
@@ -37,7 +38,7 @@ const RULES: Array<{ value: SelectionRule; label: string; blurb: string }> = [
 ];
 
 function OptimizeScreen() {
-  const { portfolio, loading, error } = usePortfolio();
+  const { portfolio, loading, error, reload } = usePortfolio();
 
   const [rule, setRule] = useState<SelectionRule>("knee");
   const [riskPreference, setRiskPreference] = useState(0.5);
@@ -197,6 +198,19 @@ function OptimizeScreen() {
             Rule <code>{result.selection_rule}</code> · model{" "}
             <code>{result.model_version}</code>
           </p>
+
+          <ExecutionPanel
+            key={String(result.generated_at)}
+            portfolioId={portfolio.id}
+            kind="rebalance"
+            plan={result}
+            disabledReason={
+              (result.rebalance_orders ?? []).length > 0
+                ? undefined
+                : "Already at the recommended weights; nothing to trade."
+            }
+            onExecuted={reload}
+          />
         </>
       )}
     </div>

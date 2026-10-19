@@ -28,6 +28,7 @@ const NAV: NavItem[] = [
   { href: "/withdraw", label: "Withdraw", component: "1", ready: true },
   { href: "/optimize", label: "Optimize", component: "1", ready: true },
   { href: "/forecast", label: "Forecast", component: "1", ready: true },
+  { href: "/analysis", label: "Analysis", component: "1", ready: true },
   // Teammates' components, now wired to their real services. `ready` still exists because a
   // service being LIVE and a service being UP are different things -- each page handles the
   // second case itself, via ApiError.isUnavailable.
@@ -62,7 +63,7 @@ function Shell({ children }: { children: ReactNode }) {
       <header className="border-b border-black/10 dark:border-white/15">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 p-4">
           <Link href="/portfolio" className="font-semibold">
-            Smart Finance Platform
+            Nexa
           </Link>
           <div className="flex items-center gap-3 text-sm">
             <span className="text-neutral-500">{user.display_name}</span>

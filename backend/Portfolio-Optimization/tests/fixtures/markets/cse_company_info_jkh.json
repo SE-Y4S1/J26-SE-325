@@ -1,0 +1,22 @@
+{
+ "reqSymbolInfo": {
+  "id": 297,
+  "symbol": "JKH.N0000",
+  "name": "JOHN KEELLS HOLDINGS PLC",
+  "lastTradedPrice": 18.4,
+  "previousClose": 18.3,
+  "closingPrice": 18.4,
+  "tdyShareVolume": 4226660,
+  "tdyTurnover": 77251784.0,
+  "marketCap": 326438179452.0,
+  "p12HiPrice": 23.4,
+  "p12LowPrice": 17.8
+ },
+ "reqSymbolBetaInfo": {
+  "securityId": 508,
+  "triASIBetaValue": 1.0031595,
+  "betaValueSPSL": 1.1296043,
+  "triASIBetaPeriod": "2026",
+  "quarter": 1
+ }
+}

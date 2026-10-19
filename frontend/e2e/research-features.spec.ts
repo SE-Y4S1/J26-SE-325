@@ -1,8 +1,8 @@
 /**
- * The two demonstrations that carry Components 2 and 3's research claims.
+ * The cross-component execution flow, and Component 3's tamper-evidence demonstration.
  *
  * Unlike components.spec.ts, these cannot be satisfied by the service being down: an
- * adversarial simulation and a tamper-evidence walkthrough only mean anything against a live
+ * execution through the fraud gateway and a tamper-evidence walkthrough only mean anything against a live
  * backend. Playwright's webServer starts neither, so each spec checks first and SKIPS rather
  * than failing -- a default `npx playwright test` stays green, and bringing the services up
  * turns these on.
@@ -23,22 +23,29 @@ async function reachable(url: string): Promise<boolean> {
   }
 }
 
-test("adversarial simulator reports the dual-stream ablation", async ({ page }) => {
-  test.skip(!(await reachable("http://localhost:8001/health")), "Component 2 is not running");
+test("an executed withdrawal is screened by Component 2 and anchored by Component 3", async ({ page }) => {
+  test.skip(
+    !(await reachable("http://localhost:8001/health")) || !(await reachable("http://localhost:8002/api/health")),
+    "Components 2 and 3 are not both running",
+  );
   test.setTimeout(180_000);
 
   await register(page, newUser());
   await seedPortfolio(page);
-  await page.getByRole("link", { name: "Fraud" }).click();
-  await page.getByRole("button", { name: "Adversarial robustness" }).click();
-  await page.getByRole("button", { name: "Run attack" }).click();
+  await page.getByRole("link", { name: "Withdraw" }).click();
+  await page.getByRole("button", { name: "Plan withdrawal" }).click();
+  await expect(page.getByText("Raised", { exact: true })).toBeVisible({ timeout: 60_000 });
 
-  await expect(page.getByText("Camouflage attack")).toBeVisible({ timeout: 60_000 });
-  // The claim itself: the behavioural stream was evaded, the graph stream was not, and the
-  // engine says so. This is her G2 evidence, reported by the service rather than asserted
-  // by the UI.
-  await expect(page.getByText("A single-stream model would have missed this")).toBeVisible();
-  await expect(page.getByText("Behavioural", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Execute withdrawal" }).click();
+
+  // All three stages render from the platform's stored trace, whatever the verdict.
+  const trace = page.getByTestId("execution-trace");
+  await expect(trace).toBeVisible({ timeout: 60_000 });
+  await expect(trace.getByText("1 · Plan · Component 1")).toBeVisible();
+  await expect(trace.getByText("2 · Fraud gateway · Component 2")).toBeVisible();
+  await expect(trace.getByText("3 · Audit anchor · Component 3")).toBeVisible();
+  await expect(trace.getByText(/ALLOW|STEP_UP|BLOCK/).first()).toBeVisible();
+  await expect(trace.getByText(/Execution EXE-[0-9a-f]+/)).toBeVisible();
 });
 
 test("tamper-evidence: anchor, verify, tamper, detect", async ({ page }) => {
@@ -66,11 +73,22 @@ test("tamper-evidence: anchor, verify, tamper, detect", async ({ page }) => {
 });
 
 
-test("assistant answers a real question with its evidence trail", async ({ page }) => {
+test("assistant answers a real question with its evidence trail", async ({ page, request }) => {
   test.skip(!(await reachable("http://localhost:8003/health")), "Component 4 is not running");
   // A CPU round trip measured between 82s and past 240s depending on machine load. This is
   // the slow, honest version -- kept out of the default suite by the skip above.
   test.setTimeout(900_000);
+
+  // ChatScreen catches a backend failure and renders canned text from mockData instead, so
+  // an assistant bubble appearing proves nothing about the agent being alive. The only
+  // check the fallback cannot satisfy is asking the service itself, so do that first.
+  const direct = await request.post("http://localhost:8003/assistant/chat", {
+    data: { message: "What is a liquidity-aware withdrawal?" },
+    timeout: 600_000,
+  });
+  expect(direct.ok()).toBeTruthy();
+  const answer: string = (await direct.json()).answer ?? "";
+  expect(answer.length).toBeGreaterThan(80);
 
   await register(page, newUser());
   await seedPortfolio(page);
@@ -79,12 +97,18 @@ test("assistant answers a real question with its evidence trail", async ({ page 
   const question = "What is a liquidity-aware withdrawal?";
   const input = page.getByPlaceholder("Ask the financial assistant...");
   await expect(input).toBeVisible({ timeout: 30_000 });
+
+  // The transcript opens with a seeded exchange, so this label is already on the page once.
+  // Counting it is what distinguishes a new turn from the furniture that was always there --
+  // matching /Assistant/ would also match the nav link and the page heading.
+  const agentLabel = page.getByText("FinTrust Agent");
+  const before = await agentLabel.count();
+
   await input.fill(question);
   await page.getByRole("button", { name: "Send" }).click();
 
-  // The reply is whatever the agent says, so there is no fixed string to match. What can be
-  // asserted is that a SECOND message appears in the transcript -- the question, then an
-  // answer beneath it.
   await expect(page.getByText(question).first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText(/Assistant/).first()).toBeVisible({ timeout: 720_000 });
+  await expect(async () => {
+    expect(await agentLabel.count()).toBeGreaterThan(before);
+  }).toPass({ timeout: 720_000 });
 });

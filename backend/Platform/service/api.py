@@ -24,7 +24,12 @@ from auth.security import (
     hash_password,
     verify_password,
 )
+from service import pipeline
 from service.contracts import (
+    ExecutionConfirm,
+    ExecutionRequest,
+    ExecutionResponse,
+    ExecutionSummary,
     HealthResponse,
     HoldingModel,
     LoginRequest,
@@ -38,7 +43,7 @@ from service.contracts import (
 )
 from service.cors import install_cors
 from store.database import get_session, init_db
-from store.models import Holding, Portfolio, User
+from store.models import Execution, Holding, Portfolio, User
 
 logger = logging.getLogger(__name__)
 
@@ -239,8 +244,210 @@ def delete_portfolio(
 
 
 # --------------------------------------------------------------------------------------
+# Executions (see service/pipeline.py for the flow and its failure policy)
+# --------------------------------------------------------------------------------------
+
+@app.post(
+    "/portfolios/{portfolio_id}/executions",
+    response_model=ExecutionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_execution(
+    portfolio_id: int,
+    request: ExecutionRequest,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> ExecutionResponse:
+    """Screen a Component 1 plan with Component 2, anchor it with Component 3, then execute.
+
+    201 whatever the outcome: the execution record exists either way, and `status` says
+    whether holdings changed. Only a plan that cannot apply to this portfolio is a 422.
+    """
+    portfolio = _owned_portfolio(portfolio_id, user, session)
+    held = {h.symbol: {"quantity": h.quantity, "current_price": h.current_price}
+            for h in portfolio.holdings}
+    try:
+        orders = pipeline.derive_orders(request.kind, request.plan, held)
+    except pipeline.PlanError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    execution = Execution(
+        id=pipeline.new_execution_id(),
+        user_id=user.id,
+        portfolio_id=portfolio.id,
+        kind=request.kind,
+        status="HELD",
+        amount=pipeline.transaction_amount(request.kind, request.plan, orders),
+        currency=_plan_currency(request.plan, portfolio.base_currency),
+        source_model_version=str(request.plan.get("model_version") or "unknown"),
+        plan_hash=pipeline.plan_hash(request.kind, portfolio.id, request.plan, orders),
+        plan=request.plan,
+        orders=orders,
+    )
+    _run_stages(execution, portfolio, user.id, request.device_key)
+    session.add(execution)
+    session.commit()
+    session.refresh(execution)
+    return ExecutionResponse.model_validate(execution)
+
+
+@app.get("/executions", response_model=list[ExecutionSummary])
+def list_executions(
+    portfolio_id: int | None = None,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> list[ExecutionSummary]:
+    query = select(Execution).where(Execution.user_id == user.id)
+    if portfolio_id is not None:
+        query = query.where(Execution.portfolio_id == portfolio_id)
+    rows = session.scalars(query.order_by(Execution.created_at.desc()).limit(100)).all()
+    return [ExecutionSummary.model_validate(r) for r in rows]
+
+
+@app.get("/executions/{execution_id}", response_model=ExecutionResponse)
+def get_execution(
+    execution_id: str,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> ExecutionResponse:
+    """The full trace: Component 1's plan, Component 2's decision, Component 3's anchor."""
+    return ExecutionResponse.model_validate(_owned_execution(execution_id, user, session))
+
+
+@app.post("/executions/{execution_id}/confirm", response_model=ExecutionResponse)
+def confirm_execution(
+    execution_id: str,
+    request: ExecutionConfirm,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> ExecutionResponse:
+    """Step-up for a PENDING_REVIEW execution. The review is anchored before anything moves."""
+    execution = _owned_execution(execution_id, user, session)
+    if execution.status != "PENDING_REVIEW":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Execution is {execution.status}, not awaiting review")
+    # 400, not 401: the session is valid, and a 401 would sign the user out of the app.
+    if not verify_password(request.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Password did not match; the execution is unchanged")
+
+    review = pipeline.submit_review(execution.id, request.approve)
+    if not review.reachable or review.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The audit bridge (Component 3) could not record the review; the execution is unchanged",
+        )
+    execution.audit = {**(execution.audit or {}), "review": pipeline.audit_record(review)}
+
+    if not request.approve:
+        execution.status, execution.status_reason = "REJECTED", "Rejected by the account holder at step-up."
+    else:
+        portfolio = session.get(Portfolio, execution.portfolio_id) if execution.portfolio_id else None
+        if portfolio is None:
+            execution.status = "REJECTED"
+            execution.status_reason = "Approved at step-up, but the portfolio no longer exists."
+        else:
+            _execute_orders(execution, portfolio,
+                            "Approved by the account holder at step-up; review anchored by Component 3.")
+
+    session.commit()
+    session.refresh(execution)
+    return ExecutionResponse.model_validate(execution)
+
+
+@app.post("/executions/{execution_id}/retry", response_model=ExecutionResponse)
+def retry_execution(
+    execution_id: str,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+) -> ExecutionResponse:
+    """Re-run the stages of a HELD execution once Component 2 or 3 is back."""
+    execution = _owned_execution(execution_id, user, session)
+    if execution.status != "HELD":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Only HELD executions can be retried; this one is {execution.status}")
+    portfolio = session.get(Portfolio, execution.portfolio_id) if execution.portfolio_id else None
+    if portfolio is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The portfolio no longer exists")
+
+    # Rescore only if Component 2 never answered: a second score of the same transaction
+    # would count twice in its per-account history and rate limit.
+    previous = execution.fraud if execution.fraud and execution.fraud.get("decision") else None
+    _run_stages(execution, portfolio, user.id, device_key=None, previous_fraud=previous)
+    session.commit()
+    session.refresh(execution)
+    return ExecutionResponse.model_validate(execution)
+
+
+# --------------------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------------------
+
+def _run_stages(execution: Execution, portfolio: Portfolio, user_id: int,
+                device_key: str | None, previous_fraud: dict | None = None) -> None:
+    """Component 2, then Component 3, then holdings. Mutates `execution` in place."""
+    if previous_fraud is not None:
+        fraud = pipeline.Downstream(True, 200, previous_fraud)
+    else:
+        fraud = pipeline.score_transaction(pipeline.fraud_payload(
+            execution.id, execution.kind, execution.amount, execution.currency, user_id, device_key))
+    usable = fraud.reachable and fraud.status_code == 200 and bool(fraud.body)
+    execution.fraud = fraud.body if usable else {
+        "reachable": fraud.reachable, "status_code": fraud.status_code,
+        "error": (fraud.body or {}).get("detail") or fraud.error,
+    }
+
+    audit = None
+    if usable:
+        audit = pipeline.anchor_decision(pipeline.audit_payload(
+            execution.id, execution.kind, execution.amount, execution.source_model_version,
+            fraud.body, execution.plan_hash))
+        if audit.status_code == 409:
+            # Component 3 already holds this record (an earlier attempt saved it but could
+            # not reach the chain); publish that record rather than evaluating twice.
+            retried = pipeline.retry_anchor(execution.id)
+            if retried.reachable and retried.status_code == 200 and retried.body:
+                body = retried.body
+                audit = pipeline.Downstream(True, 200, {
+                    "status": "COMPLETED", "record": body.get("record"),
+                    "blockchain": body.get("blockchain"), "message": body.get("message"),
+                })
+            else:
+                audit = retried
+        execution.audit = pipeline.audit_record(audit)
+
+    execution.status, execution.status_reason = pipeline.decide(fraud, audit)
+    if execution.status == "EXECUTED":
+        _execute_orders(execution, portfolio, execution.status_reason)
+
+
+def _execute_orders(execution: Execution, portfolio: Portfolio, reason: str) -> None:
+    by_symbol = {h.symbol: h for h in portfolio.holdings}
+    try:
+        closed = pipeline.apply_orders(by_symbol, execution.orders)
+    except pipeline.PlanError as exc:
+        execution.status = "REJECTED"
+        execution.status_reason = f"Cleared for execution, but the holdings changed since the plan: {exc}"
+        return
+    for symbol in closed:
+        portfolio.holdings.remove(by_symbol[symbol])
+    execution.status, execution.status_reason = "EXECUTED", reason
+
+
+def _owned_execution(execution_id: str, user: User, session: Session) -> Execution:
+    """404 for someone else's execution, for the same reason as _owned_portfolio."""
+    execution = session.get(Execution, execution_id)
+    if execution is None or execution.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Execution not found")
+    return execution
+
+
+def _plan_currency(plan: dict, fallback: str) -> str:
+    """Component 1 prices a plan in its own base currency, which it reports under `currency`."""
+    base = (plan.get("currency") or {}).get("base") if isinstance(plan.get("currency"), dict) else None
+    if isinstance(base, str) and len(base) == 3 and base.isalpha():
+        return base.upper()
+    return fallback
 
 def _owned_portfolio(portfolio_id: int, user: User, session: Session) -> Portfolio:
     """Fetch a portfolio the caller owns.

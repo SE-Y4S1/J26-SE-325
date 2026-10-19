@@ -118,10 +118,222 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/portfolios/{portfolio_id}/executions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Execution
+         * @description Screen a Component 1 plan with Component 2, anchor it with Component 3, then execute.
+         *
+         *     201 whatever the outcome: the execution record exists either way, and `status` says
+         *     whether holdings changed. Only a plan that cannot apply to this portfolio is a 422.
+         */
+        post: operations["create_execution_portfolios__portfolio_id__executions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/executions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Executions */
+        get: operations["list_executions_executions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/executions/{execution_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Execution
+         * @description The full trace: Component 1's plan, Component 2's decision, Component 3's anchor.
+         */
+        get: operations["get_execution_executions__execution_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/executions/{execution_id}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm Execution
+         * @description Step-up for a PENDING_REVIEW execution. The review is anchored before anything moves.
+         */
+        post: operations["confirm_execution_executions__execution_id__confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/executions/{execution_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry Execution
+         * @description Re-run the stages of a HELD execution once Component 2 or 3 is back.
+         */
+        post: operations["retry_execution_executions__execution_id__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * ExecutionConfirm
+         * @description Step-up for a PENDING_REVIEW execution: the account holder re-authenticates.
+         *
+         *     A password re-entry is the weakest acceptable step-up -- an OTP or device biometric is
+         *     what Component 2's STEP_UP actually calls for -- but it is a real second check rather
+         *     than a button anyone holding the session token could press.
+         */
+        ExecutionConfirm: {
+            /** Password */
+            password: string;
+            /** Approve */
+            approve: boolean;
+        };
+        /**
+         * ExecutionRequest
+         * @description A Component 1 response, submitted for execution as returned.
+         *
+         *     The orders are derived here from `plan`, never accepted from the client: a withdrawal
+         *     from `assets_to_sell`, a rebalance from `recommended_weights` against current holdings.
+         *     That way what is screened and anchored is what Component 1 actually produced.
+         */
+        ExecutionRequest: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "withdrawal" | "rebalance";
+            /** Plan */
+            plan: {
+                [key: string]: unknown;
+            };
+            /** Device Key */
+            device_key?: string | null;
+        };
+        /** ExecutionResponse */
+        ExecutionResponse: {
+            /** Id */
+            id: string;
+            /** Portfolio Id */
+            portfolio_id: number | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "withdrawal" | "rebalance";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "EXECUTED" | "BLOCKED" | "PENDING_REVIEW" | "HELD" | "REJECTED";
+            /** Status Reason */
+            status_reason: string;
+            /** Amount */
+            amount: number;
+            /** Currency */
+            currency: string;
+            /** Source Model Version */
+            source_model_version: string;
+            /** Plan Hash */
+            plan_hash: string;
+            /** Plan */
+            plan: {
+                [key: string]: unknown;
+            };
+            /** Orders */
+            orders: components["schemas"]["Order"][];
+            /** Fraud */
+            fraud: {
+                [key: string]: unknown;
+            } | null;
+            /** Audit */
+            audit: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** ExecutionSummary */
+        ExecutionSummary: {
+            /** Id */
+            id: string;
+            /** Portfolio Id */
+            portfolio_id: number | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "withdrawal" | "rebalance";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "EXECUTED" | "BLOCKED" | "PENDING_REVIEW" | "HELD" | "REJECTED";
+            /** Amount */
+            amount: number;
+            /** Currency */
+            currency: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -161,6 +373,20 @@ export interface components {
             email: string;
             /** Password */
             password: string;
+        };
+        /** Order */
+        Order: {
+            /** Symbol */
+            symbol: string;
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "BUY" | "SELL";
+            /** Quantity */
+            quantity: number;
+            /** Price */
+            price: number;
         };
         /** PortfolioCreate */
         PortfolioCreate: {
@@ -539,6 +765,169 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_execution_portfolios__portfolio_id__executions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                portfolio_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExecutionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_executions_executions_get: {
+        parameters: {
+            query?: {
+                portfolio_id?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionSummary"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_execution_executions__execution_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                execution_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    confirm_execution_executions__execution_id__confirm_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                execution_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExecutionConfirm"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_execution_executions__execution_id__retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                execution_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

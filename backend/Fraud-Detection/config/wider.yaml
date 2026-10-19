@@ -1,0 +1,16 @@
+# Larger IEEE-CIS window: the earliest 100,000 labelled rows.
+# Model size matches the 20,000-row development profile so the comparison
+# is the extra data. Results are written to experiments/results/ieee-cis-100000
+# and do not replace the 20,000-row run.
+dataset_name: ieee-cis
+benchmark_valid: true
+max_rows: 100000
+models:
+  rf_trees: 40
+  rf_depth: 8
+  hidden: 32
+  epochs: 5
+  seq_len: 8
+graph_limits:
+  dgraph_max_nodes: 8000
+  elliptic_max_nodes: 15000

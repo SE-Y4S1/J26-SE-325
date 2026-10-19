@@ -171,6 +171,36 @@ def iter_fold_data(
         yield fold, train, test
 
 
+def _rolling_forecast(
+    forecaster, history: dict[str, pd.DataFrame], test: pd.DataFrame, *, horizon: int,  # noqa: ANN001
+    batch_size: int = 64,
+) -> pd.DataFrame:
+    """One forecast per (symbol, test row), from that symbol's history up to and including
+    the row. Past closes only, so no look-ahead; and full history rather than train+test, so
+    the embargo gap (in neither) still counts as context, as it would live."""
+    rows = []
+    for symbol, sym_test in test.groupby("symbol", sort=False):
+        group = history[symbol]
+        cuts = group.index[group["timestamp"].isin(sym_test["timestamp"])].tolist()
+        cuts = [c for c in cuts if c >= 1]  # a return series needs two closes
+        for start in range(0, len(cuts), batch_size):
+            chunk = cuts[start : start + batch_size]
+            try:
+                results = forecaster.predict_quantiles_batch(
+                    [group.iloc[: c + 1] for c in chunk], horizon=horizon
+                )
+            except Exception as exc:  # noqa: BLE001 - one symbol must not kill the fold
+                logger.debug("rolling forecast failed for %s near row %d: %s", symbol, chunk[0], exc)
+                continue
+            for cut, result in zip(chunk, results):
+                row = result.to_frame().iloc[-1].to_dict()
+                row.update(symbol=symbol, timestamp=group.loc[cut, "timestamp"])
+                rows.append(row)
+    if not rows:
+        raise RuntimeError("no rolling forecasts produced for this fold")
+    return pd.DataFrame(rows)
+
+
 def run_walk_forward(
     features: pd.DataFrame,
     forecaster_name: str,
@@ -229,6 +259,16 @@ def run_walk_forward(
     # documented no-op, and there was never anything per-fold to construct.
     forecaster = get_forecaster(forecaster_name, **(forecaster_kwargs or {}))
 
+    # The foundation adapters (the ones with predict_quantiles_batch) return ONE forecast from
+    # the end of whatever they are given, treating it as a single series. Handed the
+    # multi-symbol test frame, that was one meaningless row per fold -- every symbol's closes
+    # spliced together. They are rolled per symbol instead, from full history (see below).
+    rolling = hasattr(forecaster, "predict_quantiles_batch")
+    history = (
+        {s: g.sort_values("timestamp").reset_index(drop=True) for s, g in frame.groupby("symbol")}
+        if rolling else {}
+    )
+
     logger.info(
         "backtest %s: %d folds, %s", forecaster_name, len(folds), memory_note()
     )
@@ -245,12 +285,14 @@ def run_walk_forward(
             assert_fold_is_clean(train, test, embargo_days=config.embargo_days)
 
             forecaster.fit(train, horizon=horizon, log_to_mlflow=False)
-            result = forecaster.predict_quantiles(test, horizon=horizon)
+            if rolling:
+                fold_frame = _rolling_forecast(forecaster, history, test, horizon=horizon)
+            else:
+                fold_frame = forecaster.predict_quantiles(test, horizon=horizon).to_frame()
         except Exception as exc:  # noqa: BLE001 - one bad fold must not kill the backtest
             logger.error("fold %d failed: %s", fold.fold_index, exc)
             continue
 
-        fold_frame = result.to_frame()
         fold_frame["fold"] = fold.fold_index
         fold_frame = fold_frame.merge(
             test[["symbol", "timestamp", "target_return"]],
@@ -265,7 +307,7 @@ def run_walk_forward(
         # A fold's training tensors are hundreds of megabytes at universe scale, and the
         # next fold rebuilds them from scratch. Dropping them here keeps the peak to one
         # fold's worth rather than leaving the last one resident while the next allocates.
-        del train, test, result, fold_frame
+        del train, test, fold_frame
         gc.collect()
 
         # Per-fold, because a backtest that dies mid-run leaves no other evidence -- and on

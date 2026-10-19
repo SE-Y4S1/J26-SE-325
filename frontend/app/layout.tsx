@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI-Driven Smart Finance Platform",
+  title: "Nexa",
   description:
     "J26-SE-325 — liquidity-aware forecasting, portfolio optimization, fraud detection, blockchain auditability and explainable agentic assistance.",
 };

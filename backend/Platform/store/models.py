@@ -1,4 +1,4 @@
-"""ORM models: users, portfolios, holdings.
+"""ORM models: users, portfolios, holdings, and plan executions.
 
 Holdings are stored in exactly the shape Component 1's `Holding` contract expects
 (symbol, quantity, current_price, avg_daily_volume, cost_basis), so the frontend can pass a
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -88,3 +88,39 @@ class Holding(Base):
     @property
     def value(self) -> float:
         return self.quantity * self.current_price
+
+
+class Execution(Base):
+    """One Component 1 plan carried through fraud screening and audit anchoring.
+
+    The id doubles as Component 2's transaction_id and Component 3's transactionId, so any
+    component -- Component 4 in particular -- can join the three records without a lookup
+    table. Each stage's response is kept whole: the trace is the evidence the explanation
+    layer reads, and a summary would lose exactly the detail it needs.
+    """
+
+    __tablename__ = "executions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # SET NULL, not CASCADE: deleting a portfolio must not erase the record that money moved.
+    portfolio_id: Mapped[int | None] = mapped_column(
+        ForeignKey("portfolios.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)          # withdrawal | rebalance
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    status_reason: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    source_model_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(66), nullable=False)
+    plan: Mapped[dict] = mapped_column(JSON, nullable=False)
+    orders: Mapped[list] = mapped_column(JSON, nullable=False)
+    fraud: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    audit: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )

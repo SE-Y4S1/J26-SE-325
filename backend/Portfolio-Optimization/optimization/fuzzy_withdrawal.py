@@ -25,6 +25,15 @@ is illiquid THEN sell_priority is very_high -- because an illiquid holding takes
 to exit, so under time pressure it must start moving first, even though it is the most
 expensive to sell.
 
+MARKET-SIGNAL LAYER (second rule base)
+--------------------------------------
+News sentiment, attention spikes and the forecaster's outlook adjust the priority from the
+first rule base rather than joining it: adding three antecedents to the 27-rule grid would
+make it 729 rules, unreadable in an audit trace. Instead an 18-rule zero-order Sugeno system
+(sentiment x outlook x attention) outputs a signed adjustment in priority points. Sample:
+IF news is negative AND attention is spiking AND outlook is bearish THEN sell earlier (+20).
+The adjustment is monotone: worse news or a weaker outlook never lowers sell priority.
+
 Every evaluation returns a `fuzzy_rule_trace` naming which rules fired and at what strength.
 That trace goes into the API response: it is the deterministic, inspectable audit record the
 TAF's Legal Impact section demands ("regulators increasingly mandate explainability,
@@ -93,6 +102,11 @@ class FuzzyPriorityResult:
     sell_priority: float
     memberships: dict[str, float]
     fired_rules: tuple[FiredRule, ...]
+    # Market-signal layer: priority points added (+) or removed (-), and the rules behind it.
+    signal_adjustment: float = 0.0
+    signal_rules: tuple[FiredRule, ...] = ()
+    # Laya Stage 2 (decision/engine.py): points from a confident action/downside answer.
+    laya_adjustment: float = 0.0
 
 
 # --------------------------------------------------------------------------------------
@@ -324,17 +338,88 @@ def position_liquidity_score(
     return float(np.clip(1.0 - math.log10(participation / floor) / span, 0.0, 1.0))
 
 
+# --------------------------------------------------------------------------------------
+# Market-signal layer
+# --------------------------------------------------------------------------------------
+# (outlook, news_sentiment, attention) -> priority points. Positive = sell earlier.
+_SIGNAL_TABLE: dict[tuple[str, str, str], float] = {
+    ("bearish", "negative", "spike"): 20.0, ("bearish", "negative", "normal"): 15.0,
+    ("bearish", "neutral", "spike"): 12.0, ("bearish", "neutral", "normal"): 10.0,
+    ("bearish", "positive", "spike"): 5.0, ("bearish", "positive", "normal"): 5.0,
+    ("neutral", "negative", "spike"): 10.0, ("neutral", "negative", "normal"): 5.0,
+    ("neutral", "neutral", "spike"): 0.0, ("neutral", "neutral", "normal"): 0.0,
+    ("neutral", "positive", "spike"): -5.0, ("neutral", "positive", "normal"): -5.0,
+    # A bullish model against a news storm: conflicting evidence, hold the line.
+    ("bullish", "negative", "spike"): 0.0, ("bullish", "negative", "normal"): -5.0,
+    ("bullish", "neutral", "spike"): -10.0, ("bullish", "neutral", "normal"): -10.0,
+    ("bullish", "positive", "spike"): -15.0, ("bullish", "positive", "normal"): -15.0,
+}
+SIGNAL_RULE_IDS = {key: f"S{i:02d}" for i, key in enumerate(_SIGNAL_TABLE)}
+
+
+def compute_signal_adjustment(
+    news_sentiment: float | None,
+    forecast_outlook: float | None,
+    attention_spike: float | None,
+) -> tuple[float, tuple[FiredRule, ...]]:
+    """Signed priority adjustment from the market-signal rules. Inputs in [0, 1]:
+
+    news_sentiment    0 = very negative, 0.5 = neutral, 1 = very positive
+    forecast_outlook  0 = bearish, 0.5 = neutral, 1 = bullish (p50 relative to the band)
+    attention_spike   0 = usual coverage, 1 = extreme burst
+
+    A missing input is treated as neutral, so a holding with no news is not penalised for it.
+    Zero-order Sugeno: firing strength (min t-norm) weighted average of the rule constants.
+    """
+    import skfuzzy as fuzz
+
+    def mf(value: float | None) -> dict[str, float]:
+        return _memberships(float(np.clip(0.5 if value is None else value, 0.0, 1.0)) * 100)
+
+    sentiment = mf(news_sentiment)
+    outlook = mf(forecast_outlook)
+    spike_level = float(np.clip(attention_spike or 0.0, 0.0, 1.0)) * 100
+    spike = float(fuzz.interp_membership(UNIVERSE, fuzz.trapmf(UNIVERSE, [40, 70, 100, 100]), spike_level))
+    attention = {"spike": spike, "normal": 1.0 - spike}
+    s_key = {"negative": "low", "neutral": "medium", "positive": "high"}
+    o_key = {"bearish": "low", "neutral": "medium", "bullish": "high"}
+
+    fired: list[FiredRule] = []
+    weighted = total = 0.0
+    for (o, s, a), points in _SIGNAL_TABLE.items():
+        strength = min(outlook[o_key[o]], sentiment[s_key[s]], attention[a])
+        if strength <= 1e-6:
+            continue
+        weighted += strength * points
+        total += strength
+        fired.append(FiredRule(
+            rule_id=SIGNAL_RULE_IDS[(o, s, a)],
+            antecedent=f"forecast_outlook[{o}] AND news_sentiment[{s}] AND attention[{a}]",
+            consequent=f"sell_priority {points:+.0f}",
+            firing_strength=round(float(strength), 4),
+        ))
+    adjustment = weighted / total if total > 0 else 0.0
+    return adjustment, tuple(sorted(fired, key=lambda r: r.firing_strength, reverse=True))
+
+
+SIGNAL_KEYS = ("news_sentiment", "forecast_outlook", "attention_spike")
+
+
 def compute_portfolio_priorities(
     holdings: dict[str, dict[str, float]],
     withdrawal_urgency: float,
 ) -> dict[str, FuzzyPriorityResult]:
     """Priorities for every holding under one withdrawal request.
 
-    Each holding supplies `value`, `adv_usd` and `volatility_pct` (ATR percentile in [0,1]).
+    Each holding supplies `value`, `adv_usd` and `volatility_pct` (ATR percentile in [0,1]),
+    and optionally the market signals in SIGNAL_KEYS. Without them the second rule base does
+    not run and the priority is exactly the first rule base's.
     """
+    from dataclasses import replace
+
     results: dict[str, FuzzyPriorityResult] = {}
     for symbol, holding in holdings.items():
-        results[symbol] = compute_sell_priority(
+        result = compute_sell_priority(
             symbol,
             withdrawal_urgency=withdrawal_urgency,
             market_volatility=float(holding.get("volatility_pct", 0.5)),
@@ -342,6 +427,20 @@ def compute_portfolio_priorities(
                 float(holding.get("value", 0.0)), float(holding.get("adv_usd", 0.0))
             ),
         )
+        if any(holding.get(key) is not None for key in SIGNAL_KEYS):
+            adjustment, rules = compute_signal_adjustment(
+                holding.get("news_sentiment"), holding.get("forecast_outlook"), holding.get("attention_spike"))
+            result = replace(
+                result,
+                sell_priority=float(np.clip(result.sell_priority + adjustment, 0.0, 100.0)),
+                signal_adjustment=round(adjustment, 3),
+                signal_rules=rules,
+            )
+        laya = float(holding.get("laya_priority_adjustment") or 0.0)
+        if laya:
+            result = replace(result, sell_priority=float(np.clip(result.sell_priority + laya, 0.0, 100.0)),
+                             laya_adjustment=laya)
+        results[symbol] = result
     return results
 
 
@@ -366,6 +465,17 @@ def rule_trace_to_dict(results: dict[str, FuzzyPriorityResult]) -> list[dict[str
                         "strength": rule.firing_strength,
                     }
                     for rule in result.fired_rules[:4]
+                ],
+                "signal_adjustment": result.signal_adjustment,
+                "laya_adjustment": result.laya_adjustment,
+                "signal_rules": [
+                    {
+                        "rule_id": rule.rule_id,
+                        "if": rule.antecedent,
+                        "then": rule.consequent,
+                        "strength": rule.firing_strength,
+                    }
+                    for rule in result.signal_rules[:3]
                 ],
             }
         )

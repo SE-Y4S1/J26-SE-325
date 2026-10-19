@@ -1,0 +1,197 @@
+# News and social sentiment configuration (Phase 2).
+#
+# Keyword profiles are generated per held symbol (news/keywords.py). This file supplies the
+# parts that are shared: sector and macro vocabularies, the feeds every symbol is matched
+# against, how much each kind of source counts, and how to call the Agent-Reach tools.
+
+# --------------------------------------------------------------------------------------
+# Sector vocabularies. The generator assigns each symbol ONE of these keys (from the
+# exchange's own sector where available, else the local LLM's choice validated against
+# this list) and copies its terms into the profile's sector tier.
+# --------------------------------------------------------------------------------------
+sectors:
+  banks: [Sri Lanka banking sector, bank NPL, net interest margin, CBSL bank capital, credit growth, banking stocks]
+  finance: [finance companies Sri Lanka, NBFI, leasing sector, microfinance, non-bank financial]
+  insurance: [insurance sector, insurance premiums, IRCSL, life insurance, general insurance]
+  conglomerate: [Sri Lanka conglomerates, Sri Lankan conglomerate, blue chip Colombo, diversified conglomerate]
+  hotels_tourism: [Sri Lanka tourism, tourist arrivals, hotel occupancy, SLTDA, tourism earnings]
+  food_beverage: [food and beverage sector, consumer staples, FMCG Sri Lanka, beverage prices]
+  plantations: [tea prices, Colombo tea auction, rubber prices, plantation sector, palm oil]
+  manufacturing: [manufacturing PMI Sri Lanka, industrial output, export manufacturing]
+  telecom: [telecom sector Sri Lanka, TRCSL, mobile tariffs, broadband]
+  energy: [electricity tariff, CEB, fuel prices Sri Lanka, renewable energy Sri Lanka, oil prices]
+  real_estate: [Colombo property market, condominium, real estate Sri Lanka, Port City Colombo]
+  healthcare: [healthcare sector, private hospitals Sri Lanka, pharmaceuticals]
+  retail: [retail sector, supermarket, consumer spending Sri Lanka]
+  construction: [construction sector, cement prices, infrastructure projects Sri Lanka]
+  transportation: [shipping, Colombo port, container throughput, logistics]
+  us_technology: [tech stocks, semiconductor, AI chips, Nasdaq technology]
+  us_financials: [US banks, Fed stress test, bank earnings]
+  us_energy: [oil prices, OPEC, crude inventories, energy stocks]
+  us_consumer: [consumer spending, retail sales, consumer confidence]
+  us_healthcare: [FDA approval, drug pricing, healthcare stocks]
+  us_industrials: [industrial production, ISM manufacturing, defense spending]
+  broad_market_etf: [S&P 500, stock market, equity flows, market breadth]
+  bonds_etf: [Treasury yields, bond market, duration, yield curve]
+  gold_etf: [gold prices, safe haven, central bank gold buying]
+  crypto_layer1: [crypto market, blockchain network, layer 1, on-chain activity]
+  crypto_exchange_token: [crypto exchange, exchange token, trading volume crypto]
+  crypto_defi: [DeFi, decentralized finance, TVL, DeFi protocol]
+  crypto_meme: [meme coin, retail crypto speculation]
+  forex: [currency markets, exchange rate, dollar index]
+  other: []
+
+# Exchange-level macro vocabularies, applied to every symbol on that exchange.
+macro:
+  cse: [Central Bank of Sri Lanka, CBSL policy rate, Sri Lanka inflation, USD LKR, rupee exchange rate,
+        IMF Sri Lanka, Sri Lanka budget, Sri Lanka GDP, ASPI, Colombo stock market, Sri Lanka debt restructuring]
+  yahoo: [Federal Reserve, Fed rate decision, US CPI inflation, US jobs report, Treasury yields, recession]
+  binance: [crypto regulation, SEC crypto, bitcoin ETF flows, stablecoin, crypto market crash, Federal Reserve]
+
+# Sector and macro vocabulary is generic ("diversified conglomerate", "inflation"), so for
+# these exchanges a sector- or macro-tier item must ALSO mention one of these context terms
+# (or come from an outlet listed here). Without this, a Sri Lankan conglomerate's sector
+# tier filled up with US companies named "... Diversified Holdings Inc." in the first live run.
+# Company-tier matches never need context.
+context_terms:
+  cse:
+    terms: [Sri Lanka, Sri Lankan, Lanka, Colombo, CSE, CBSL, LKR, rupee, ASPI]
+    outlets: [economynext, dailymirror_business, adaderana_biz, lankabusinessonline, Daily FT,
+              EconomyNext, Adaderana Biz English, Daily Mirror, The Sunday Times Sri Lanka,
+              Newsfirst, ft.lk, dailymirror.lk, economynext.com, sundaytimes.lk, adaderana.lk]
+
+# CSE sector names (as published by the exchange) -> template key.
+cse_sector_map:
+  banks: banks
+  diversified financials: finance
+  insurance: insurance
+  capital goods: conglomerate
+  consumer services: hotels_tourism
+  food beverage & tobacco: food_beverage
+  food, beverage & tobacco: food_beverage
+  materials: manufacturing
+  real estate: real_estate
+  telecommunication services: telecom
+  energy: energy
+  utilities: energy
+  retailing: retail
+  health care equipment & services: healthcare
+  transportation: transportation
+  consumer durables & apparel: manufacturing
+  commercial & professional services: other
+  food & staples retailing: retail
+  household & personal products: food_beverage
+
+# Coin names, so a BTCUSDT holding searches "Bitcoin", not "BTCUSDT".
+coin_names:
+  BTC: [Bitcoin]
+  ETH: [Ethereum, Ether]
+  BNB: [BNB, Binance Coin]
+  SOL: [Solana]
+  XRP: [XRP, Ripple]
+  ADA: [Cardano]
+  DOGE: [Dogecoin]
+  AVAX: [Avalanche]
+  DOT: [Polkadot]
+  LINK: [Chainlink]
+  TRX: [Tron]
+  MATIC: [Polygon]
+  POL: [Polygon]
+  LTC: [Litecoin]
+  TON: [Toncoin]
+  SHIB: [Shiba Inu]
+  UNI: [Uniswap]
+  ATOM: [Cosmos]
+  NEAR: [NEAR Protocol]
+  SUI: [Sui]
+
+# Tickers that are ordinary words or collide with common terms. They are never used as a
+# search query on their own, and the listed terms veto a match.
+ambiguous_tickers:
+  COMB: [hair comb, honeycomb, comb over, fine-tooth comb]
+  DIAL: [phone dial, dial tone, dial up, speed dial]
+  HAYL: []
+  SAMP: [sample]
+  LION: [lion cub, mountain lion, the lion king]
+  ACL: [ACL injury, anterior cruciate]
+  KO: [knockout, TKO]
+  SOL: [sol de, sol y]
+  LINK: [link in bio]
+  ONE: []
+  ALL: []
+
+# --------------------------------------------------------------------------------------
+# Feeds matched against every symbol's keywords. `region` limits a feed to the exchanges it
+# covers, so a Colombo business feed is not scanned for a Bitcoin holding.
+# Verified reachable and parseable on 2026-10-10.
+# --------------------------------------------------------------------------------------
+rss_feeds:
+  - {name: economynext, url: "https://economynext.com/feed/", region: [cse]}
+  - {name: dailymirror_business, url: "https://www.dailymirror.lk/rss/business-news/273", region: [cse]}
+  - {name: adaderana_biz, url: "https://bizenglish.adaderana.lk/feed/", region: [cse]}
+  - {name: lankabusinessonline, url: "https://www.lankabusinessonline.com/feed/", region: [cse]}
+  - {name: coindesk, url: "https://www.coindesk.com/arc/outboundfeeds/rss/", region: [binance]}
+  - {name: cointelegraph, url: "https://cointelegraph.com/rss", region: [binance]}
+  - {name: cnbc_markets, url: "https://www.cnbc.com/id/10001147/device/rss/rss.html", region: [yahoo, binance]}
+  - {name: marketwatch, url: "https://feeds.content.dowjones.io/public/rss/mw_topstories", region: [yahoo]}
+  - {name: investing_news, url: "https://www.investing.com/rss/news.rss", region: [yahoo, binance]}
+
+# --------------------------------------------------------------------------------------
+# Aggregation weights.
+# --------------------------------------------------------------------------------------
+source_weights:
+  official: 1.0
+  news: 0.8
+  social: 0.4
+
+aggregation:
+  recency_tau_days: 3.0        # an item's weight halves roughly every 2 days
+  window_days: 14              # items older than this are not collected
+  spike_window_days: 2         # "recent" for the attention-spike comparison
+
+# --------------------------------------------------------------------------------------
+# Agent-Reach channels. Agent-Reach installs these CLIs; it has no Python API, so each
+# channel is a command template run as a subprocess. Output is parsed as JSON (a list of
+# objects, or JSON lines). Fields are read from any of the listed names.
+#
+# THE COMMANDS BELOW MUST BE CHECKED AGAINST THE INSTALLED TOOLS (`agent-reach doctor`,
+# then each tool's --help) -- their flags change between releases. A channel whose binary
+# is missing reports "not installed"; a missing env var reports "not configured".
+# Run these on the host, not in Docker: OpenCLI drives a logged-in desktop Chrome.
+# --------------------------------------------------------------------------------------
+agent_reach:
+  twitter:
+    kind: social
+    binary: twitter
+    command: ["twitter", "search", "{query}", "--limit", "{limit}", "--json"]
+    requires_env: [TWITTER_AUTH_TOKEN, TWITTER_CT0]
+  reddit:
+    kind: social
+    binary: opencli
+    command: ["opencli", "reddit", "search", "{query}", "--limit", "{limit}", "--json"]
+    requires_env: []
+  instagram:
+    kind: social
+    binary: opencli
+    command: ["opencli", "instagram", "search", "{query}", "--limit", "{limit}", "--json"]
+    requires_env: []
+  facebook:
+    kind: social
+    binary: opencli
+    command: ["opencli", "facebook", "search", "{query}", "--limit", "{limit}", "--json"]
+    requires_env: []
+  linkedin:
+    kind: social
+    binary: opencli
+    command: ["opencli", "linkedin", "search", "{query}", "--limit", "{limit}", "--json"]
+    requires_env: []
+
+agent_reach_fields:
+  text: [text, full_text, content, body, caption, description]
+  title: [title, headline]
+  url: [url, link, permalink]
+  published_at: [created_at, createdAt, date, timestamp, published_at, time]
+  author: [author, username, user, screen_name, handle]
+  likes: [likes, like_count, favorite_count, reactions, score, upvotes]
+  shares: [shares, retweets, retweet_count, reposts]
+  comments: [comments, reply_count, replies, num_comments]

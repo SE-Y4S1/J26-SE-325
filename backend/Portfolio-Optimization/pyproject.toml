@@ -48,6 +48,8 @@ dependencies = [
     "prometheus-fastapi-instrumentator>=7.0",
     # --- agent (Ollama via its OpenAI-compatible endpoint) ---
     "openai>=1.50",
+    # --- fundamentals: CSE interim/annual report PDFs (text layer; pure Python) ---
+    "pypdf>=6.20.0",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +58,13 @@ dependencies = [
 # succeed. See forecasting/base.py.
 timesfm = ["timesfm[torch]==2.0.2"]
 chronos = ["chronos-forecasting>=1.5.0"]
+social = [
+    "yt-dlp>=2025.1",
+]
+# Phase 4b decision model. Runtime weights (~842 MB) are fetched separately, never implicitly.
+decision = [
+    "laya>=0.4.1",
+]
 
 [dependency-groups]
 dev = [

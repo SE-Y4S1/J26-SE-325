@@ -20,6 +20,10 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in a repo-root .env — see .env.example}
       ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
       DATABASE_URL: sqlite:////app/artifacts/platform.sqlite
+      # Executions run Component 1 plans through Components 2 and 3 (service/pipeline.py).
+      # In-network names; if either is down, executions are HELD, never run unscreened.
+      FRAUD_SERVICE_URL: http://component2:8001
+      AUDIT_SERVICE_URL: http://component3:8002
     volumes:
       # Users and portfolios must outlive the container, or every restart wipes the accounts.
       - platform_data:/app/artifacts
@@ -69,27 +73,40 @@ services:
   kafka:
     # KRaft mode, no ZooKeeper. One broker is enough: the TAF calls for a local event bus,
     # not a production cluster.
-    image: bitnami/kafka:3.7
+    #
+    # The official Apache image, not bitnami/kafka -- Bitnami withdrew its public catalogue
+    # in 2025 and `bitnami/kafka:3.7` no longer resolves on Docker Hub. The variables differ:
+    # Apache takes plain Kafka property names (KAFKA_NODE_ID), Bitnami infixed them
+    # (KAFKA_CFG_NODE_ID), so this is the same broker described in the other dialect.
+    image: apache/kafka:3.7.2
     ports:
       - "9094:9094"
     environment:
-      KAFKA_CFG_NODE_ID: "0"
-      KAFKA_CFG_PROCESS_ROLES: controller,broker
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
-      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_NODE_ID: "0"
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # A single broker cannot replicate anything; the defaults of 3 leave the internal
+      # topics permanently under-replicated and consumer groups never stabilise.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: j26se325LocalBusAAA
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
       start_period: 30s
     volumes:
-      - kafka_data:/bitnami/kafka
+      - kafka_data:/var/lib/kafka/data
 
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.16.2
@@ -112,18 +129,18 @@ services:
   # failing to start must never take the rest of the platform down with it.
 
   component2:                      # Fraud Detection  (Dhushanthini R)
-    image: python:3.12-slim
-    working_dir: /app
-    volumes:
-      - ./backend/Fraud-Detection:/app
-    # Its detection logic is pure standard library -- fastapi, uvicorn and pydantic are the
-    # whole dependency list -- so installing at start costs seconds and needs no Dockerfile.
-    command: >
-      sh -c "pip install --quiet --no-cache-dir -r requirements.txt &&
-             uvicorn app:app --host 0.0.0.0 --port 8001"
+    # Her own Dockerfile: the engine is PyTorch (LSTM autoencoder + GNN), so the CPU torch
+    # wheel is installed at build time rather than on every start.
+    build:
+      context: ./backend/Fraud-Detection
     ports: ["8001:8001"]
     environment:
-      ALLOWED_ORIGINS: http://localhost:3000
+      FRAUD_API_PORT: "8001"
+      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    volumes:
+      # A bundle trained with scripts/train_benchmark.py lands here and is loaded on start;
+      # without one the service answers with the labelled heuristic-untrained scorer.
+      - ./backend/Fraud-Detection/artifacts:/app/artifacts
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8001/health')\""]
       interval: 15s

@@ -5,6 +5,11 @@ const auditService = require("../services/auditService");
 const { computePolicyHash } = require("../services/policyDefinition");
 const { DuplicateTransactionError } = require("../db/database");
 
+// Component 2's gateway actions mapped onto P001's. STEP_UP is a challenge the user must
+// pass before the transaction proceeds, so it holds the record for review like HUMAN_REVIEW.
+const UPSTREAM_ACTIONS = { ALLOW: "APPROVE", STEP_UP: "HUMAN_REVIEW", BLOCK: "REJECT" };
+const ACTION_SEVERITY = { APPROVE: 0, HUMAN_REVIEW: 1, REJECT: 2 };
+
 /**
  * Controller handling API requests for AI decision evaluations, human reviews,
  * audit storage, integrity verification, retries, and tamper simulation.
@@ -31,8 +36,46 @@ class AuditController {
     if (!data.modelVersion || typeof data.modelVersion !== "string" || !data.modelVersion.trim()) {
       errors.push("Model version must exist.");
     }
+    if (data.upstreamDecision !== undefined && data.upstreamDecision !== null) {
+      const upstream = data.upstreamDecision;
+      if (typeof upstream !== "object" || !UPSTREAM_ACTIONS[upstream.decision]) {
+        errors.push(`upstreamDecision.decision must be one of ${Object.keys(UPSTREAM_ACTIONS).join(", ")}.`);
+      }
+      if (!upstream || typeof upstream.source !== "string" || !upstream.source.trim()) {
+        errors.push("upstreamDecision.source must name the component that enforced the decision.");
+      }
+    }
+    if (data.planHash !== undefined && data.planHash !== null && !/^0x[0-9a-f]{64}$/.test(data.planHash)) {
+      errors.push("planHash must be a 0x-prefixed lowercase SHA-256 hex digest.");
+    }
 
     return errors;
+  }
+
+  /**
+   * Combines P001 with a decision already enforced upstream (Component 2's gateway).
+   *
+   * The stricter action wins. Without this, P001 judges only riskScore and confidence, so a
+   * transaction Component 2 BLOCKED on a rule (structuring, rate limit, reputation) at a
+   * moderate score would be anchored on-chain as APPROVE -- a ledger that contradicts the
+   * enforcement it is meant to prove.
+   */
+  combineWithUpstream(policyResult, upstream) {
+    if (!upstream) {
+      return policyResult;
+    }
+    const upstreamAction = UPSTREAM_ACTIONS[upstream.decision];
+    if (ACTION_SEVERITY[upstreamAction] <= ACTION_SEVERITY[policyResult.action]) {
+      return {
+        ...policyResult,
+        reason: `${policyResult.reason} ${upstream.source} enforced ${upstream.decision}.`
+      };
+    }
+    return {
+      ...policyResult,
+      action: upstreamAction,
+      reason: `${upstream.source} enforced ${upstream.decision}, which is stricter than ${policyResult.policyId} (${policyResult.action}). ${policyResult.reason}`
+    };
   }
 
   /**
@@ -53,10 +96,20 @@ class AuditController {
       }
 
       // 2. Policy Engine Evaluation
-      const policyResult = policyEngine.evaluate({
-        riskScore: inputData.riskScore,
-        confidence: inputData.confidence
-      });
+      const upstream = inputData.upstreamDecision || null;
+      const policyResult = this.combineWithUpstream(
+        policyEngine.evaluate({
+          riskScore: inputData.riskScore,
+          confidence: inputData.confidence
+        }),
+        upstream
+      );
+      const provenance = {
+        upstreamSource: upstream ? upstream.source : null,
+        upstreamDecision: upstream ? upstream.decision : null,
+        upstreamModelVersion: upstream && upstream.modelVersion ? String(upstream.modelVersion) : null,
+        planHash: inputData.planHash || null
+      };
 
       const timestamp = new Date().toISOString();
       const salt = hashService.generateSalt();
@@ -86,7 +139,8 @@ class AuditController {
           reviewRequired: true,
           reviewerDecision: null,
           verificationStatus: "PENDING_HUMAN_REVIEW",
-          isTampered: false
+          isTampered: false,
+          ...provenance
         };
 
         try {
@@ -125,7 +179,8 @@ class AuditController {
         timestamp,
         reviewRequired: false,
         reviewerDecision: null,
-        isTampered: false
+        isTampered: false,
+        ...provenance
       };
 
       // 3. Generate Canonical SHA-256 Hash

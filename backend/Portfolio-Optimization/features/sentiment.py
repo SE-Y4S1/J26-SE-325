@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from datetime import date
 from pathlib import Path
 
@@ -45,8 +46,9 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "ProsusAI/finbert"
 
 # Local instruction model, already installed via Ollama. Used when FinBERT weights are absent.
-OLLAMA_MODEL = "gemma4-e4b"
-OLLAMA_BASE_URL = "http://localhost:11434/v1"
+# The preferred model; if it is not pulled, news.llm.resolve_model() picks one that is.
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4-e4b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
 # FinBERT is a BERT-base: 512 wordpiece limit. Bodies longer than this are dropped rather
 # than truncated -- a truncated article's sentiment is not reliably the whole article's.
@@ -77,16 +79,17 @@ def finbert_weights_cached() -> bool:
 
 
 def ollama_available(model: str = OLLAMA_MODEL) -> bool:
-    """Whether the Ollama daemon is up and the model is pulled."""
-    import requests
+    """Whether the Ollama daemon is up with a usable model (the preferred one or another)."""
+    from news.llm import resolve_model
 
-    try:
-        response = requests.get(OLLAMA_BASE_URL.replace("/v1", "/api/tags"), timeout=3)
-        response.raise_for_status()
-        names = {m.get("name", "").split(":")[0] for m in response.json().get("models", [])}
-        return model.split(":")[0] in names
-    except Exception:  # noqa: BLE001
-        return False
+    return resolve_model(model) is not None
+
+
+def _scoring_model() -> str:
+    """The model actually used for scoring: OLLAMA_MODEL if pulled, else any pulled model."""
+    from news.llm import resolve_model
+
+    return resolve_model(OLLAMA_MODEL) or OLLAMA_MODEL
 
 
 def resolve_backend(preference: str = "auto") -> str:
@@ -229,6 +232,61 @@ def _score_one_with_ollama(text: str, *, model: str, base_url: str) -> tuple[flo
     return float(np.clip(positive - negative, -1.0, 1.0)), float(np.clip(1.0 - neutral, 0.0, 1.0))
 
 
+OLLAMA_BATCH_SIZE = 8
+
+OLLAMA_BATCH_PROMPT = (
+    "You are a financial sentiment classifier. For EACH numbered headline, judge its "
+    "sentiment for the company or asset it concerns, from an investor's point of view.\n"
+    "Reply with ONLY a JSON object: "
+    '{"scores": [{"id": <number>, "positive": <float>, "negative": <float>, "neutral": <float>}, ...]} '
+    "-- one entry per headline, three probabilities summing to 1.0. No other text."
+)
+
+
+def _score_batch_with_ollama(texts: list[str], *, model: str, base_url: str) -> list[tuple[float, float]] | None:
+    """Score several headlines in ONE call. None when the reply is unusable.
+
+    On CPU the fixed cost of a call (prompt processing, model warm-up) dominates, so eight
+    headlines in one call cost little more than one. The reply is accepted only if it has a
+    score for every id; otherwise the caller falls back to one call per headline, so a
+    sloppy batch reply can never misattribute a score to the wrong headline.
+    """
+    from openai import OpenAI
+
+    numbered = "\n".join(f"{i + 1}. {text}" for i, text in enumerate(texts))
+    client = OpenAI(base_url=base_url, api_key="ollama")
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": OLLAMA_BATCH_PROMPT},
+                      {"role": "user", "content": numbered}],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+        payload = json.loads(response.choices[0].message.content or "{}")
+        entries = {int(e["id"]): e for e in payload.get("scores", []) if isinstance(e, dict) and "id" in e}
+    except Exception as exc:  # noqa: BLE001
+        logger.info("batched Ollama scoring failed (%s); falling back to single calls", exc)
+        return None
+
+    if set(entries) != set(range(1, len(texts) + 1)):
+        return None
+
+    results = []
+    for i in range(1, len(texts) + 1):
+        try:
+            positive, negative, neutral = (float(entries[i].get(k, 0.0)) for k in ("positive", "negative", "neutral"))
+        except (TypeError, ValueError):
+            return None
+        total = positive + negative + neutral
+        if total <= 0:
+            results.append((0.0, 0.0))
+            continue
+        positive, negative, neutral = positive / total, negative / total, neutral / total
+        results.append((float(np.clip(positive - negative, -1.0, 1.0)), float(np.clip(1.0 - neutral, 0.0, 1.0))))
+    return results
+
+
 def _prepare_text(item: NewsItem) -> str:
     """Headline, plus the body when it is short enough to be safely encoded."""
     if item.body and len(item.body) <= MAX_BODY_CHARS:
@@ -297,16 +355,20 @@ def _score_pending_with_ollama(
     Ollama has no batch endpoint, so this is serial and slow -- which is exactly why the
     on-disk cache matters: the cost is paid once per unique headline, ever.
     """
+    model = _scoring_model()
     logger.info("scoring %d headlines with Ollama %s (%d cached)",
-                len(pending_idx), OLLAMA_MODEL, len(texts) - len(pending_idx))
+                len(pending_idx), model, len(texts) - len(pending_idx))
 
-    for count, idx in enumerate(pending_idx, start=1):
-        cache[hashes[idx]] = list(
-            _score_one_with_ollama(texts[idx], model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL)
-        )
-        if count % 25 == 0:
-            _save_score_cache(cache)      # checkpoint: a long run must survive interruption
-            logger.info("  %d/%d scored", count, len(pending_idx))
+    for start in range(0, len(pending_idx), OLLAMA_BATCH_SIZE):
+        batch = pending_idx[start : start + OLLAMA_BATCH_SIZE]
+        results = _score_batch_with_ollama([texts[i] for i in batch], model=model, base_url=OLLAMA_BASE_URL)
+        if results is None:
+            results = [_score_one_with_ollama(texts[i], model=model, base_url=OLLAMA_BASE_URL) for i in batch]
+        for idx, result in zip(batch, results, strict=True):
+            cache[hashes[idx]] = list(result)
+        # Checkpoint after every batch: a long run must survive interruption.
+        _save_score_cache(cache)
+        logger.info("  %d/%d scored", min(start + OLLAMA_BATCH_SIZE, len(pending_idx)), len(pending_idx))
 
 
 def _assemble(

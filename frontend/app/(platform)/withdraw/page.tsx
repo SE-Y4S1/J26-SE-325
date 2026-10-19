@@ -9,17 +9,32 @@
 
 import { Suspense, useState } from "react";
 
+import { BaselineComparison, CostBreakdownCard, MarketContextPanel } from "@/components/analysis/MarketContext";
+import { ExecutionPanel } from "@/components/ExecutionPanel";
 import { Button, Card, Field, Input, Notice, Spinner, Stat, money, percent } from "@/components/ui";
 import { planWithdrawal } from "@/lib/api/portfolio";
-import type { FuzzyRuleTraceEntry, WithdrawalResponse } from "@/lib/api/types";
+import type {
+  BaselineRow,
+  CostBreakdown,
+  CurrencyBlock,
+  FuzzyRuleTraceEntry,
+  MarketContext,
+  WithdrawalResponse,
+} from "@/lib/api/types";
+
+/** Currencies the plan can be expressed in. Holdings keep their own trading currency (CSE
+ *  LKR, US USD, Binance USDT); the service converts each into this one. */
+const BASE_CURRENCIES = ["LKR", "USD"] as const;
 import { usePortfolio } from "@/lib/usePortfolio";
 
 function WithdrawScreen() {
-  const { portfolio, loading, error } = usePortfolio();
+  const { portfolio, loading, error, reload } = usePortfolio();
 
   const [amount, setAmount] = useState(150_000);
   const [urgency, setUrgency] = useState(0.5);
   const [deadlineDays, setDeadlineDays] = useState(3);
+  const [riskTolerance, setRiskTolerance] = useState(0.5);
+  const [baseCurrency, setBaseCurrency] = useState<string>("LKR");
   const [useAgent, setUseAgent] = useState(false);
 
   const [plan, setPlan] = useState<WithdrawalResponse | null>(null);
@@ -41,8 +56,10 @@ function WithdrawScreen() {
           holdings: portfolio.holdings,
           targetAmount: amount,
           urgency,
+          riskTolerance,
           deadlineDays,
           useAgent,
+          baseCurrency,
         }),
       );
     } catch (cause) {
@@ -63,22 +80,38 @@ function WithdrawScreen() {
       <div>
         <h1 className="text-xl font-semibold">Instant withdrawal</h1>
         <p className="mt-1 text-sm text-neutral-500">
-          Plans a loss-minimized liquidation across {portfolio.holdings.length} holdings worth{" "}
-          {money(totalValue)}.
+          Plans a loss-minimized liquidation across {portfolio.holdings.length} holdings, each in its own
+          trading currency, converted to {baseCurrency} with the current rate and conversion spread.
         </p>
       </div>
 
       <Card title="Request">
         <form onSubmit={handlePlan} className="grid gap-4 sm:grid-cols-2">
-          <Field label="Amount to raise" hint={`Portfolio value ${money(totalValue)}`}>
-            <Input
-              type="number"
-              value={amount}
-              min={1}
-              max={Math.floor(totalValue)}
-              onChange={(e) => setAmount(Number(e.target.value))}
-              required
-            />
+          <Field
+            label={`Amount to raise (${baseCurrency})`}
+            hint={`Sum of native prices ${totalValue.toLocaleString()} — the service checks the converted total.`}
+          >
+            <div className="flex gap-2">
+              <Input
+                type="number"
+                value={amount}
+                min={1}
+                onChange={(e) => setAmount(Number(e.target.value))}
+                required
+              />
+              <select
+                aria-label="Base currency"
+                value={baseCurrency}
+                onChange={(e) => setBaseCurrency(e.target.value)}
+                className="rounded-lg border border-black/15 bg-transparent px-2 text-sm dark:border-white/20"
+              >
+                {BASE_CURRENCIES.map((code) => (
+                  <option key={code} value={code}>
+                    {code}
+                  </option>
+                ))}
+              </select>
+            </div>
           </Field>
 
           <Field label="Deadline (trading days)" hint="Fewer days means higher market impact.">
@@ -110,6 +143,21 @@ function WithdrawScreen() {
             </div>
           </Field>
 
+          <Field
+            label={`Risk tolerance — ${riskTolerance.toFixed(2)}`}
+            hint="Higher waits for cheaper fills and accepts more price risk; lower sells sooner."
+          >
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={riskTolerance}
+              onChange={(e) => setRiskTolerance(Number(e.target.value))}
+              className="w-full"
+            />
+          </Field>
+
           <Field label="Options">
             <label className="flex items-center gap-2 text-sm">
               <input
@@ -131,6 +179,18 @@ function WithdrawScreen() {
 
       {planError && <Notice tone="error" title="Could not plan">{planError}</Notice>}
       {plan && <PlanResult plan={plan} />}
+      {plan && (
+        <ExecutionPanel
+          key={String(plan.generated_at)}
+          portfolioId={portfolio.id}
+          kind="withdrawal"
+          plan={plan}
+          disabledReason={
+            plan.assets_to_sell.some((sale) => sale.quantity > 0) ? undefined : "This plan sells nothing."
+          }
+          onExecuted={reload}
+        />
+      )}
     </div>
   );
 }
@@ -140,6 +200,15 @@ function WithdrawScreen() {
 // portfolio hook and the API to reach it.
 export function PlanResult({ plan }: { plan: WithdrawalResponse }) {
   const trace = (plan.fuzzy_rule_trace ?? []) as unknown as FuzzyRuleTraceEntry[];
+  const currencyBlock = (plan.currency ?? null) as CurrencyBlock | null;
+  // Older responses carry no currency block; they were single-currency, shown as before.
+  const currency = currencyBlock?.base ?? "USD";
+  const fmt = (value: number) => money(value, currency);
+  const contexts = (plan.market_context ?? {}) as unknown as Record<string, MarketContext>;
+  const baselines = (plan.baseline_comparison ?? []) as unknown as BaselineRow[];
+  const breakdown = (plan.cost_breakdown ?? null) as CostBreakdown | null;
+  const inputs = (plan.effective_inputs ?? null) as Record<string, unknown> | null;
+  const decision = (inputs?.decision ?? null) as Record<string, unknown> | null;
 
   return (
     <div className="space-y-6">
@@ -147,21 +216,21 @@ export function PlanResult({ plan }: { plan: WithdrawalResponse }) {
           feasible=false so the shortfall is observable. RQ4 depends on that being visible. */}
       {plan.feasible ? (
         <Notice tone="success" title="Feasible">
-          The full {money(plan.target_amount)} can be raised in {plan.days_required}{" "}
+          The full {fmt(plan.target_amount)} can be raised in {plan.days_required}{" "}
           {plan.days_required === 1 ? "day" : "days"}.
         </Notice>
       ) : (
         <Notice tone="warn" title="Cannot raise the full amount">
-          Only {money(plan.raised_amount)} of {money(plan.target_amount)} can be liquidated
-          within the deadline — a shortfall of {money(plan.shortfall)}. This is limited by the
+          Only {fmt(plan.raised_amount)} of {fmt(plan.target_amount)} can be liquidated
+          within the deadline — a shortfall of {fmt(plan.shortfall)}. This is limited by the
           daily participation cap on the least liquid holdings, not by an error.
         </Notice>
       )}
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <Stat label="Raised" value={money(plan.raised_amount)} />
+        <Stat label="Raised" value={fmt(plan.raised_amount)} />
         <Stat label="Expected slippage" value={percent(plan.expected_slippage_pct)} />
-        <Stat label="Expected loss" value={money(plan.expected_realized_loss)} />
+        <Stat label="Expected cost" value={fmt(plan.expected_realized_loss)} />
         <Stat label="Days required" value={plan.days_required} />
       </div>
 
@@ -189,7 +258,7 @@ export function PlanResult({ plan }: { plan: WithdrawalResponse }) {
                   <td className="py-2 text-right tabular-nums">
                     {sale.quantity.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                   </td>
-                  <td className="py-2 text-right tabular-nums">{money(sale.expected_price)}</td>
+                  <td className="py-2 text-right tabular-nums">{fmt(sale.expected_price)}</td>
                   <td className="py-2 text-right tabular-nums">
                     {percent(sale.expected_slippage_pct, 4)}
                   </td>
@@ -203,6 +272,29 @@ export function PlanResult({ plan }: { plan: WithdrawalResponse }) {
         )}
       </Card>
 
+      {currencyBlock && Object.keys(currencyBlock.rates).length > 0 && (
+        <p className="text-xs text-neutral-500">
+          Converted to {currencyBlock.base}:{" "}
+          {Object.entries(currencyBlock.rates)
+            .map(([code, r]) => `1 ${code} = ${r.rate.toFixed(2)} (${r.source}, spread ${(r.spread * 100).toFixed(2)}%)`)
+            .join(" · ")}
+        </p>
+      )}
+
+      {inputs && (
+        <p className="text-xs text-neutral-500" data-testid="effective-inputs">
+          Planned with urgency {Number(inputs.urgency).toFixed(2)}, risk tolerance{" "}
+          {Number(inputs.risk_tolerance).toFixed(2)}, deadline {String(inputs.deadline_days)}d · decisions:{" "}
+          {decision?.source === "laya"
+            ? `Laya (${String(decision.model_version)})`
+            : `fuzzy rules${decision?.reason ? ` — ${String(decision.reason)}` : ""}`}
+        </p>
+      )}
+
+      {breakdown && <CostBreakdownCard breakdown={breakdown} currency={currency} />}
+      <BaselineComparison rows={baselines} currency={currency} />
+      <MarketContextPanel contexts={contexts} />
+
       {trace.length > 0 && (
         <Card
           title="Fuzzy rule trace"
@@ -215,6 +307,8 @@ export function PlanResult({ plan }: { plan: WithdrawalResponse }) {
                   <span className="font-medium">{entry.symbol}</span>
                   <span className="text-sm text-neutral-500">
                     sell priority {entry.sell_priority.toFixed(1)}
+                    {entry.signal_adjustment ? ` · market signals ${entry.signal_adjustment > 0 ? "+" : ""}${entry.signal_adjustment.toFixed(1)}` : ""}
+                    {entry.laya_adjustment ? ` · Laya ${entry.laya_adjustment > 0 ? "+" : ""}${entry.laya_adjustment.toFixed(0)}` : ""}
                   </span>
                 </div>
                 <ul className="mt-1 space-y-1">
@@ -228,6 +322,14 @@ export function PlanResult({ plan }: { plan: WithdrawalResponse }) {
                       <span className="ml-2 text-neutral-500">
                         (strength {rule.strength.toFixed(3)})
                       </span>
+                    </li>
+                  ))}
+                  {(entry.signal_rules ?? []).map((rule) => (
+                    <li key={rule.rule_id} className="text-xs">
+                      <code className="rounded bg-amber-500/10 px-1 py-0.5">{rule.rule_id}</code>{" "}
+                      <span className="text-neutral-500">IF</span> {rule.if}{" "}
+                      <span className="text-neutral-500">THEN</span> {rule.then}
+                      <span className="ml-2 text-neutral-500">(strength {rule.strength.toFixed(3)})</span>
                     </li>
                   ))}
                 </ul>
