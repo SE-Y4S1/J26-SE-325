@@ -27,6 +27,12 @@ export interface WithdrawParams {
   deadlineDays?: number;
   /** Route through the Phase 5c agent, which adds an `agent_reasoning_trace`. */
   useAgent?: boolean;
+  /**
+   * Currency of `targetAmount` and of every figure in the plan. Naming one makes the
+   * service convert each holding from its own trading currency (CSE LKR, US USD, Binance
+   * USDT); omitting it keeps the old single-currency behaviour.
+   */
+  baseCurrency?: string;
 }
 
 /**
@@ -46,6 +52,7 @@ export function planWithdrawal(params: WithdrawParams): Promise<WithdrawalRespon
       risk_tolerance: params.riskTolerance ?? 0.5,
       deadline_days: params.deadlineDays ?? 1,
       use_agent: params.useAgent ?? false,
+      base_currency: params.baseCurrency ?? null,
     },
   });
 }
@@ -56,6 +63,7 @@ export interface OptimizeParams {
   selectionRule?: SelectionRule;
   maxWeight?: number;
   allowShorting?: boolean;
+  baseCurrency?: string;
 }
 
 /**
@@ -73,6 +81,7 @@ export function optimizeAllocation(params: OptimizeParams): Promise<OptimizeResp
       selection_rule: params.selectionRule ?? "knee",
       max_weight: params.maxWeight ?? 0.25,
       allow_shorting: params.allowShorting ?? false,
+      base_currency: params.baseCurrency ?? null,
     },
   });
 }

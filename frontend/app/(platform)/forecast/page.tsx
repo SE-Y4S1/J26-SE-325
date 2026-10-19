@@ -9,12 +9,13 @@
  * people to ignore real errors.
  */
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 
 import { Button, Card, Field, Notice, Spinner, percent } from "@/components/ui";
 import { ApiError } from "@/lib/api/client";
+import { getAnalysisForecast } from "@/lib/api/market";
 import { getForecast } from "@/lib/api/portfolio";
-import type { ForecastResponse } from "@/lib/api/types";
+import type { AnalysisForecastResponse, ForecastResponse } from "@/lib/api/types";
 import { usePortfolio } from "@/lib/usePortfolio";
 
 function ForecastScreen() {
@@ -88,13 +89,17 @@ function ForecastScreen() {
             — neither of which the development machine has.
           </p>
           <p className="mt-2">
-            Run <code>experiments/colab_finetune.ipynb</code> on Colab, download the adapters,
-            and register them. Every other screen works without it.
+            Run <code>experiments/colab_hybrid_heads.ipynb</code> on Colab, then{" "}
+            <code>python -m forecasting.serving --install hybrid_heads.zip</code>. TimesFM&apos;s
+            weights must also be cached locally. Until then the per-holding bands below are
+            empirical and labelled as such.
           </p>
         </Notice>
       )}
 
       {runError && <Notice tone="error" title="Could not forecast">{runError}</Notice>}
+
+      <HoldingBands symbols={portfolio.holdings.map((h) => h.symbol)} />
 
       {result && (
         <Card title="Quantile forecasts" subtitle={`Horizon ${horizon} trading days`}>
@@ -166,5 +171,79 @@ export default function Page() {
     <Suspense fallback={<Spinner label="Loading" />}>
       <ForecastScreen />
     </Suspense>
+  );
+}
+
+/**
+ * The bands the analysis pipeline prepared for each held symbol, at every horizon, with what
+ * produced them. These are what the withdrawal planner reads.
+ */
+function HoldingBands({ symbols }: { symbols: string[] }) {
+  const [bands, setBands] = useState<AnalysisForecastResponse[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      const settled = await Promise.allSettled(symbols.map((s) => getAnalysisForecast(s)));
+      if (!cancelled) {
+        setBands(settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : [])));
+      }
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [symbols.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!bands) return <Spinner label="Loading prepared bands" />;
+  if (bands.length === 0) {
+    return <Notice tone="info">No held symbol is tracked yet — save the portfolio first.</Notice>;
+  }
+  return (
+    <Card title="Prepared bands per holding" subtitle="Refreshed with each holding's analysis; used by the withdrawal planner.">
+      <table className="w-full text-sm">
+        <thead className="text-left text-xs uppercase tracking-wide text-neutral-500">
+          <tr>
+            <th className="pb-2">Symbol</th>
+            <th className="pb-2">Horizon</th>
+            <th className="pb-2">Source</th>
+            <th className="pb-2 text-right">p10</th>
+            <th className="pb-2 text-right">p50</th>
+            <th className="pb-2 text-right">p90</th>
+            <th className="pb-2">Interval</th>
+          </tr>
+        </thead>
+        <tbody>
+          {bands.flatMap((response) =>
+            (response.bands ?? []).length === 0
+              ? [
+                  <tr key={response.symbol} className="border-t border-black/5 dark:border-white/10">
+                    <td className="py-2 font-medium">{response.symbol}</td>
+                    <td colSpan={6} className="py-2 text-neutral-500">{response.detail ?? response.status}</td>
+                  </tr>,
+                ]
+              : (response.bands ?? []).map((band) => (
+                  <tr key={`${response.symbol}-${band.horizon}`} className="border-t border-black/5 dark:border-white/10">
+                    <td className="py-2 font-medium">{response.symbol}</td>
+                    <td className="py-2">{band.horizon}d</td>
+                    <td className="py-2 text-xs" title={band.reason ?? undefined}>
+                      {band.method === "hybrid" ? `TimesFM + LSTM (${band.model_version})` : band.method === "empirical" ? "empirical — no model" : "unavailable"}
+                    </td>
+                    {band.p10 != null && band.p50 != null && band.p90 != null ? (
+                      <>
+                        <td className="py-2 text-right tabular-nums text-red-600">{percent(band.p10)}</td>
+                        <td className="py-2 text-right tabular-nums">{percent(band.p50)}</td>
+                        <td className="py-2 text-right tabular-nums text-emerald-600">{percent(band.p90)}</td>
+                        <td className="py-2"><QuantileBar p10={band.p10} p50={band.p50} p90={band.p90} /></td>
+                      </>
+                    ) : (
+                      <td colSpan={4} className="py-2 text-neutral-500">{band.reason}</td>
+                    )}
+                  </tr>
+                )),
+          )}
+        </tbody>
+      </table>
+    </Card>
   );
 }

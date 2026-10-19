@@ -28,6 +28,7 @@ const NAV: NavItem[] = [
   { href: "/withdraw", label: "Withdraw", component: "1", ready: true },
   { href: "/optimize", label: "Optimize", component: "1", ready: true },
   { href: "/forecast", label: "Forecast", component: "1", ready: true },
+  { href: "/analysis", label: "Analysis", component: "1", ready: true },
   // Teammates' components, now wired to their real services. `ready` still exists because a
   // service being LIVE and a service being UP are different things -- each page handles the
   // second case itself, via ApiError.isUnavailable.

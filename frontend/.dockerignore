@@ -1,0 +1,22 @@
+# The image runs `npm ci` and `next build` itself, so shipping the host's copies is pure
+# waste -- 870MB of context on this machine -- and host node_modules carries platform-native
+# binaries that must not leak into a linux image.
+node_modules
+.next
+out
+
+# Test output, never part of a build.
+test-results
+playwright-report
+blob-report
+.playwright
+
+# Local-only.
+.env
+.env.local
+.env.*.local
+npm-debug.log*
+.DS_Store
+
+# The runtime reads NEXT_PUBLIC_* from build args, not from a file.
+.env.example

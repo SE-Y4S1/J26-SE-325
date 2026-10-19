@@ -66,11 +66,22 @@ test("tamper-evidence: anchor, verify, tamper, detect", async ({ page }) => {
 });
 
 
-test("assistant answers a real question with its evidence trail", async ({ page }) => {
+test("assistant answers a real question with its evidence trail", async ({ page, request }) => {
   test.skip(!(await reachable("http://localhost:8003/health")), "Component 4 is not running");
   // A CPU round trip measured between 82s and past 240s depending on machine load. This is
   // the slow, honest version -- kept out of the default suite by the skip above.
   test.setTimeout(900_000);
+
+  // ChatScreen catches a backend failure and renders canned text from mockData instead, so
+  // an assistant bubble appearing proves nothing about the agent being alive. The only
+  // check the fallback cannot satisfy is asking the service itself, so do that first.
+  const direct = await request.post("http://localhost:8003/assistant/chat", {
+    data: { message: "What is a liquidity-aware withdrawal?" },
+    timeout: 600_000,
+  });
+  expect(direct.ok()).toBeTruthy();
+  const answer: string = (await direct.json()).answer ?? "";
+  expect(answer.length).toBeGreaterThan(80);
 
   await register(page, newUser());
   await seedPortfolio(page);
@@ -79,12 +90,18 @@ test("assistant answers a real question with its evidence trail", async ({ page 
   const question = "What is a liquidity-aware withdrawal?";
   const input = page.getByPlaceholder("Ask the financial assistant...");
   await expect(input).toBeVisible({ timeout: 30_000 });
+
+  // The transcript opens with a seeded exchange, so this label is already on the page once.
+  // Counting it is what distinguishes a new turn from the furniture that was always there --
+  // matching /Assistant/ would also match the nav link and the page heading.
+  const agentLabel = page.getByText("FinTrust Agent");
+  const before = await agentLabel.count();
+
   await input.fill(question);
   await page.getByRole("button", { name: "Send" }).click();
 
-  // The reply is whatever the agent says, so there is no fixed string to match. What can be
-  // asserted is that a SECOND message appears in the transcript -- the question, then an
-  // answer beneath it.
   await expect(page.getByText(question).first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText(/Assistant/).first()).toBeVisible({ timeout: 720_000 });
+  await expect(async () => {
+    expect(await agentLabel.count()).toBeGreaterThan(before);
+  }).toPass({ timeout: 720_000 });
 });

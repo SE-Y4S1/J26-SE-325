@@ -40,6 +40,31 @@ export type ForecastResponse = Component1Schemas["ForecastResponse"];
 export type SymbolForecast = Component1Schemas["SymbolForecast"];
 export type Component1Health = Component1Schemas["HealthResponse"];
 
+// --- Component 1: market data and the active set -----------------------------------------
+export type Instrument = Component1Schemas["InstrumentOut"];
+export type MarketSearchResponse = Component1Schemas["SearchResponse"];
+export type QuoteRequest = Component1Schemas["QuoteRequest"];
+export type QuoteResponse = Component1Schemas["QuoteResponse"];
+export type SymbolStatus = Component1Schemas["SymbolStatus"];
+export type TrackResponse = Component1Schemas["TrackResponse"];
+export type AnalysisStatusResponse = Component1Schemas["StatusResponse"];
+
+// --- Component 1: per-stock news and social sentiment ----------------------------------
+export type ChannelStatus = Component1Schemas["ChannelStatusOut"];
+export type KeywordProfile = Component1Schemas["KeywordProfileOut"];
+export type KeywordProfileUpdate = Component1Schemas["KeywordProfileUpdate"];
+export type TierSentiment = Component1Schemas["TierSentiment"];
+export type SentimentSource = Component1Schemas["SentimentSource"];
+export type SentimentResponse = Component1Schemas["SentimentResponse"];
+
+// --- Component 1: fundamentals, technicals, forecast bands ---------------------------------
+export type FundamentalsOut = Component1Schemas["FundamentalsOut"];
+export type FundamentalsResponse = Component1Schemas["FundamentalsResponse"];
+export type TechnicalOut = Component1Schemas["TechnicalOut"];
+export type TechnicalResponse = Component1Schemas["TechnicalResponse"];
+export type ForecastBand = Component1Schemas["ForecastBand"];
+export type AnalysisForecastResponse = Component1Schemas["AnalysisForecastResponse"];
+
 /**
  * One entry of a withdrawal's `fuzzy_rule_trace`.
  *
@@ -49,15 +74,88 @@ export type Component1Health = Component1Schemas["HealthResponse"];
  * The trace is the auditability evidence the TAF's Legal Impact section calls for, so it is
  * rendered rather than hidden.
  */
+export interface FuzzyRule {
+  rule_id: string;
+  if: string;
+  then: string;
+  strength: number;
+}
+
 export interface FuzzyRuleTraceEntry {
   symbol: string;
   sell_priority: number;
-  rules: Array<{
-    rule_id: string;
-    if: string;
-    then: string;
-    strength: number;
-  }>;
+  rules: FuzzyRule[];
+  /** Market-signal rule base (news x forecast outlook x attention): priority points. */
+  signal_adjustment?: number;
+  signal_rules?: FuzzyRule[];
+  /** Laya Stage 2 action/downside answer, when confident: priority points. */
+  laya_adjustment?: number;
+}
+
+/**
+ * One holding's entry in `WithdrawalResponse.market_context` (declared `dict` on the
+ * backend, so typed by hand). Built by `optimization/signals.py::market_context` plus the
+ * `currency` and `decision` keys `service/api.py` adds.
+ */
+export interface MarketContext {
+  status: string;
+  prepared_at?: string | null;
+  data_age_hours?: number | null;
+  currency?: string;
+  signals_used: Record<string, number>;
+  forecast?: {
+    horizon: number;
+    method: string;
+    p10: number;
+    p50: number;
+    p90: number;
+    model_version?: string | null;
+    reason?: string | null;
+  };
+  sentiment?: {
+    overall: number | null;
+    company: number | null;
+    sector: number | null;
+    macro: number | null;
+    attention_spike: number | null;
+    items: number | null;
+    top_sources: Array<{ channel: string; title: string | null; url: string | null; polarity: number | null }>;
+  };
+  technical?: Record<string, number | string | null>;
+  fundamentals?: Record<string, unknown> & { kind: string; red_flags?: string[] };
+  decision?: {
+    source: string;
+    reason?: string;
+    model_version?: string;
+    action?: { choice: string; probabilities?: Record<string, number>; confidence: number } | null;
+    downside_risk?: { noul: number; confidence: number } | null;
+    applied?: string[];
+  };
+}
+
+/** `WithdrawalResponse.baseline_comparison` rows: the GA beside the naive baselines. */
+export interface BaselineRow {
+  method: string;
+  feasible: boolean;
+  raised_amount: number;
+  expected_realized_loss: number;
+  expected_slippage_pct: number;
+  crystallized_loss: number;
+  days_required: number;
+}
+
+export interface CostBreakdown {
+  slippage: number;
+  timing_risk: number;
+  forecast_drift: number;
+  fx_conversion: number;
+  realized_pnl: number;
+  crystallized_loss: number;
+}
+
+export interface CurrencyBlock {
+  base: string;
+  rates: Record<string, { rate: number; as_of: string; source: string; spread: number }>;
 }
 
 /** One step of the agent's internal reasoning, when `use_agent` was set. */
