@@ -209,6 +209,8 @@ on its outcome. Wiring the topics together is an async alternative, not a depend
 
 ## 4. Quick start
 
+Hosted (Render free plan + Prisma Postgres + Vercel): see [`DEPLOY.md`](DEPLOY.md).
+
 ### Whole platform with Docker
 
 ```bash

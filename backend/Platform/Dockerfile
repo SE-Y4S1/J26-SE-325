@@ -14,7 +14,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 RUN uv pip install --system \
       fastapi "uvicorn[standard]" pydantic pydantic-settings email-validator \
-      sqlalchemy pyjwt "passlib[argon2]" argon2-cffi python-dotenv
+      sqlalchemy pyjwt "passlib[argon2]" argon2-cffi python-dotenv "psycopg[binary]"
 
 COPY . .
 
@@ -26,6 +26,7 @@ USER appuser
 EXPOSE 8100
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request;urllib.request.urlopen('http://localhost:8100/health').read()" || exit 1
+    CMD python -c "import urllib.request;urllib.request.urlopen('http://localhost:'+__import__('os').environ.get('PORT','8100')+'/health').read()" || exit 1
 
-CMD ["uvicorn", "service.api:app", "--host", "0.0.0.0", "--port", "8100"]
+# Shell form so a host-assigned PORT (Render) wins; compose leaves it unset.
+CMD uvicorn service.api:app --host 0.0.0.0 --port ${PORT:-8100}

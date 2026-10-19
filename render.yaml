@@ -1,0 +1,116 @@
+# Render Blueprint for the Nexa backend (free plan).
+#
+#   Render dashboard -> New -> Blueprint -> pick this repo. Render then asks for every
+#   value marked `sync: false` below; see DEPLOY.md for what goes in each.
+#
+# Free-plan facts this file is shaped around:
+#   * 512 MB RAM per service. Measured locally under real requests: portfolio ~341 MB,
+#     fraud ~318 MB, platform ~73 MB, audit ~71 MB.
+#   * The disk is wiped on every deploy and every spin-down, so the platform and audit
+#     services keep their data in Postgres (DATABASE_URL), never in a local SQLite file.
+#   * Idle services sleep after 15 minutes and take about a minute to wake, which is why
+#     the platform waits up to 120 s for the fraud and audit services before HOLDING an
+#     execution (it never executes one unscreened).
+#   * Free services cannot reach each other over Render's private network, so the platform
+#     calls the fraud and audit services on their public onrender.com URLs.
+#
+# Component 4 (Agentic-Assistance) is NOT deployed here: it needs a local Ollama model
+# (~4 GB RAM), far beyond the free plan. The frontend shows its "service not running" state.
+
+envVarGroups:
+  - name: nexa-shared
+    envVars:
+      # Signed by the platform, verified by the portfolio service. Generated once by Render.
+      - key: JWT_SECRET
+        generateValue: true
+
+services:
+  # --- shared platform service: auth, portfolios, executions -----------------------------
+  - type: web
+    name: nexa-platform
+    runtime: docker
+    plan: free
+    dockerContext: ./backend/Platform
+    dockerfilePath: ./backend/Platform/Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - fromGroup: nexa-shared
+      - key: PORT
+        value: "8100"
+      # Prisma Postgres DIRECT connection string (postgres://...@db.prisma.io:5432/...).
+      - key: DATABASE_URL
+        sync: false
+      # Your Vercel domain(s), comma-separated, e.g. https://your-app.vercel.app
+      - key: ALLOWED_ORIGINS
+        sync: false
+      # Public URLs of the two services below, e.g. https://nexa-fraud.onrender.com
+      - key: FRAUD_SERVICE_URL
+        sync: false
+      - key: AUDIT_SERVICE_URL
+        sync: false
+      - key: PIPELINE_TIMEOUT_SECONDS
+        value: "120"
+
+  # --- Component 1: portfolio optimization ------------------------------------------------
+  - type: web
+    name: nexa-portfolio
+    runtime: docker
+    plan: free
+    dockerContext: ./backend/Portfolio-Optimization
+    dockerfilePath: ./backend/Portfolio-Optimization/docker/Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - fromGroup: nexa-shared
+      - key: PORT
+        value: "8000"
+      - key: AUTH_REQUIRED
+        value: "true"
+      - key: ALLOWED_ORIGINS
+        sync: false
+      # No broker on Render; decision events go to the null producer instead.
+      - key: KAFKA_ENABLED
+        value: "false"
+      - key: MLFLOW_TRACKING_URI
+        value: sqlite:///artifacts/mlflow.db
+
+  # --- Component 2: fraud detection (Dhushanthini's Dockerfile, unchanged) ----------------
+  - type: web
+    name: nexa-fraud
+    runtime: docker
+    plan: free
+    dockerContext: ./backend/Fraud-Detection
+    dockerfilePath: ./backend/Fraud-Detection/Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "8001"
+      - key: FRAUD_API_PORT
+        value: "8001"
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+  # --- Component 3: blockchain auditability -----------------------------------------------
+  - type: web
+    name: nexa-audit
+    runtime: node
+    plan: free
+    rootDir: backend/Blockchain-Auditability/backend
+    buildCommand: npm ci --omit=dev
+    startCommand: node src/index.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Same Prisma Postgres database as the platform; the tables do not overlap.
+      - key: DATABASE_URL
+        sync: false
+      # Simulated ledger, persisted in Postgres so commitments survive spin-downs. For real
+      # anchoring, deploy AuditRegistry to a testnet and set BLOCKCHAIN_RPC_URL,
+      # SIGNER_PRIVATE_KEY and CONTRACT_CONFIG_PATH instead (see DEPLOY.md).
+      - key: BLOCKCHAIN_MODE
+        value: mock
+      - key: NODE_ENV
+        value: production
+      # The Audit screen's tamper-evidence demonstration needs this in production mode.
+      - key: ALLOW_DEMO_TAMPER
+        value: "true"

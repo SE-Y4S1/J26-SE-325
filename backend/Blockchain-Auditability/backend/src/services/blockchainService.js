@@ -36,6 +36,18 @@ class BlockchainService {
     this.mockPolicies = new Set();
   }
 
+  /**
+   * The audit database, when it can persist the simulated chain (Postgres). In memory alone
+   * the mock ledger forgets every commitment on restart, and a host that restarts idle
+   * instances (Render's free tier) would then report every older record ON_CHAIN_MISSING.
+   */
+  persistentLedger() {
+    // Required here, not at module load: database.js is loaded by the services that load this.
+    const { getDatabase } = require("../db/database");
+    const db = getDatabase();
+    return typeof db.putLedgerEntry === "function" ? db : null;
+  }
+
   isMockMode() {
     return process.env.BLOCKCHAIN_MODE === "mock";
   }
@@ -96,7 +108,7 @@ class BlockchainService {
       const blockTimestamp = Math.floor(Date.now() / 1000);
       const mockBlockNumber = Math.floor(1000 + Math.random() * 9000);
 
-      this.mockLedger.set(auditId, {
+      const entry = {
         auditId,
         recordHash,
         policyHash,
@@ -104,7 +116,12 @@ class BlockchainService {
         submitter: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
         blockchainTxId: mockTxHash,
         blockNumber: mockBlockNumber
-      });
+      };
+      this.mockLedger.set(auditId, entry);
+      const store = this.persistentLedger();
+      if (store) {
+        await store.putLedgerEntry(auditId, entry);
+      }
 
       return {
         success: true,
@@ -148,8 +165,13 @@ class BlockchainService {
    */
   async getAudit(auditId) {
     if (this.isMockMode()) {
-      if (this.mockLedger.has(auditId)) {
-        const item = this.mockLedger.get(auditId);
+      let item = this.mockLedger.get(auditId);
+      const store = this.persistentLedger();
+      if (!item && store) {
+        item = await store.getLedgerEntry(auditId);
+        if (item) this.mockLedger.set(auditId, item);
+      }
+      if (item) {
         return {
           exists: true,
           recordHash: item.recordHash,
