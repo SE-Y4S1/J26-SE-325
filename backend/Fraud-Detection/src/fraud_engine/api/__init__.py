@@ -8,9 +8,11 @@ call a language model.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from fraud_engine import __version__
@@ -51,6 +53,16 @@ def create_app(settings: dict | None = None, bundle_path: Path | None | object =
     )
     app.state.service = service
     app.state.settings = resolved
+    # The platform frontend calls this service from the browser. No origins are allowed
+    # unless ALLOWED_ORIGINS names them.
+    origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_methods=["GET", "POST"],
+            allow_headers=["Authorization", "Content-Type"],
+        )
 
     @app.get("/health")
     def health() -> dict:
@@ -72,6 +84,14 @@ def create_app(settings: dict | None = None, bundle_path: Path | None | object =
         except Exception as exc:  # noqa: BLE001
             logger.exception("Scoring failed")
             raise HTTPException(status_code=503, detail="The fraud service could not score this transaction.") from exc
+
+    @app.get("/v1/transactions/{transaction_id}")
+    def get_transaction(transaction_id: str) -> dict:
+        """The decision and explanation already returned for a transaction. Read-only."""
+        found = service.lookup(transaction_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail="No decision is held for this transaction.")
+        return found
 
     @app.get("/v1/dashboard", response_class=HTMLResponse)
     def dashboard() -> str:

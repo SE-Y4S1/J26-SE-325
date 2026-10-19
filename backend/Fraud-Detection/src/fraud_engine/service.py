@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -54,6 +54,11 @@ class FraudService:
         self.log_dir = Path(settings["log_dir"]) if settings.get("log_dir") else LOG_DIR
         self.recent: deque[dict[str, Any]] = deque(maxlen=50)
         self.decision_counts = {"ALLOW": 0, "STEP_UP": 0, "BLOCK": 0}
+        # Full responses by transaction id, so the explanation layer (Component 4) can read
+        # the decision this gateway enforced. Holds only what score() returned: no account
+        # key, device key or amount, matching what the decision log keeps.
+        self.responses: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self.max_responses = 1000
         self.bundle = None
         self.preprocessor = None
         self.lstm = None
@@ -135,7 +140,7 @@ class FraudService:
             self._log(record)
         if simulated is not None:
             notes.append("Simulated signals were received and were not treated as customer biometrics.")
-        return {
+        response = {
             "transaction_id": payload["transaction_id"],
             "fraud_score": fraud_score,
             "decision": decision,
@@ -148,6 +153,16 @@ class FraudService:
                 "notes": notes,
             },
         }
+        with self.lock:
+            self.responses[str(payload["transaction_id"])] = response
+            self.responses.move_to_end(str(payload["transaction_id"]))
+            while len(self.responses) > self.max_responses:
+                self.responses.popitem(last=False)
+        return response
+
+    def lookup(self, transaction_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            return self.responses.get(transaction_id)
 
     def _model_score(self, payload: dict[str, Any], account: str) -> tuple[float, dict[str, float], list[dict[str, Any]], list[str]]:
         if self.preprocessor is None or self.lstm is None or self.gnn is None or self.fusion is None:

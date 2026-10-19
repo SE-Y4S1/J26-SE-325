@@ -160,3 +160,16 @@ def test_service_failure_is_a_503(tmp_path: Path) -> None:
     response = client.post("/v1/transactions/score", json={"transaction_id": "tx-9", "amount": 10})
     assert response.status_code == 503
     assert "crashed" not in response.text
+
+
+def test_scored_transaction_can_be_read_back(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    scored = client.post(
+        "/v1/transactions/score",
+        json={"transaction_id": "tx-lookup", "amount": 40, "account_key": "acct-l"},
+    ).json()
+    found = client.get("/v1/transactions/tx-lookup")
+    assert found.status_code == 200
+    assert found.json() == scored
+    assert "acct-l" not in found.text
+    assert client.get("/v1/transactions/never-scored").status_code == 404
