@@ -59,9 +59,105 @@ PLATFORM_SERVICE_URL = os.getenv(
     os.getenv("PLATFORM_SERVICE_URL", "http://localhost:8100")
 ).rstrip("/")
 
+COMPONENT1_SERVICE_URL = os.getenv(
+    "PORTFOLIO_OPTIMIZATION_URL",
+    os.getenv("COMPONENT1_SERVICE_URL", "http://localhost:8000")
+).rstrip("/")
+
 PORTFOLIO_TIMEOUT_SECONDS = float(os.getenv("PORTFOLIO_SERVICE_TIMEOUT", "1.5"))
 DEFAULT_PORTFOLIO_ID = os.getenv("PORTFOLIO_ID", "1")
 DEFAULT_USER_ID = os.getenv("PLATFORM_USER_ID", os.getenv("DEFAULT_USER_ID", "1"))
+
+
+def query_component1_health(timeout: float = 1.0) -> dict:
+    """
+    Query Component 1 (Portfolio-Optimization service) health, model status, and available forecasters.
+    Returns status dict without raising exceptions.
+    """
+    url = f"{COMPONENT1_SERVICE_URL}/health"
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "FinTrust-Component4/1.0", "Accept": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return {
+                "reachable": True,
+                "status": data.get("status", "ok"),
+                "model_version": data.get("model_version", "unregistered"),
+                "available_forecasters": data.get("available_forecasters", []),
+                "kafka_connected": data.get("kafka_connected", False),
+                "url": COMPONENT1_SERVICE_URL,
+            }
+    except Exception as exc:
+        return {
+            "reachable": False,
+            "error": str(exc),
+            "model_version": "unavailable",
+            "available_forecasters": [],
+            "kafka_connected": False,
+            "url": COMPONENT1_SERVICE_URL,
+        }
+
+
+def query_live_market_quote(
+    symbol: str,
+    exchange: str | None = None,
+    timeout: float = 3.0,
+) -> dict:
+    """
+    Attempt to retrieve a verified live quote from Component 1's /market/quote endpoint.
+    Returns status dict without raising exceptions:
+    {
+        "available": bool,
+        "status_code": int | None,
+        "data": dict | None,
+        "error": str | None,
+        "source": str,
+    }
+    """
+    clean_sym = symbol.strip().upper()
+    url = f"{COMPONENT1_SERVICE_URL}/market/quote"
+    headers = {
+        "User-Agent": "FinTrust-Component4/1.0",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    auth_header = get_auth_header("1")
+    headers.update(auth_header)
+    payload: dict = {"symbol": clean_sym}
+    if exchange:
+        payload["exchange"] = exchange
+    try:
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return {
+                "available": True,
+                "status_code": resp.status,
+                "data": data,
+                "error": None,
+                "source": f"Component 1 Market Data Service ({COMPONENT1_SERVICE_URL})",
+            }
+    except urllib.error.HTTPError as exc:
+        return {
+            "available": False,
+            "status_code": exc.code,
+            "data": None,
+            "error": f"HTTP {exc.code}: {exc.reason}",
+            "source": f"Component 1 Market Data Service ({COMPONENT1_SERVICE_URL})",
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "status_code": None,
+            "data": None,
+            "error": str(exc),
+            "source": f"Component 1 Market Data Service ({COMPONENT1_SERVICE_URL})",
+        }
+
 
 # Platform validation invariants (matching backend/Platform/auth/security.py)
 PLATFORM_ISSUER = "j26-se-325-platform"
@@ -371,7 +467,7 @@ def query_live_portfolio_service(
 
 @tool
 def get_portfolio_analysis(
-    user_id: str = "1",
+    user_id: str | None = "1",
     portfolio_id: str | None = None,
 ) -> str:
     """
@@ -404,7 +500,7 @@ def get_portfolio_analysis(
 
 
 def _execute_portfolio_analysis(
-    user_id: str = "1",
+    user_id: str | None = "1",
     portfolio_id: str | None = None,
 ) -> str:
     prefs = get_current_preferences()
