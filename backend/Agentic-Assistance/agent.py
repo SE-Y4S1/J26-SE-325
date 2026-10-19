@@ -671,21 +671,46 @@ def synthesize_portfolio_response(tool_content: str, explanation_enabled: bool =
         )
         holdings_text = holdings_match.group(1).strip() if holdings_match else "No active holdings recorded."
 
+        has_partial = "Unavailable" in total_val or "Unavailable" in holdings_text or "Partial data notice" in tool_content
+        partial_notice = (
+            "Notice: Only verified fields from the live platform record are presented. "
+            "Unavailable fields are explicitly marked as unavailable rather than estimated.\n\n"
+            if has_partial else ""
+        )
+
         return (
             f"Here is your recorded portfolio summary from the live platform service:\n\n"
             f"Portfolio: {name}\n"
             f"Total Market Value: {total_val}\n"
             f"Active Holdings Count: {count}\n\n"
             f"Recorded Asset Positions:\n{holdings_text}\n\n"
+            f"{partial_notice}"
             f"Notice: The platform portfolio service records live asset holdings and valuation. "
             f"Optimization metrics (such as expected annual return and risk scores) require running "
             f"Component 1's analytical models and are not stored in the base portfolio record."
         )
 
-    if "PORTFOLIO ANALYSIS — FALLBACK DATA" in tool_content:
+    if "PORTFOLIO ANALYSIS — FALLBACK DATA" in tool_content or "PORTFOLIO ANALYSIS — SERVICE UNAVAILABLE" in tool_content:
         reason_match = re.search(r"Platform service note:\s*([^\n\r]+)", tool_content)
-        reason_str = reason_match.group(1).strip() if reason_match else "Portfolio not found on platform service"
+        reason_str = reason_match.group(1).strip() if reason_match else "Platform service unavailable"
 
+        # Check if service error / timeout / unreachable (Scenario 3)
+        is_service_error = bool(
+            re.search(r"unreachable|timed out|timeout|connection refused|500|502|503|504|Service unavailable", reason_str, re.IGNORECASE)
+            or re.search(r"Service unavailable|SERVICE UNAVAILABLE", tool_content)
+        )
+        is_empty_portfolio = bool(
+            re.search(r"Empty portfolio list|no registered portfolios|0 active positions|no portfolios registered|Portfolio not found", reason_str, re.IGNORECASE)
+            or re.search(r"Empty portfolio list|0 active positions", tool_content, re.IGNORECASE)
+        )
+
+        if is_service_error and not is_empty_portfolio:
+            return (
+                f"Notice: Live portfolio data could not be retrieved because the platform service is unreachable or timed out ({reason_str}). "
+                f"This does not indicate an empty portfolio; live holdings could not be verified due to a service outage."
+            )
+
+        # Scenario 2: No portfolio exists (API successfully returned empty result)
         return (
             f"Notice: No live portfolio was retrieved for this account from the platform service ({reason_str}). "
             f"The user has zero verified live holdings on record.\n\n"
@@ -696,14 +721,14 @@ def synthesize_portfolio_response(tool_content: str, explanation_enabled: bool =
             f"- Diversification Score: 74/100 (Synthetic Example)\n"
             f"- Liquidity: High (Synthetic Example)\n"
             f"- Mock Allocation: 35% Technology, 25% Banking, 15% Healthcare, 15% Government Bonds, 10% Cash (Sample Example)\n\n"
-            f"Please note: These figures and recommendations are synthetic baseline examples for demonstration only and do not reflect actual user holdings or a verified account balance."
+            f"Please note: Every figure above is illustrative mock data for demonstration only and does not reflect actual user holdings or a verified account balance."
         )
 
     reason_match = re.search(r"unreachable \(([^)]+)\)", tool_content)
     reason_str = reason_match.group(1).strip() if reason_match else "Service unavailable"
     return (
-        f"Notice: The live platform portfolio service was unreachable ({reason_str}). "
-        f"No verified live portfolio record was retrieved."
+        f"Notice: Live portfolio data could not be retrieved because the platform service is unreachable or timed out ({reason_str}). "
+        f"This does not indicate an empty portfolio; live holdings could not be verified due to a service outage."
     )
 
 

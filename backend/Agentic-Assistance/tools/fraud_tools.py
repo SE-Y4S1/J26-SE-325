@@ -159,6 +159,18 @@ def get_fraud_analysis(transaction_id: str = "TX1001") -> str:
     explanation_enabled = prefs.get("explanation_enabled", True)
     target_id = str(transaction_id).strip() if transaction_id else "TX1001"
 
+    from governance_store import default_governance_store
+    gov_decision = default_governance_store.get_latest_decision(target_id)
+    gov_section = ""
+    if gov_decision:
+        gov_status = gov_decision.get("decision_type", "").upper()
+        gov_section = f"""
+HUMAN OVERSIGHT GOVERNANCE STATUS:
+- Recorded Human Decision: {gov_status} (Decision ID: {gov_decision.get('decision_id')})
+- Decision Timestamp: {gov_decision.get('timestamp')}
+- Policy Enforcement: {"ACTION REJECTED BY USER — Financial execution is strictly blocked; do not execute real financial transactions." if gov_status == "REJECTED" else "Action confirmed by human oversight."}
+"""
+
     # Query Component 2's live decision store (safe read-only GET /v1/transactions/{id})
     live_res = query_live_fraud_service(target_id)
 
@@ -243,7 +255,7 @@ MODEL PROVENANCE & EXPLANATION NOTICE:
 - Component 4's local synthetic Random Forest prototype is NOT used for this live transaction.
 - Local SHAP attributions are not computed for live records because Component 4's prototype does not model Component 2's LSTM/GNN architecture and the live audit trail does not retain raw tabular inputs.
 - Probability calibration not established.
-"""
+{gov_section}"""
 
     # 2. FALLBACK TO MOCK DATA (SERVICE OFFLINE, NOT FOUND, TIMED OUT, OR MALFORMED)
     fallback_reason = live_res.get("reason") or "Live Component 2 service returned no record"
@@ -356,5 +368,5 @@ RECORDED CONTRIBUTING FACTORS:
 {reasons_text}
 
 {shap_section}
-"""
+{gov_section}"""
 

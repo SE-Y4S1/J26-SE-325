@@ -28,7 +28,8 @@ from preferences_context import (
 )
 from responsible_ai import record_research_telemetry, run_responsible_ai_checks
 from timing_context import start_request_timing, end_request_timing
-from request_auth import set_caller_authorization, reset_caller_authorization
+from request_auth import set_caller_authorization, reset_caller_authorization, decode_caller_identity
+from governance_store import default_governance_store
 from tools.portfolio_tools import init_request_portfolio_cache, clear_request_portfolio_cache
 
 app = FastAPI(
@@ -136,6 +137,90 @@ def root():
         "component": "Agentic LLM Assistant & Responsible AI",
         "version": "0.2.0",
         "status": "running"
+    }
+
+
+# --------------------------------------------------
+# GOVERNANCE DECISION ENDPOINTS (HUMAN OVERSIGHT)
+# --------------------------------------------------
+
+class GovernanceDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    decision_type: str
+    reference_id: str
+    reference_type: str = "transaction"
+    evidence_reference: dict[str, Any] = Field(default_factory=dict)
+    rationale: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            dt = str(data.get("decision_type", "")).strip().lower()
+            if dt not in {"confirmed", "rejected"}:
+                raise ValueError("decision_type must be either 'confirmed' or 'rejected'")
+            ref = str(data.get("reference_id", "")).strip()
+            if not ref:
+                raise ValueError("reference_id cannot be empty")
+            data["decision_type"] = dt
+            data["reference_id"] = ref
+        return data
+
+
+@app.post("/assistant/governance/decision")
+def record_governance_decision(
+    request: GovernanceDecisionRequest,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Record a persistent human-in-the-loop oversight decision (Confirm Decision / Reject Action).
+    Enforces authorization when AUTH_REQUIRED is active, extracts caller identity, and persists
+    the record to the append-only governance store.
+    """
+    user_id, user_email = decode_caller_identity(authorization)
+    record = default_governance_store.record_decision(
+        decision_type=request.decision_type,
+        reference_id=request.reference_id,
+        reference_type=request.reference_type,
+        user_id=user_id,
+        user_email=user_email,
+        evidence_reference=request.evidence_reference,
+        rationale=request.rationale,
+    )
+    return {
+        "status": record.get("status", "recorded"),
+        "is_duplicate": record.get("is_duplicate", False),
+        "decision": record,
+    }
+
+
+@app.get("/assistant/governance/decision/{reference_id}")
+def get_governance_decision(
+    reference_id: str,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Retrieve the latest recorded human oversight decision for a transaction or portfolio.
+    Used on page load / refresh to restore and display the persistent governance state.
+    """
+    decode_caller_identity(authorization)
+    decision = default_governance_store.get_latest_decision(reference_id)
+    return {
+        "found": decision is not None,
+        "decision": decision,
+    }
+
+
+@app.get("/assistant/governance/decisions")
+def list_governance_decisions(
+    limit: int = 50,
+    authorization: str | None = Header(default=None),
+):
+    """List recent human oversight decisions for auditability and compliance reporting."""
+    decode_caller_identity(authorization)
+    return {
+        "decisions": default_governance_store.list_decisions(limit=limit),
     }
 
 

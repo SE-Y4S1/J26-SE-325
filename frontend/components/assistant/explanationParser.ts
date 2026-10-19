@@ -56,6 +56,8 @@ export interface ParsedPortfolioEvidence {
   holdingCount: number;
   isFallback: boolean;
   fallbackReason?: string;
+  statusType?: "live" | "fallback" | "service_error" | "empty" | "disabled";
+  isPartial?: boolean;
   expectedAnnualReturn?: number;
   riskScore?: number;
   riskLevel?: string;
@@ -276,17 +278,11 @@ export function parsePortfolioResult(text: string): ParsedPortfolioEvidence {
       currency: "USD",
       holdingCount: 0,
       isFallback: false,
+      statusType: "disabled",
       fallbackReason: "Personalized financial context is disabled by user preference.",
       explanationText: "Notice: Personalized financial context is disabled by user preference. Account-specific portfolio queries are blocked without fabricating anonymous holdings.",
     };
   }
-
-  const isFallback = /FALLBACK|Local mock baseline|NO LIVE PORTFOLIO/i.test(text);
-  const isLive = !isFallback && /LIVE PLATFORM RECORD/i.test(text);
-  const provenanceType: "live" | "fallback" = isLive ? "live" : "fallback";
-  const provenanceLabel = isLive
-    ? "Live Service Evidence (Platform Portfolio)"
-    : "Tool Evidence — Synthetic Demo Data";
 
   const pIdMatch = text.match(/(?:Portfolio ID|User ID):\s*([A-Za-z0-9_-]+)/i);
   const portfolioId = pIdMatch ? pIdMatch[1] : "USER001";
@@ -299,9 +295,37 @@ export function parsePortfolioResult(text: string): ParsedPortfolioEvidence {
     fallbackReason = reasonMatch[1].trim();
   }
 
+  const isServiceError =
+    (/SERVICE UNAVAILABLE|service unreachable|Connection refused|timed out|timeout|HTTP 50[0-9]|Service unavailable/i.test(text) ||
+      Boolean(fallbackReason && /unreachable|timed out|timeout|connection refused|500|Service unavailable/i.test(fallbackReason))) &&
+    !/Empty portfolio list|0 active positions|No portfolios registered/i.test(text);
+
+  if (isServiceError) {
+    return {
+      hasEvidence: true,
+      provenanceType: "fallback",
+      provenanceLabel: "Service Unavailable (Platform Error / Timeout)",
+      portfolioId,
+      totalValue: "Unavailable",
+      currency: "USD",
+      holdingCount: 0,
+      isFallback: true,
+      statusType: "service_error",
+      fallbackReason: fallbackReason || "Live platform service unreachable or timed out",
+      explanationText: `Notice: Live portfolio data could not be retrieved because the platform service is unreachable or timed out (${fallbackReason || "connection error"}). Holdings remain unverified due to platform service unavailability; this does not indicate an empty portfolio.`,
+    };
+  }
+
+  const isFallback = /FALLBACK|Local mock baseline|NO LIVE PORTFOLIO/i.test(text);
+  const isLive = !isFallback && /LIVE PLATFORM RECORD/i.test(text);
+  const provenanceType: "live" | "fallback" = isLive ? "live" : "fallback";
+
+  const isEmpty = /Empty portfolio list|no registered portfolios|0 active positions|NO LIVE HOLDINGS FOUND|No holdings recorded/i.test(text);
+
   let totalValue = "N/A";
   let currency = isLive ? "USD" : "LKR";
   let holdingCount = 0;
+  let isPartial = false;
   let expectedAnnualReturn: number | undefined;
   let riskScore: number | undefined;
   let riskLevel: string | undefined;
@@ -310,13 +334,16 @@ export function parsePortfolioResult(text: string): ParsedPortfolioEvidence {
   let allocation: Record<string, number> | undefined;
 
   if (isLive) {
-    const valMatch = text.match(/Total Portfolio Value:\s*([A-Za-z]+)?\s*([0-9,]+(?:\.[0-9]+)?)/i);
+    const valMatch = text.match(/Total Portfolio Value:\s*([A-Za-z]+)?\s*([0-9,]+(?:\.[0-9]+)?|Unavailable[^\n\r]*)/i);
     if (valMatch) {
-      currency = valMatch[1] || "USD";
+      if (valMatch[1] && !valMatch[1].startsWith("Unavail")) {
+        currency = valMatch[1];
+      }
       totalValue = valMatch[2];
     }
     const countMatch = text.match(/Holding Count:\s*([0-9]+)/i);
     holdingCount = countMatch ? parseInt(countMatch[1], 10) : 0;
+    isPartial = /Unavailable|Partial data notice/i.test(text);
   } else {
     const valMatch = text.match(
       /(?:Total Portfolio Value|Illustrative Baseline Valuation):\s*([A-Za-z]+)?\s*([0-9,]+(?:\.[0-9]+)?)/i
@@ -358,8 +385,24 @@ export function parsePortfolioResult(text: string): ParsedPortfolioEvidence {
     holdingCount = 0;
   }
 
+  const statusType: "live" | "fallback" | "service_error" | "empty" | "disabled" = isLive
+    ? "live"
+    : isEmpty
+    ? "empty"
+    : "fallback";
+
+  const provenanceLabel = isLive
+    ? isPartial
+      ? "Live Service Evidence (Platform Portfolio — Partial Data)"
+      : "Live Service Evidence (Platform Portfolio)"
+    : isEmpty
+    ? "Tool Evidence — Synthetic Demo Data (0 Live Holdings)"
+    : "Tool Evidence — Synthetic Demo Data";
+
   const explanationText = isLive
-    ? `Live portfolio record retrieved from the platform portfolio store. Total recorded market value: ${currency} ${totalValue} across ${holdingCount} verified holdings. Optimization metrics require Component 1 analytical modeling.`
+    ? isPartial
+      ? `Live portfolio record retrieved from the platform portfolio store. Recorded market value: ${totalValue.includes("Unavailable") ? "Unavailable / Not recorded" : `${currency} ${totalValue}`} across ${holdingCount} recorded holdings. Some asset fields are not recorded on the platform and are explicitly marked as unavailable.`
+      : `Live portfolio record retrieved from the platform portfolio store. Total recorded market value: ${currency} ${totalValue} across ${holdingCount} verified holdings. Optimization metrics require Component 1 analytical modeling.`
     : `Notice: No live portfolio was retrieved for user ${portfolioId} from the platform service (${fallbackReason || "portfolio not found"}). The user has 0 verified live holdings on record. What the platform verified: no live portfolio record was found on the platform service. What the demonstration illustrates: sample return (${expectedAnnualReturn}%), risk score (${riskScore}/100, ${riskLevel ?? "Moderate"}), diversification (${diversificationScore}/100), liquidity (${liquidity}), mock valuation (${currency} ${totalValue}), and sector allocations as illustrative mock baseline examples for demonstration only. What remains unknown: the user's actual portfolio risk profile and real account balance remain unknown and unassessed, and do not reflect actual user holdings or a verified account balance.`;
 
   return {
@@ -372,6 +415,8 @@ export function parsePortfolioResult(text: string): ParsedPortfolioEvidence {
     holdingCount,
     isFallback,
     fallbackReason,
+    statusType,
+    isPartial,
     expectedAnnualReturn,
     riskScore,
     riskLevel,

@@ -47,7 +47,27 @@ export interface ChatMessage {
     tool: string;
     result: string;
   }>;
+  timing?: {
+    request_id?: string;
+    total_duration_ms?: number;
+    initial_tool_selection_ms?: number;
+    final_synthesis_ms?: number;
+    total_ollama_inference_ms?: number;
+    total_tool_duration_ms?: number;
+    tool_call_count?: number;
+    tool_calls?: Array<{
+      tool_name: string;
+      duration_ms?: number;
+      success?: boolean;
+    }>;
+  };
+  evidenceValidation?: {
+    passed?: boolean;
+    issues?: string[];
+    checks_applied?: number;
+  };
   hasWhyButton?: boolean;
+  hasTrustPanelButton?: boolean;
   isError?: boolean;
 }
 

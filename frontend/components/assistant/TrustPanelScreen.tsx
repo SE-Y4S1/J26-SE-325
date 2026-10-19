@@ -1,9 +1,14 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { MOCK_TRANSACTION } from "./mockData";
 import { TrustActionState } from "./types";
 import { ShieldIcon, CheckCircleIcon, LockIcon, AlertTriangleIcon, UndoIcon, SparklesIcon } from "./icons";
+import {
+  recordGovernanceDecision,
+  getGovernanceDecision,
+  type GovernanceDecisionRecord,
+} from "@/lib/api/assistant";
 
 interface TrustPanelScreenProps {
   latestEvidence?: Array<{ tool: string; result: string }>;
@@ -27,6 +32,8 @@ interface ParsedEvidenceData {
   hasPortfolioEvidence?: boolean;
   portfolioId?: string;
   isPortfolioFallback?: boolean;
+  portfolioStatusType?: "live" | "fallback" | "service_error" | "empty" | "disabled";
+  portfolioIsPartial?: boolean;
   portfolioTotalValue?: string;
   portfolioCurrency?: string;
   portfolioRiskScore?: number;
@@ -66,12 +73,47 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
       (/LIVE SERVICE VERIFICATION|Live Component 3|CONFIGURED BLOCKCHAIN|SIMULATED LEDGER/i.test(auditItem.result))
     );
 
+  const isPortfolioDisabled = Boolean(portfolioItem?.result && /PERSONALIZED CONTEXT DISABLED|Personalized financial context is disabled/i.test(portfolioItem.result));
+
+  const portfolioFallbackReason = portfolioItem?.result
+    ? (portfolioItem.result.match(/Platform service note:\s*([^\n\r]+)/i)?.[1]?.trim() ||
+       portfolioItem.result.match(/live platform service at [^:]*:\s*([^\n\r\)]+)/i)?.[1]?.trim())
+    : undefined;
+
+  const isPortfolioServiceError = Boolean(
+    portfolioItem?.result &&
+    (/SERVICE UNAVAILABLE|service unreachable|Connection refused|timed out|timeout|HTTP 50[0-9]|Service unavailable/i.test(portfolioItem.result) ||
+     Boolean(portfolioFallbackReason && /unreachable|timed out|timeout|connection refused|500|Service unavailable/i.test(portfolioFallbackReason))) &&
+    !/Empty portfolio list|0 active positions|No portfolios registered/i.test(portfolioItem.result)
+  );
+
+  const isPortfolioEmpty = Boolean(
+    portfolioItem?.result &&
+    /Empty portfolio list|no registered portfolios|0 active positions|NO LIVE HOLDINGS FOUND|No holdings recorded/i.test(portfolioItem.result)
+  );
+
   const isPortfolioFallback = portfolioItem?.result
     ? /FALLBACK|Local mock baseline|NO LIVE PORTFOLIO/i.test(portfolioItem.result)
     : false;
   const isPortfolioLive =
     !isPortfolioFallback &&
     Boolean(portfolioItem?.result && (/LIVE PLATFORM RECORD/i.test(portfolioItem.result)));
+
+  const isPortfolioPartial = Boolean(
+    isPortfolioLive &&
+    portfolioItem?.result &&
+    /Unavailable|Partial data notice/i.test(portfolioItem.result)
+  );
+
+  const portfolioStatusType: "live" | "fallback" | "service_error" | "empty" | "disabled" = isPortfolioDisabled
+    ? "disabled"
+    : isPortfolioServiceError
+    ? "service_error"
+    : isPortfolioLive
+    ? "live"
+    : isPortfolioEmpty
+    ? "empty"
+    : "fallback";
 
   let provenanceType: "live" | "fallback" | "baseline" = "baseline";
   if (fraudItem && auditItem && portfolioItem) {
@@ -92,7 +134,7 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
     provenanceType = "baseline";
   }
 
-  const provenanceLabel =
+  let provenanceLabel =
     provenanceType === "live"
       ? "Active Session: Live Service Evidence"
       : provenanceType === "fallback"
@@ -101,11 +143,23 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
           : "Active Session: Fallback Mock Data"
         : "Mock Baseline (No Active Session Evidence)";
 
+  if (portfolioItem && !fraudItem && !auditItem) {
+    if (portfolioStatusType === "service_error") {
+      provenanceLabel = "Active Session: Service Unavailable (Platform Outage)";
+    } else if (portfolioStatusType === "disabled") {
+      provenanceLabel = "Active Session: Context Disabled (Responsible AI)";
+    } else if (isPortfolioPartial) {
+      provenanceLabel = "Active Session: Live Service Evidence (Partial Data)";
+    }
+  }
+
   const parsed: ParsedEvidenceData = {
     hasFraudEvidence: !!(fraudItem?.result && !fraudItem.result.includes("No transaction was found")),
     hasAuditEvidence: !!(auditItem?.result && !auditItem.result.includes("No audit record found")),
     hasPortfolioEvidence: !!(portfolioItem?.result && portfolioItem.result.trim().length > 0),
     isPortfolioFallback,
+    portfolioStatusType,
+    portfolioIsPartial: isPortfolioPartial,
     hasShap: false,
     provenanceType,
     provenanceLabel,
@@ -206,6 +260,9 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
 
 export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps) {
   const [actionState, setActionState] = useState<TrustActionState>("pending");
+  const [persistedRecord, setPersistedRecord] = useState<GovernanceDecisionRecord | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [showMoreExplanation, setShowMoreExplanation] = useState(false);
   const tx = MOCK_TRANSACTION;
 
@@ -218,8 +275,79 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
   const displayAmount = parsed.amount ?? (hasLiveEvidence ? undefined : tx.amount);
   const displayCurrency = parsed.currency ?? (hasLiveEvidence ? "LKR" : tx.currency);
   const displayStatus = isPortfolio
-    ? (parsed.isPortfolioFallback ? "DEMO BASELINE" : "LIVE PORTFOLIO")
+    ? (parsed.portfolioStatusType === "disabled"
+        ? "CONTEXT DISABLED"
+        : parsed.portfolioStatusType === "service_error"
+          ? "SERVICE UNAVAILABLE"
+          : parsed.portfolioStatusType === "empty"
+            ? (parsed.isPortfolioFallback ? "DEMO BASELINE" : "0 HOLDINGS")
+            : parsed.portfolioIsPartial
+              ? "LIVE (PARTIAL DATA)"
+              : (parsed.isPortfolioFallback ? "DEMO BASELINE" : "LIVE PORTFOLIO"))
     : (parsed.status ?? (hasLiveEvidence ? (parsed.recordStatus ?? "RECORDED") : tx.status));
+
+  // Load and display saved decision state when returning to the same recommendation / on page refresh
+  useEffect(() => {
+    let active = true;
+    async function loadSaved() {
+      if (!displayTxId) return;
+      try {
+        const res = await getGovernanceDecision(displayTxId);
+        if (!active) return;
+        if (res && res.found && res.decision) {
+          setActionState(res.decision.decision_type);
+          setPersistedRecord(res.decision);
+        }
+      } catch {
+        // Safe fallback if service is unreachable or not yet recorded
+      }
+    }
+    loadSaved();
+    return () => {
+      active = false;
+    };
+  }, [displayTxId]);
+
+  const handleDecision = async (type: "confirmed" | "rejected") => {
+    if (isSubmitting) return;
+
+    // Prevent accidental duplicate submission if already recorded in this exact state
+    if (persistedRecord && persistedRecord.decision_type === type && actionState === type) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    setActionError(null);
+
+    try {
+      const res = await recordGovernanceDecision({
+        decision_type: type,
+        reference_id: displayTxId,
+        reference_type: isPortfolio ? "portfolio" : "transaction",
+        evidence_reference: {
+          auditId: parsed.auditId,
+          blockNumber: parsed.blockNumber,
+          fraudScore: parsed.fraudScore,
+          prototypeProbability: parsed.prototypeProbability,
+          provenanceType: parsed.provenanceType,
+          status: displayStatus,
+        },
+        rationale: type === "confirmed" ? "Human operator confirmed decision" : "Human operator rejected action",
+      });
+
+      // ONLY display success after persistence succeeds
+      if (res && res.decision) {
+        setActionState(res.decision.decision_type);
+        setPersistedRecord(res.decision);
+      }
+    } catch (err: unknown) {
+      // On failure, show an error and DO NOT pretend the decision was recorded
+      const msg = err instanceof Error ? err.message : "Failed to record governance decision";
+      setActionError(msg);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-6">
@@ -261,16 +389,33 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
               </span>
             )}
           </div>
-          <span
-            className={`rounded-full px-3 py-1 text-xs font-bold ${isPortfolio
-                ? parsed.isPortfolioFallback
-                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
-                  : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
-                : "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+          {actionState === "rejected" ? (
+            <span className="rounded-full bg-red-600 px-3 py-1 text-xs font-bold text-white shadow-xs">
+              REJECTED BY HUMAN OVERSIGHT
+            </span>
+          ) : actionState === "confirmed" ? (
+            <span className="rounded-full bg-emerald-600 px-3 py-1 text-xs font-bold text-white shadow-xs">
+              CONFIRMED BY HUMAN REVIEW
+            </span>
+          ) : (
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-bold ${
+                isPortfolio
+                  ? parsed.portfolioStatusType === "service_error"
+                    ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+                    : parsed.portfolioStatusType === "disabled"
+                      ? "bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300"
+                      : parsed.portfolioIsPartial
+                        ? "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300"
+                        : parsed.isPortfolioFallback
+                          ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
+                          : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                  : "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
               }`}
-          >
-            {displayStatus}
-          </span>
+            >
+              {displayStatus}
+            </span>
+          )}
         </div>
 
         <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-800/60">
@@ -281,21 +426,36 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
               </p>
               <p className="text-lg font-bold text-neutral-900 dark:text-white">
                 {isPortfolio
-                  ? `Portfolio ${parsed.portfolioId || "USER001"}${parsed.portfolioTotalValue ? ` — ${parsed.portfolioCurrency || "LKR"} ${parsed.portfolioTotalValue} (Illustrative)` : ""}`
+                  ? `Portfolio ${parsed.portfolioId || "USER001"}${parsed.portfolioTotalValue && !parsed.portfolioTotalValue.includes("Unavailable") ? ` — ${parsed.portfolioCurrency || "LKR"} ${parsed.portfolioTotalValue}` : ""}`
                   : `Transaction ${displayTxId}${displayAmount != null ? ` — ${displayCurrency} ${displayAmount.toLocaleString()}` : ""}`}
               </p>
             </div>
             <div className="text-right">
               <span className="text-xs text-neutral-500">Status</span>
               <p
-                className={`text-base font-bold ${isPortfolio
-                    ? parsed.isPortfolioFallback
-                      ? "text-amber-600 dark:text-amber-400"
-                      : "text-emerald-600 dark:text-emerald-400"
-                    : "text-red-600 dark:text-red-400"
-                  }`}
+                className={`text-base font-bold ${
+                  actionState === "rejected"
+                    ? "text-red-600 dark:text-red-400"
+                    : actionState === "confirmed"
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : isPortfolio
+                        ? parsed.portfolioStatusType === "service_error"
+                          ? "text-red-600 dark:text-red-400"
+                          : parsed.portfolioStatusType === "disabled"
+                            ? "text-neutral-600 dark:text-neutral-400"
+                            : parsed.portfolioIsPartial
+                              ? "text-blue-600 dark:text-blue-400"
+                              : parsed.isPortfolioFallback
+                                ? "text-amber-600 dark:text-amber-400"
+                                : "text-emerald-600 dark:text-emerald-400"
+                        : "text-red-600 dark:text-red-400"
+                }`}
               >
-                {displayStatus}
+                {actionState === "rejected"
+                  ? "Execution Halted (Human Rejected)"
+                  : actionState === "confirmed"
+                    ? "Approved by Human Review"
+                    : displayStatus}
               </p>
             </div>
           </div>
@@ -304,7 +464,13 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
             <span className="font-semibold text-neutral-900 dark:text-white">Explanation:</span>{" "}
             {hasLiveEvidence ? (
               isPortfolio ? (
-                parsed.isPortfolioFallback ? (
+                parsed.portfolioStatusType === "service_error" ? (
+                  <>Notice: The live platform portfolio service was unreachable or timed out for user <span className="font-semibold text-neutral-900 dark:text-white">{parsed.portfolioId || "USER001"}</span>. Live holdings remain unverified due to platform service unavailability; this does NOT indicate an empty portfolio or zero holdings.</>
+                ) : parsed.portfolioStatusType === "disabled" ? (
+                  <>Notice: Personalized financial context is disabled by user preference. Account-specific portfolio queries are blocked without fabricating anonymous holdings.</>
+                ) : parsed.portfolioIsPartial ? (
+                  <>Live portfolio record retrieved with partial data for <span className="font-semibold text-neutral-900 dark:text-white">{parsed.portfolioId || "USER001"}</span> ({parsed.portfolioHoldingCount} recorded positions). Verified fields are displayed; unrecorded valuation/cost fields are marked as unavailable rather than estimated.</>
+                ) : parsed.isPortfolioFallback ? (
                   <>Notice: No live portfolio record was retrieved for user <span className="font-semibold text-neutral-900 dark:text-white">{parsed.portfolioId || "USER001"}</span> from the platform service (0 verified holdings). The displayed metrics and valuation are synthetic baseline demonstrations shown for system demonstration purposes and do not represent verified holdings, actual account balances, or personalized investment advice.</>
                 ) : (
                   <>Live portfolio record retrieved from the platform portfolio store. Recorded market value: <span className="font-semibold text-neutral-900 dark:text-white">{parsed.portfolioCurrency || "USD"} {parsed.portfolioTotalValue}</span> across <span className="font-semibold text-neutral-900 dark:text-white">{parsed.portfolioHoldingCount}</span> verified holdings.</>
@@ -329,37 +495,86 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
             </p>
             <div className="flex flex-col gap-1.5 text-xs text-neutral-800 dark:text-neutral-200">
               {isPortfolio ? (
-                <>
-                  <div className="flex items-center gap-2">
-                    <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
-                    <span>
-                      {parsed.isPortfolioFallback
-                        ? "Platform service query: No live portfolio record found on platform service (0 verified holdings on record)"
-                        : `Platform service query: Live portfolio retrieved (${parsed.portfolioCurrency || "USD"} ${parsed.portfolioTotalValue}, ${parsed.portfolioHoldingCount} verified holdings)`}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
-                    <span>
-                      {parsed.isPortfolioFallback
-                        ? `Illustrative demo metrics: Sample return (${parsed.portfolioExpectedReturn ?? 11.8}%), risk score (${parsed.portfolioRiskScore ?? 38}/100), and allocation (calibration not established; not actual user assets)`
-                        : "Live asset allocation and holdings distribution verified"}
-                    </span>
-                  </div>
-                  {parsed.isPortfolioFallback ? (
+                parsed.portfolioStatusType === "service_error" ? (
+                  <>
+                    <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
+                      <AlertTriangleIcon className="size-4 shrink-0" />
+                      <span>Platform service query: Service unreachable or timed out — live holdings could not be retrieved</span>
+                    </div>
                     <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-                      <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <svg className="size-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <circle cx="12" cy="12" r="8" />
                       </svg>
-                      <span>Actual portfolio risk and verified account balance: Unassessed (0 verified live holdings on platform)</span>
+                      <span>Holdings verification: Unverified due to platform outage (Not an empty portfolio)</span>
                     </div>
-                  ) : (
+                    <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                      <svg className="size-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="12" cy="12" r="8" />
+                      </svg>
+                      <span>Synthetic baseline values: Suppressed to prevent misrepresenting service outage</span>
+                    </div>
+                  </>
+                ) : parsed.portfolioStatusType === "disabled" ? (
+                  <>
+                    <div className="flex items-center gap-2 text-neutral-600 dark:text-neutral-400">
+                      <LockIcon className="size-4 shrink-0 text-blue-500" />
+                      <span>Personalized financial context: Blocked by user preference in Responsible AI settings</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                      <svg className="size-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="12" cy="12" r="8" />
+                      </svg>
+                      <span>Holdings lookup: Suppressed (No mock holdings substituted)</span>
+                    </div>
+                  </>
+                ) : parsed.portfolioIsPartial ? (
+                  <>
                     <div className="flex items-center gap-2">
                       <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
-                      <span>Verified portfolio balance on platform record</span>
+                      <span>Platform service query: Live portfolio retrieved ({parsed.portfolioHoldingCount} positions recorded)</span>
                     </div>
-                  )}
-                </>
+                    <div className="flex items-center gap-2">
+                      <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                      <span>Verified fields displayed; unrecorded valuation/price fields marked Unavailable</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                      <span>Synthetic baseline values: Strictly omitted from live record</span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                      <span>
+                        {parsed.isPortfolioFallback
+                          ? "Platform service query: No live portfolio record found on platform service (0 verified holdings on record)"
+                          : `Platform service query: Live portfolio retrieved (${parsed.portfolioCurrency || "USD"} ${parsed.portfolioTotalValue}, ${parsed.portfolioHoldingCount} verified holdings)`}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                      <span>
+                        {parsed.isPortfolioFallback
+                          ? `Illustrative demo metrics: Sample return (${parsed.portfolioExpectedReturn ?? 11.8}%), risk score (${parsed.portfolioRiskScore ?? 38}/100), and allocation (calibration not established; not actual user assets)`
+                          : "Live asset allocation and holdings distribution verified"}
+                      </span>
+                    </div>
+                    {parsed.isPortfolioFallback ? (
+                      <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                        <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <circle cx="12" cy="12" r="8" />
+                        </svg>
+                        <span>Actual portfolio risk and verified account balance: Unassessed (0 verified live holdings on platform)</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                        <span>Verified portfolio balance on platform record</span>
+                      </div>
+                    )}
+                  </>
+                )
               ) : (
                 <>
                   {/* Row 1: Fraud score evidence */}
@@ -557,18 +772,74 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
           </p>
         </div>
 
+        {/* Error Notification */}
+        {actionError && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg bg-red-100 p-3 text-xs font-medium text-red-900 dark:bg-red-950/80 dark:text-red-200 border border-red-300 dark:border-red-900">
+            <AlertTriangleIcon className="size-4 shrink-0 text-red-600 dark:text-red-400 mt-0.5" />
+            <div>
+              <p className="font-bold">Persistence Failed</p>
+              <p className="mt-0.5">{actionError}. The decision was NOT recorded in the governance log. Please verify credentials and network status.</p>
+            </div>
+          </div>
+        )}
+
         {/* Action Status Notification */}
         {actionState === "confirmed" && (
-          <div className="mb-4 flex items-center gap-2 rounded-lg bg-emerald-100 p-3 text-xs font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
-            <CheckCircleIcon className="size-4" />
-            <span>Decision acknowledged locally. No governance log entry was created.</span>
+          <div className="mb-4 rounded-lg bg-emerald-100 p-3.5 text-xs text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-800">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-bold">
+                <CheckCircleIcon className="size-4 text-emerald-600 dark:text-emerald-400" />
+                <span>Decision confirmed and permanently anchored in Component 4 governance log.</span>
+              </div>
+              {persistedRecord?.is_duplicate && (
+                <span className="rounded-full bg-emerald-200 px-2 py-0.5 text-[10px] font-bold text-emerald-800 dark:bg-emerald-900 dark:text-emerald-300">
+                  Already Recorded
+                </span>
+              )}
+            </div>
+            {persistedRecord && (
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-emerald-800/90 dark:text-emerald-300/90 font-mono">
+                <span>Record ID: {persistedRecord.decision_id}</span>
+                <span>•</span>
+                <span>Timestamp: {new Date(persistedRecord.timestamp).toLocaleString()}</span>
+                {persistedRecord.user_id && (
+                  <>
+                    <span>•</span>
+                    <span>Reviewer: #{persistedRecord.user_id}</span>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         )}
 
         {actionState === "rejected" && (
-          <div className="mb-4 flex items-center gap-2 rounded-lg bg-red-100 p-3 text-xs font-bold text-red-800 dark:bg-red-950 dark:text-red-200">
-            <AlertTriangleIcon className="size-4" />
-            <span>Rejection recorded in this session only. No secondary review was requested.</span>
+          <div className="mb-4 rounded-lg bg-red-100 p-3.5 text-xs text-red-900 dark:bg-red-950 dark:text-red-200 border border-red-300 dark:border-red-800">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-bold">
+                <AlertTriangleIcon className="size-4 text-red-600 dark:text-red-400" />
+                <span>Action REJECTED by human operator and anchored in governance log. Financial execution is strictly blocked.</span>
+              </div>
+              <span className="rounded-full bg-red-200 px-2 py-0.5 text-[10px] font-bold text-red-900 dark:bg-red-900 dark:text-red-300 uppercase">
+                Execution Prohibited
+              </span>
+            </div>
+            {persistedRecord && (
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-red-800/90 dark:text-red-300/90 font-mono">
+                <span>Record ID: {persistedRecord.decision_id}</span>
+                <span>•</span>
+                <span>Timestamp: {new Date(persistedRecord.timestamp).toLocaleString()}</span>
+                {persistedRecord.user_id && (
+                  <>
+                    <span>•</span>
+                    <span>Reviewer: #{persistedRecord.user_id}</span>
+                  </>
+                )}
+              </div>
+            )}
+            <p className="mt-2 text-[11px] font-semibold text-red-950 dark:text-red-200">
+              Downstream Policy: Subsequent financial transactions for this recommendation will not be executed.
+            </p>
           </div>
         )}
 
@@ -595,16 +866,18 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-3">
           <button
-            onClick={() => setActionState("confirmed")}
-            className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-xs transition hover:bg-emerald-700"
+            onClick={() => handleDecision("confirmed")}
+            disabled={isSubmitting || (actionState === "confirmed" && persistedRecord?.decision_type === "confirmed")}
+            className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-xs transition hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Confirm Decision
+            {isSubmitting ? "Recording..." : actionState === "confirmed" ? "Decision Confirmed" : "Confirm Decision"}
           </button>
           <button
-            onClick={() => setActionState("rejected")}
-            className="rounded-lg bg-red-600 px-4 py-2 text-xs font-bold text-white shadow-xs transition hover:bg-red-700"
+            onClick={() => handleDecision("rejected")}
+            disabled={isSubmitting || (actionState === "rejected" && persistedRecord?.decision_type === "rejected")}
+            className="rounded-lg bg-red-600 px-4 py-2 text-xs font-bold text-white shadow-xs transition hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Reject Action
+            {isSubmitting ? "Recording..." : actionState === "rejected" ? "Action Rejected" : "Reject Action"}
           </button>
           <button
             onClick={() => setShowMoreExplanation(!showMoreExplanation)}
@@ -617,7 +890,7 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
           <button
             disabled
             className="flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-neutral-100 px-4 py-2 text-xs font-medium text-neutral-400 opacity-60 cursor-not-allowed dark:border-neutral-800 dark:bg-neutral-800 dark:text-neutral-500"
-            title="Rollback is available only for completed transaction states"
+            title="Rollback is disabled: external financial streams and blockchain state commitments are irreversible."
           >
             <UndoIcon className="size-3.5" />
             <span>Rollback / Undo (Inactive)</span>
