@@ -182,6 +182,41 @@ def test_optimize_returns_weights_that_sum_to_one(client) -> None:
     assert body["model_version"]
 
 
+@pytest.mark.slow
+def test_optimize_orders_realise_the_recommended_weights(client) -> None:
+    """The orders the platform executes must land the portfolio on the weights shown."""
+    body = client.post(
+        "/portfolio/optimize",
+        json={"holdings": HOLDINGS, "risk_preference": 0.5, "selection_rule": "knee"},
+    ).json()
+
+    assert body["currency"]["base"]
+    after = {h["symbol"]: h["quantity"] for h in HOLDINGS}
+    prices = {}
+    for order in body["rebalance_orders"]:
+        after[order["symbol"]] += order["quantity"] if order["side"] == "BUY" else -order["quantity"]
+        prices[order["symbol"]] = order["price"]
+    assert all(quantity >= -1e-9 for quantity in after.values())
+    values = {s: after[s] * prices[s] for s in prices}
+    total = sum(values.values())
+    for symbol, value in values.items():
+        assert value / total == pytest.approx(body["recommended_weights"].get(symbol, 0.0), abs=1e-3)
+
+
+def test_rebalance_orders_size_trades_on_converted_values() -> None:
+    """Weights are fractions of the converted total, so a trade is sized in base currency and
+    divided by the CONVERTED unit price -- never the native one."""
+    from service.api import _rebalance_orders
+
+    # 100 units at 6.0 (base) and 100 units at 4.0 (base): 600 + 400 = 1000.
+    state = {"AAA": {"value": 600.0, "price": 6.0}, "BBB": {"value": 400.0, "price": 4.0}}
+    orders = {o.symbol: o for o in _rebalance_orders(state, {"AAA": 0.5, "BBB": 0.5})}
+
+    assert orders["AAA"].side == "SELL" and orders["AAA"].quantity == pytest.approx(100 / 6)
+    assert orders["BBB"].side == "BUY" and orders["BBB"].quantity == pytest.approx(25)
+    assert _rebalance_orders(state, {"AAA": 0.6, "BBB": 0.4}) == []
+
+
 def test_optimize_rejects_empty_holdings(client) -> None:
     response = client.post("/portfolio/optimize", json={"holdings": []})
     assert response.status_code == 422

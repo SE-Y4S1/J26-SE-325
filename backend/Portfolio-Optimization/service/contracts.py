@@ -21,6 +21,7 @@ contract, so we disable the protection rather than rename it.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -68,6 +69,20 @@ class PortfolioRequest(BaseModel):
     base_currency: str | None = None    # None = the service's BASE_CURRENCY
 
 
+class RebalanceOrder(BaseModel):
+    """One trade that moves a holding to its recommended weight.
+
+    `quantity` is in the holding's own units; `price` is per unit in the response's base
+    currency. Sized here, not by the caller, because the weights are fractions of the
+    FX-converted total and only this service knows the rates it converted with.
+    """
+
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    quantity: float = Field(gt=0)
+    price: float = Field(gt=0)
+
+
 class PortfolioResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
@@ -80,6 +95,12 @@ class PortfolioResponse(BaseModel):
     selection_rationale: str
     model_version: str
     generated_at: datetime
+
+    # Additive: the trades that realise recommended_weights, and the currency block they are
+    # priced in (same shape as WithdrawalResponse.currency). The platform service executes
+    # these orders; it never re-derives them from the weights.
+    rebalance_orders: list[RebalanceOrder] = Field(default_factory=list)
+    currency: dict | None = None
 
 
 class WithdrawalRequest(BaseModel):

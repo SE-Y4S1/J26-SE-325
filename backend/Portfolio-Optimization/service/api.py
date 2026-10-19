@@ -23,6 +23,7 @@ from service.contracts import (
     Holding,
     PortfolioRequest,
     PortfolioResponse,
+    RebalanceOrder,
     SymbolForecast,
     WithdrawalRequest,
     WithdrawalResponse,
@@ -252,6 +253,31 @@ def forecast(
     )
 
 
+# Below this a rebalance leg is rounding noise rather than a trade.
+MIN_REBALANCE_NOTIONAL = 0.01
+
+
+def _rebalance_orders(state: dict[str, dict[str, float]], weights: dict[str, float]) -> list[RebalanceOrder]:
+    """Trades taking each holding from its current to its recommended weight.
+
+    Values and prices in `state` are already in the base currency, so a weight is a fraction
+    of one converted total; dividing the value change by the converted unit price gives the
+    change in the holding's own units.
+    """
+    total = sum(h["value"] for h in state.values())
+    orders = []
+    for symbol, holding in sorted(state.items()):
+        price = holding["price"]
+        if price <= 0:
+            continue
+        change = weights.get(symbol, 0.0) * total - holding["value"]
+        if abs(change) < MIN_REBALANCE_NOTIONAL:
+            continue
+        orders.append(RebalanceOrder(symbol=symbol, side="BUY" if change > 0 else "SELL",
+                                     quantity=abs(change) / price, price=price))
+    return orders
+
+
 @app.post("/portfolio/optimize", response_model=PortfolioResponse)
 def optimize_portfolio(
     request: PortfolioRequest,
@@ -264,7 +290,7 @@ def optimize_portfolio(
         raise HTTPException(status_code=422, detail="holdings must not be empty")
 
     try:
-        state = _to_portfolio_state(request.holdings, base_currency=request.base_currency)
+        state, _contexts, currency = _build_portfolio(request.holdings, base_currency=request.base_currency)
     except UpstreamError as exc:
         raise HTTPException(status_code=503, detail=f"FX rate unavailable: {exc}") from None
     result = run_moead_rebalance(
@@ -286,6 +312,8 @@ def optimize_portfolio(
         selection_rationale=result["selection_rationale"],
         model_version=_model_version(),
         generated_at=_now(),
+        rebalance_orders=_rebalance_orders(state, result["recommended_weights"]),
+        currency=currency,
     )
 
     publish_decision("optimize", request.model_dump(mode="json"),
