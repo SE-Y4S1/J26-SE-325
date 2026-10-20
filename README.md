@@ -236,6 +236,22 @@ Optimize, Forecast and Analysis.
 The platform service refuses to start if `JWT_SECRET` is unset, under 32 characters, or still
 the placeholder.
 
+Every setting for every service lives in the one root `.env` (see `.env.example`). Start any
+part of the system from the repository root by service name:
+
+```bash
+docker compose up -d                          # everything
+docker compose up -d platform component2      # just the platform and fraud detection
+docker compose up -d component3               # one component
+docker compose logs -f component1             # follow one service
+docker compose down                           # stop (volumes keep accounts and records)
+```
+
+Service names: `platform`, `component1` (portfolio), `component2` (fraud), `component3` (audit),
+`component4` (assistant, pulls its Ollama model on first start), `frontend`, `kafka`, `mlflow`.
+Setting `DATABASE_URL` in `.env` moves the platform and Component 3 onto that Postgres
+database; leave it unset to keep local data in Docker volumes.
+
 ### Without Docker
 
 Component 1 installs torch and the ML stack, which is slow; running services directly is the
