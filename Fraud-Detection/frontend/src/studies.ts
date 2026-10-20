@@ -26,9 +26,13 @@ export type ModelResult = {
   notes: string[];
   fraudBlocked: number | null;
   fraudRows: number | null;
+  fraudStepUp: number | null;
   legitimateBlocked: number | null;
   legitimateRows: number | null;
   legitimateChallenged: number | null;
+  allow: number | null;
+  stepUp: number | null;
+  block: number | null;
 };
 
 export type AttackResult = {
@@ -100,9 +104,13 @@ function parseModel(raw: unknown): ModelResult {
     notes,
     fraudBlocked: num(gateway.fraud_blocked),
     fraudRows: num(gateway.fraud_rows),
+    fraudStepUp: num(gateway.fraud_step_up),
     legitimateBlocked: num(gateway.legitimate_blocked),
     legitimateRows: num(gateway.legitimate_rows),
     legitimateChallenged: num(gateway.legitimate_challenged),
+    allow: num(gateway.allow),
+    stepUp: num(gateway.step_up),
+    block: num(gateway.block),
   };
 }
 
