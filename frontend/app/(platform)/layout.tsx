@@ -12,6 +12,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 
+import { NexaLogo } from "@/components/NexaLogo";
 import { Spinner } from "@/components/ui";
 import { AuthProvider, useAuth } from "@/lib/auth/context";
 
@@ -62,8 +63,8 @@ function Shell({ children }: { children: ReactNode }) {
     <div className="min-h-dvh">
       <header className="border-b border-black/10 dark:border-white/15">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 p-4">
-          <Link href="/portfolio" className="font-semibold">
-            Nexa
+          <Link href="/portfolio" aria-label="Nexa">
+            <NexaLogo markClassName="size-6" textClassName="text-base" />
           </Link>
           <div className="flex items-center gap-3 text-sm">
             <span className="text-neutral-500">{user.display_name}</span>
