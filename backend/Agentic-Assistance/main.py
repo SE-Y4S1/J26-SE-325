@@ -25,6 +25,10 @@ from preferences_context import (
     get_current_preferences,
     reset_current_preferences,
     set_current_preferences,
+    set_request_transaction_id,
+    reset_request_transaction_id,
+    set_request_demo_mode,
+    reset_request_demo_mode,
 )
 from responsible_ai import record_research_telemetry, run_responsible_ai_checks
 from timing_context import start_request_timing, end_request_timing
@@ -115,6 +119,8 @@ class ChatRequest(BaseModel):
     message: str
     history: list[dict[str, Any]] = Field(default_factory=list)
     preferences: ResponsibleAIPreferences = Field(default_factory=ResponsibleAIPreferences)
+    transaction_id: str | None = None
+    demo_mode: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -141,6 +147,14 @@ class ChatRequest(BaseModel):
                         if content:
                             cleaned_hist.append({"role": norm_role, "content": content})
                 data["history"] = cleaned_hist
+            if "transaction_id" in data and data["transaction_id"]:
+                data["transaction_id"] = str(data["transaction_id"]).strip()
+            if "demo_mode" in data:
+                dm = data["demo_mode"]
+                if isinstance(dm, str):
+                    data["demo_mode"] = dm.lower() in ("true", "1", "yes")
+                else:
+                    data["demo_mode"] = bool(dm)
         return data
 
 
@@ -257,9 +271,13 @@ def chat(request: ChatRequest, authorization: str | None = Header(default=None))
         "explanation_enabled": prefs.explanation_enabled,
         "personalized_context": prefs.personalized_context,
         "data_sharing_consent": prefs.data_sharing_consent,
+        "demo_mode": request.demo_mode,
+        "transaction_id": request.transaction_id,
     }
 
     token = set_current_preferences(pref_dict)
+    tx_token = set_request_transaction_id(request.transaction_id)
+    demo_token = set_request_demo_mode(request.demo_mode)
     # The caller's own token, so get_execution_explanation reads their trace as them.
     auth_token = set_caller_authorization(authorization)
     timing_summary = None
@@ -437,6 +455,8 @@ def chat(request: ChatRequest, authorization: str | None = Header(default=None))
     finally:
         clear_request_portfolio_cache(cache_token)
         reset_current_preferences(token)
+        reset_request_transaction_id(tx_token)
+        reset_request_demo_mode(demo_token)
         reset_caller_authorization(auth_token)
         if timing_summary is None:
             end_request_timing(timing_token)

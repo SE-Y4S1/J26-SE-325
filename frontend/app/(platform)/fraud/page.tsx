@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 
 import { Button, Card, Field, Input, Notice, Stat, money } from "@/components/ui";
 import { ApiError } from "@/lib/api/client";
@@ -50,12 +51,21 @@ export default function FraudPage() {
   });
   const [health, setHealth] = useState<FraudHealth | null>(null);
   const [result, setResult] = useState<ScoreResponse | null>(null);
+  const [lastScoredId, setLastScoredId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     fraudHealth().then(setHealth).catch(() => setHealth(null));
+    try {
+      if (typeof window !== "undefined" && window.localStorage) {
+        const stored = localStorage.getItem("fintrust_last_scored_tx_id");
+        if (stored) setLastScoredId(stored);
+      }
+    } catch {
+      // Ignore localStorage errors
+    }
   }, []);
 
   async function handleScore() {
@@ -63,7 +73,13 @@ export default function FraudPage() {
     setError(null);
     setUnavailable(false);
     try {
-      setResult(await scoreTransaction(tx));
+      const res = await scoreTransaction(tx);
+      setResult(res);
+      // Persist the actual transaction ID returned by Component 2
+      setLastScoredId(res.transaction_id);
+      if (typeof window !== "undefined" && window.localStorage) {
+        localStorage.setItem("fintrust_last_scored_tx_id", res.transaction_id);
+      }
       // Each score is one transaction; reusing the id would merge two in the engine's history.
       setTx((current) => ({ ...current, transaction_id: newTransactionId() }));
     } catch (cause) {
@@ -219,6 +235,29 @@ function ScoreResult({
           ))}
         </ul>
       )}
+
+      {/* Action to open FinTrust Assistant with this exact transaction ID */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-200/90 bg-blue-50/80 p-4 dark:border-blue-900/60 dark:bg-blue-950/40">
+        <div>
+          <div className="text-sm font-semibold text-neutral-900 dark:text-white">
+            Explain in FinTrust Assistant
+          </div>
+          <div className="text-xs text-neutral-600 dark:text-neutral-400">
+            Open the Assistant with verified decision context for transaction{" "}
+            <code className="font-mono font-bold text-blue-800 dark:text-blue-300">
+              {result.transaction_id}
+            </code>
+          </div>
+        </div>
+        <Link
+          href={`/assistant?tx=${encodeURIComponent(result.transaction_id)}`}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-blue-700 hover:shadow-sm"
+          data-testid="explain-in-assistant-btn"
+        >
+          <span>Explain in Assistant</span>
+          <span aria-hidden="true">&rarr;</span>
+        </Link>
+      </div>
 
       <p className="text-xs text-neutral-500">
         Model <code>{result.model_version}</code>

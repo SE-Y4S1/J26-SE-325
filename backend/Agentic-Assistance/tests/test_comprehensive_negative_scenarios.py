@@ -189,7 +189,7 @@ class TestComprehensiveNegativeScenarios(unittest.TestCase):
 
     @patch("urllib.request.urlopen")
     def test_fraud_service_outage_reported_safely_not_as_fraud(self, mock_urlopen):
-        # Missing record / outage must NOT be treated as proof of fraud
+        # Missing record / outage must NOT be treated as proof of fraud and must not substitute mock fallback
         mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
 
         res = query_live_fraud_service("TX1001")
@@ -197,9 +197,10 @@ class TestComprehensiveNegativeScenarios(unittest.TestCase):
         self.assertIn("Cannot connect to Component 2", res["reason"])
 
         text = get_fraud_analysis.invoke({"transaction_id": "TX1001"})
-        self.assertIn("FALLBACK MOCK DATA", text)
+        self.assertIn("SERVICE_UNAVAILABLE", text)
         self.assertIn("Cannot connect to Component 2", text)
-        self.assertIn("These results are prototype evidence, not verified production output", text)
+        self.assertIn("Recorded Fraud Score:\nUnavailable", text)
+        self.assertNotIn("0.92", text)
 
     @patch("urllib.request.urlopen")
     def test_audit_service_outage_reported_safely_not_as_verified(self, mock_urlopen):
@@ -270,7 +271,9 @@ class TestComprehensiveNegativeScenarios(unittest.TestCase):
     # -------------------------------------------------------------------------
     def test_missing_transaction_not_treated_as_fraud(self):
         text = get_fraud_analysis.invoke({"transaction_id": "TX_COMPLETELY_NONEXISTENT_99999"})
-        self.assertIn("No transaction was found for ID 'TX_COMPLETELY_NONEXISTENT_99999'", text)
+        self.assertIn("RECORD_NOT_FOUND", text)
+        self.assertIn("No verified live fraud record exists for transaction 'TX_COMPLETELY_NONEXISTENT_99999'", text)
+        self.assertNotIn("0.92", text)
         self.assertNotIn("PROVED FRAUD", text)
 
     def test_missing_audit_record_not_treated_as_verified(self):
@@ -348,7 +351,7 @@ class TestComprehensiveNegativeScenarios(unittest.TestCase):
             reset_current_preferences(token)
 
     def test_disabled_explanation_suppresses_shap_and_rule_attributions(self):
-        token = set_current_preferences({"explanation_enabled": False})
+        token = set_current_preferences({"explanation_enabled": False, "demo_mode": True})
         try:
             fraud_text = get_fraud_analysis.invoke({"transaction_id": "TX1001"})
             self.assertIn("Optional SHAP feature-attribution details were suppressed based on user preference", fraud_text)

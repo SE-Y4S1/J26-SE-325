@@ -16,7 +16,11 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from tools import tools
-from preferences_context import get_current_preferences
+from preferences_context import (
+    get_current_preferences,
+    get_request_transaction_id,
+    get_request_demo_mode,
+)
 from timing_context import get_current_timing
 from tools.portfolio_tools import query_live_market_quote
 
@@ -33,8 +37,8 @@ OUT_OF_DOMAIN_RESPONSE = (
 
 AMBIGUOUS_CLARIFICATION_RESPONSE = (
     "Could you please clarify your question? Let me know if you would like me to analyze your "
-    "stock portfolio holdings, review a specific transaction (e.g., TX1001), assess investment "
-    "risk, or verify an audit record."
+    "stock portfolio holdings, review a specific transaction (by providing its transaction ID, e.g. TX... or execution ID), "
+    "assess investment risk, or verify an audit record."
 )
 
 GREETING_FAST_RESPONSE = (
@@ -552,6 +556,7 @@ def has_fraud_or_audit_intent(text: str) -> bool:
     clean = text.strip().lower()
     patterns = [
         r"\btx\d*\b",
+        r"\bpp1-demo-\d+\b",
         r"\bexe-[0-9a-f]+\b",
         r"\bfraud\b",
         r"\bscams?\b",
@@ -564,6 +569,121 @@ def has_fraud_or_audit_intent(text: str) -> bool:
         r"\bsmart\s*contract\b",
     ]
     return any(re.search(p, clean) for p in patterns)
+
+
+def extract_transaction_ids(text: str) -> list[str]:
+    """Extract distinct transaction or execution identifiers from text."""
+    if not text:
+        return []
+    patterns = [
+        r"\bTX\d+\b",
+        r"\bPP1-DEMO-\d+\b",
+        r"\bEXE-[0-9A-Fa-f]+\b",
+        r"\bui-[0-9a-zA-Z_-]+\b",
+    ]
+    found: list[str] = []
+    for p in patterns:
+        for m in re.finditer(p, text, re.IGNORECASE):
+            raw = m.group(0)
+            # Preserve exact casing for ui- prefixed IDs (Component 2 keys are case-sensitive)
+            token = raw if raw.lower().startswith("ui-") else raw.upper()
+            if token not in found:
+                found.append(token)
+    return found
+
+
+def resolve_transaction_id(
+    text: str,
+    history: list[dict[str, Any]] | None = None,
+    explicit_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    """
+    Resolve target transaction ID from:
+    1. Explicit ID mentioned in the user's message (e.g. 'Why was TX1002 blocked?').
+       Takes precedence over selected context so users can ask about other transactions.
+    2. Explicit ID passed from UI selection or request context (e.g. ?tx=ui-...).
+       Preserves the selected transaction context for follow-up questions.
+    3. Unambiguous single ID mentioned in recent conversation history.
+
+    Returns:
+    (resolved_id, clarification_prompt)
+    If resolved_id is None, clarification_prompt explains why (unspecified or multiple IDs).
+    """
+    ids_in_msg = extract_transaction_ids(text)
+    if len(ids_in_msg) == 1:
+        return (ids_in_msg[0], None)
+    if len(ids_in_msg) > 1:
+        return (
+            None,
+            f"You mentioned multiple transactions ({', '.join(ids_in_msg)}). "
+            "Which transaction would you like me to inspect?"
+        )
+
+    if explicit_id and explicit_id.strip():
+        # Do not force uppercase: Component 2 keys (like ui-...) are case-sensitive
+        return (explicit_id.strip(), None)
+
+    # Check conversation history (from newest to oldest)
+    if history:
+        hist_ids: list[str] = []
+        for item in reversed(history[-10:]):
+            content = str(item.get("content") or item.get("text") or "")
+            for tid in extract_transaction_ids(content):
+                if tid not in hist_ids:
+                    hist_ids.append(tid)
+        if len(hist_ids) == 1:
+            return (hist_ids[0], None)
+        if len(hist_ids) > 1:
+            return (
+                None,
+                f"You previously discussed multiple transactions ({', '.join(reversed(hist_ids))}). "
+                "Which transaction would you like me to review?"
+            )
+
+    return (
+        None,
+        "Could you please provide the transaction ID (for example, a TX... or execution ID) of the transaction you would like me to review? "
+        "Once provided, I can look up the verified decision and fraud analysis from Component 2."
+    )
+
+
+def is_fraud_or_blocked_transaction_query(text: str) -> bool:
+    """Determine whether a query asks about why a transaction was blocked/flagged or requests fraud review."""
+    if not text:
+        return False
+    clean = text.strip().lower()
+    patterns = [
+        r"\bwhy\s+(?:was|is|did)\s+(?:it|my\s+.*|the\s+.*|this\s+.*)?\s*(?:blocked|flagged|declined|rejected|stopped|held|fail)\b",
+        r"\bwhy\s+(?:was|is)\s+(?:my\s+|the\s+|this\s+)?(?:[^\s]+\s+)*(?:transaction|tx\d*|transfer|payment|charge|withdrawal|account)?\s*(?:blocked|flagged|declined|rejected|stopped|held)\b",
+        r"\b(?:why\s+was\s+it\s+(?:blocked|flagged|declined|rejected|stopped|held))\b",
+        r"\b(?:was\s+my\s+transaction\s+blocked)\b",
+        r"\b(?:why\s+did\s+(?:my\s+)?(?:transaction|transfer|payment)\s+(?:get\s+)?(?:blocked|flagged|fail))\b",
+        r"\b(?:check|explain|review|investigate|analyze)\s+(?:my\s+)?(?:fraud|blocked|flagged)\s*(?:transaction|score|risk)?\b",
+        r"\b(?:check\s+fraud\s+score\s+for\s+my\s+transaction)\b",
+        r"\b(?:what\s+is\s+my\s+fraud\s+score)\b",
+        r"\b(?:what\s+(?:factors?|reasons?)\s+contributed(?:\s+most)?(?:\s+to\s+this)?)\b",
+        r"\b(?:explain\s+(?:the\s+)?(?:factors?|reasons?|decision|block))\b",
+    ]
+    return any(re.search(p, clean) for p in patterns)
+
+
+def has_fraud_intent(text: str) -> bool:
+    """Determine whether a query relates to fraud detection, blocked status, or suspicious activities."""
+    clean = text.strip().lower()
+    patterns = [
+        r"\bfraud\b",
+        r"\bscams?\b",
+        r"\bblocked\b",
+        r"\bflagged\b",
+        r"\bshap\b",
+        r"\bfraud\s*score\b",
+        r"\btransaction\s*risk\s*score\b",
+        r"\bfraud\s*risk\b",
+        r"\bsuspicious\b",
+        r"\b(?:blocked|flagged|declined|rejected)\s+(?:transaction|tx\d*|transfer|payment|card|account|withdrawal|charge)\b",
+    ]
+    return any(re.search(p, clean) for p in patterns)
+
 
 
 def has_stock_market_or_investing_intent(text: str) -> bool:
@@ -953,6 +1073,26 @@ def classify_domain_gate(text: str, history: list[dict[str, Any]] | None = None)
             "intent": contextual_res.get("intent"),
         }
 
+    # 2b. Fraud or blocked transaction clarification check:
+    # If the user asks about a blocked/flagged transaction or fraud score without an unambiguous ID,
+    # request clarification immediately instead of falling back to TX1001 or calling tools with mock data.
+    if not (has_portfolio_intent(clean) and not has_fraud_or_audit_intent(clean)) and (
+        is_fraud_or_blocked_transaction_query(clean)
+        or (
+            has_fraud_intent(clean)
+            and re.search(r"\b(?:why|check|review|explain|analyze|inspect|score|status|blocked|flagged|investigate)\b", clean)
+        )
+    ):
+        req_tx = get_request_transaction_id()
+        resolved_tx, clarification = resolve_transaction_id(clean, history=history, explicit_id=req_tx)
+        if not resolved_tx:
+            return {
+                "category": "AMBIGUOUS_CLARIFICATION",
+                "response_text": clarification,
+                "requires_tools": False,
+                "reason": "Fraud / blocked transaction query missing unambiguous transaction ID.",
+            }
+
     # 3. Check financial intent
     has_fin = (
         has_financial_intent(clean)
@@ -1192,10 +1332,9 @@ call ONLY:
 
 get_fraud_analysis
 
-If the user does not provide a transaction ID,
-use the default mock transaction:
-
-TX1001
+Never substitute TX1001 or any mock transaction when the user has not specified a transaction ID.
+If the user asks why a transaction was blocked or asks for fraud analysis without specifying an unambiguous transaction ID, ask the user to provide the transaction ID.
+Never present mock or fallback data as live evidence.
 
 When a user asks about portfolio holdings, positions, asset allocations,
 specific stocks or tickers (such as AAPL, MSFT, JKH, COMB, SPY), trading volume,
@@ -1373,17 +1512,18 @@ User:
 
 Correct behavior:
 
-1. Call get_fraud_analysis with TX1001.
-2. Read the fraud score and contributing factors.
-3. Explain that the transaction was blocked because
-   of the factors returned by the tool.
+1. Recognize that no transaction ID was specified or selected.
+2. Ask the user to provide their transaction ID (for example, a TX... or execution ID).
+3. Do not call get_fraud_analysis with TX1001 or any mock data.
 
-Incorrect behavior:
+User:
+"Why was transaction TX2002 blocked?"
 
-"I don't have information about your transaction.
-You can use the fraud analysis tool."
+Correct behavior:
 
-The assistant must call the tool itself.
+1. Call get_fraud_analysis with transaction_id="TX2002".
+2. Read the verified evidence from Component 2.
+3. Report the recorded fraud score, decision, and factors. If not found, explain that no record exists in Component 2 for TX2002.
 """
 
 
@@ -1413,8 +1553,8 @@ GENERAL_SYSTEM_PROMPT = FINANCIAL_SPECIALIZED_PROMPT
 TOOL_ROUTER_PROMPT = """You are FinTrust Agent, a specialized agentic financial assistant.
 Analyze the user request and select the required financial tool:
 - Portfolio allocation, risk score, holdings, diversification, or liquidity: call get_portfolio_analysis.
-- Blocked transaction, fraud score, or suspicious payment: call get_fraud_analysis (default transaction_id='TX1001' if unspecified).
-- Blockchain audit, ledger verification, or transaction log: call get_blockchain_audit (default transaction_id='TX1001' if unspecified).
+- Blocked transaction, fraud score, or suspicious payment: call get_fraud_analysis with the resolved transaction ID. If no transaction ID was specified or resolved, ask the user for clarification.
+- Blockchain audit, ledger verification, or transaction log: call get_blockchain_audit with the specific transaction ID.
 - An execution ID (starts with EXE-), or why a withdrawal or rebalance was executed, blocked or held: call get_execution_explanation with that exact ID.
 MINIMAL INVOCATION RULE: Call ONLY the single tool needed to answer the request.
 """
@@ -1433,8 +1573,11 @@ CRITICAL FACTUALITY RULES:
    - If get_portfolio_analysis was NOT called: DO NOT include portfolio valuations, balances, holdings, returns, or portfolio fallback notices.
 
 2. FRAUD DATA:
-   - Report the recorded fraud score (e.g. 0.92) and contributing factors factually.
-   - Clarify that SHAP feature attributions explain the local prototype model, not verified production probabilities.
+   - Report the actual fraud score, decision, and risk level returned by Component 2 for the specific transaction ID.
+   - If the transaction record was not found or the fraud service is unavailable, clearly state that no verified record was retrieved and explain that live lookup failed. NEVER invent or fabricate a score, decision, or contributing factors.
+   - If device or location signals are marked unavailable, report them as uncollected/unavailable; NEVER describe them as verified facts.
+   - Clarify that prototype SHAP values explain only a local synthetic prototype, NOT the production fraud model.
+   - Clearly distinguish live transaction evidence from demo/synthetic data.
 
 3. BLOCKCHAIN DATA:
    - Report what the ledger status confirms. State that independent external verification is not established.
@@ -1795,7 +1938,7 @@ def analyze_portfolio_request(
 
     # Check for risk score / analytical model inquiry / VaR
     has_risk_model = bool(re.search(
-        r"\b(?:risk\s*score|var\b|cvar\b|value\s*at\s*risk|moea/?d|portfolio-level\s*risk\s*model|risk\s*models?|analytical\s*models?|optimization\s*models?|forecast(?:ing)?\s*models?|predictive\s*models?|calculate\s*(?:my\s*)?risk|model\s*score|sharpe(?:\s*ratio)?|expected\s*return|forecasters?|monte\s*carlo|stress\s*test(?:ing)?|volatility\s*models?|run\s*(?:a\s*)?model|system\s*(?:has\s*)?run|actually\s*run)\b",
+        r"\b(?:risk\s*score|var\b|cvar\b|value\s*at\s*risk|moea/?d|portfolio-level\s*risk\s*model|risk\s*models?|analytical\s*models?|optimization\s*models?|forecast(?:ing)?\s*models?|predictive\s*models?|calculate\s*(?:my\s*)?risk|model\s*score|sharpe(?:\s*ratio)?|expected\s*return|forecasters?|monte\s*carlo|stress\s*test(?:ing)?|volatility\b|volatilities\b|volatility\s*models?|run\s*(?:a\s*)?model|system\s*(?:has\s*)?run|actually\s*run)\b",
         clean
     ))
     if has_risk_model:
@@ -1966,30 +2109,42 @@ def render_risk_model_inquiry(holdings: list[dict], currency: str, total_val: st
 
     clean = (user_query or "").strip().lower()
     is_var_query = bool(re.search(r"\b(?:var\b|value\s*at\s*risk|95%|one-day|1-day)\b", clean))
+    is_vol_query = bool(re.search(r"\b(?:volatility|vol\b|standard\s*deviation)\b", clean))
+    is_cvar_query = bool(re.search(r"\b(?:cvar\b|conditional\s*value\s*at\s*risk|expected\s*shortfall)\b", clean))
+    is_ret_query = bool(re.search(r"\b(?:expected\s*return|annual\s*return|portfolio\s*return)\b", clean))
+
+    if is_var_query:
+        sub_title = " - 95% One-Day Value at Risk (VaR) Evaluation"
+    elif is_vol_query:
+        sub_title = " - Portfolio Volatility Evaluation"
+    elif is_cvar_query:
+        sub_title = " - Conditional Value at Risk (CVaR) Evaluation"
+    elif is_ret_query:
+        sub_title = " - Expected Return Evaluation"
+    else:
+        sub_title = ""
 
     if c1.get("reachable"):
         c1_status_line = f"Reachable at {c1['url']} (Model version: '{c1['model_version']}', Available forecasters: {c1['available_forecasters']})"
     else:
         c1_status_line = f"Service unreachable at {c1.get('url', 'http://localhost:8000')} ({c1.get('error')})"
 
-    sub_title = " - 95% One-Day Value at Risk (VaR) Evaluation" if is_var_query else ""
-
     return f"""Analytical Risk Model & Scoring Assessment ({name}){sub_title}:
 
 1. Real Supported Model Execution Status:
-- Supported Model Availability: FinTrust Agent cannot calculate a 95% one-day Value at Risk (VaR) or portfolio-level risk score for your portfolio at this time.
+- Supported Model Availability: FinTrust Agent cannot calculate a 95% one-day Value at Risk (VaR), CVaR, portfolio volatility, expected return, or portfolio-level risk score for your portfolio at this time.
 - Component 1 Status: {c1_status_line}
 - Actual Execution Check: The system has NOT executed a portfolio-level risk model. Component 1 currently registers only an individual asset price forecaster ('baseline_lstm'); no portfolio-level risk engines (parametric VaR, historical simulation VaR, CVaR, or MOEA/D optimization) are registered or deployed.
 
 2. Required Data & Analytical Models:
-To compute a verified analytical risk score, Value at Risk (VaR/CVaR), or 95% one-day VaR, the following inputs and analytical methods are strictly required:
+To compute a verified analytical risk score, Value at Risk (VaR/CVaR), portfolio volatility, or expected return, the following inputs and analytical methods are strictly required:
 - Historical Price Series & Return Distributions: Multi-period daily price time-series (minimum 250+ trading days) for all held assets (JKH, COMB, AAPL, SPY).
-- Variance-Covariance Matrix: Asset return correlation and covariance metrics to capture portfolio diversification and joint downside co-movements.
+- Variance-Covariance Matrix: Asset return correlation and covariance metrics to capture portfolio diversification, joint downside co-movements, and portfolio-level volatility.
 - Verified FX Conversion: Currency exchange rate volatility for multi-currency assets (converting USD-denominated AAPL and SPY into LKR).
 - Calibrated Analytical Method: Formal execution of Parametric (Variance-Covariance), Historical Simulation, or Monte Carlo simulation at the 95% confidence level.
 
 3. Responsible AI Disclosure:
-No hypothetical or synthetic risk score (such as 38/100) has been fabricated. Any risk score shown without running Component 1's analytical pipeline would be unverified illustrative mock data. No synthetic or estimated VaR figure is fabricated. Under FinTrust AI safety rules, uncalculated model metrics are reported as unavailable rather than simulated."""
+No hypothetical or synthetic risk score (such as 38/100) has been fabricated. Any risk score shown without running Component 1's analytical pipeline would be unverified illustrative mock data. No synthetic or estimated VaR figure is fabricated, and no synthetic CVaR, volatility, or expected return metrics are generated. Under FinTrust AI safety rules, uncalculated model metrics are reported as unavailable rather than simulated."""
 
 
 def render_evidence_limitations(name: str, total_val: str, currency: str, holdings: list[dict]) -> str:
@@ -2448,6 +2603,116 @@ def synthesize_portfolio_response(
 
 
 
+def synthesize_fraud_response(tool_content: str, explanation_enabled: bool = True) -> str:
+    """
+    Synthesize a factual, grounded explanation of fraud tool evidence without hallucinations.
+    Ensures that live records, not-found results, authorization denials, and demo mode
+    are described accurately according to FinTrust Responsible AI rules.
+    """
+    text = (tool_content or "").strip()
+    if not text:
+        return "Notice: No fraud analysis data was returned."
+
+    if text.startswith("TRANSACTION ID REQUIRED:"):
+        return text
+
+    if text.startswith("AUTHORIZATION DENIED:"):
+        return text
+
+    # Case: Record Not Found or Service Unavailable
+    if "RECORD NOT FOUND" in text or "SERVICE UNAVAILABLE" in text:
+        tx_match = re.search(r"Transaction ID:\s*([^\n]+)", text)
+        tx_id = tx_match.group(1).strip() if tx_match else "unknown"
+        detail_match = re.search(r"Live Service Detail:\s*([^\n]+)", text)
+        detail = detail_match.group(1).strip() if detail_match else "No verified record in Component 2"
+
+        return (
+            f"Notice: No verified fraud decision was found for transaction '{tx_id}' in Component 2's live decision store ({detail}).\n\n"
+            f"Status & Provenance:\n"
+            f"- Transaction ID: {tx_id}\n"
+            f"- Data Source: Component 2 Live Gateway Decision Store\n"
+            f"- Fraud Score: Unavailable (live lookup failed)\n"
+            f"- Decision / Status: Unavailable\n"
+            f"- Telemetry Signals (Device/Location): Unavailable\n\n"
+            f"Responsible AI Notice:\n"
+            f"FinTrust Assistant does not substitute mock fallback data or fabricate fraud scores for unverified transactions. "
+            f"If you wish to view synthetic demonstration data, please explicitly request demo mode."
+        )
+
+    # Case: Live Component 2 Audit Record
+    if "LIVE COMPONENT 2 AUDIT RECORD" in text:
+        tx_m = re.search(r"Transaction ID:\s*([^\n]+)", text)
+        score_m = re.search(r"Recorded Fraud Score:\s*([^\n]+)", text)
+        status_m = re.search(r"Recorded Status:\s*([^\n]+)", text)
+        risk_m = re.search(r"Recorded Risk Level:\s*([^\n]+)", text)
+        ver_m = re.search(r"Model Version:\s*([^\n]+)", text)
+        bench_m = re.search(r"Benchmark Status:\s*([^\n]+)", text)
+
+        tx_id = tx_m.group(1).strip() if tx_m else "N/A"
+        score = score_m.group(1).strip() if score_m else "N/A"
+        status = status_m.group(1).strip() if status_m else "N/A"
+        risk_level = risk_m.group(1).strip() if risk_m else "N/A"
+        model_ver = ver_m.group(1).strip() if ver_m else "N/A"
+        benchmark = bench_m.group(1).strip() if bench_m else "N/A"
+
+        # Extract rules / reason
+        reasons = []
+        rules_block = re.search(r"DECISION RULES & REASONING:\s*\n(.*?)(?=\n\n|\Z)", text, re.DOTALL)
+        if rules_block:
+            for l in rules_block.group(1).splitlines():
+                l = l.strip()
+                if l.startswith("-"):
+                    reasons.append(l)
+
+        # Extract dual-stream scores
+        lstm_score = "N/A"
+        gnn_score = "N/A"
+        lstm_m = re.search(r"Behavioral Stream Anomaly Score \(LSTM\):\s*([0-9.]+)", text)
+        if lstm_m:
+            lstm_score = lstm_m.group(1)
+        gnn_m = re.search(r"Relational Stream Risk Score \(GNN\):\s*([0-9.]+)", text)
+        if gnn_m:
+            gnn_score = gnn_m.group(1)
+
+        # Extract factor lines
+        factors = []
+        factors_block = re.search(r"FEATURE ATTRIBUTIONS & CONTRIBUTING FACTORS:\s*\n(.*?)(?=\n\nSIGNALS|\Z)", text, re.DOTALL)
+        if factors_block:
+            for l in factors_block.group(1).splitlines():
+                l = l.strip()
+                if l.startswith("-") and not l.startswith("- None returned"):
+                    factors.append(l)
+
+        factor_text = "\n".join(factors) if factors else "- Evaluated on amount threshold and relational risk heuristics"
+        reasons_text = "\n".join(reasons) if reasons else f"- Gateway decision: {status}"
+
+        expl_text = (
+            f"Here is the verified fraud analysis for transaction {tx_id} from Component 2's live decision store:\n\n"
+            f"Summary & Decision:\n"
+            f"- Transaction ID: {tx_id}\n"
+            f"- Recorded Fraud Score: {score} ({risk_level} risk)\n"
+            f"- Decision: {status}\n"
+            f"- Model Version: {model_ver} ({benchmark})\n\n"
+            f"Engine Streams:\n"
+            f"- Behavioral Anomaly Stream (LSTM): {lstm_score}\n"
+            f"- Relational Risk Stream (GNN): {gnn_score}\n\n"
+            f"Decision Reasoning & Contributing Factors:\n"
+            f"{reasons_text}\n"
+            f"{factor_text}\n\n"
+            f"Data & Provenance Disclosures:\n"
+            f"- Verified live record retrieved from Component 2 gateway decision store.\n"
+            f"- Component 4's local synthetic prototype is NOT used for this live transaction.\n"
+            f"- Uncollected telemetry signals (raw device and location features) are marked unavailable and are not retained in the live decision store."
+        )
+        return expl_text
+
+    # Case: Demo synthetic record (explicit demo mode)
+    if "DEMO" in text and ("SYNTHETIC" in text or "EXPLICIT DEMO MODE" in text):
+        return text
+
+    return text
+
+
 # --------------------------------------------------
 # LLM NODE
 # --------------------------------------------------
@@ -2484,6 +2749,19 @@ def call_llm(state: AgentState):
                 portfolio_output,
                 explanation_enabled=explanation_enabled,
                 user_query=user_query,
+            )
+            return {
+                "messages": [AIMessage(content=synth_text)]
+            }
+
+        # Fast, accurate evidence-backed response for fraud analysis requests
+        if tool_messages and all(getattr(m, "name", "") == "get_fraud_analysis" for m in tool_messages):
+            fraud_output = str(getattr(latest_msg, "content", ""))
+            prefs = get_current_preferences()
+            explanation_enabled = prefs.get("explanation_enabled", True)
+            synth_text = synthesize_fraud_response(
+                fraud_output,
+                explanation_enabled=explanation_enabled,
             )
             return {
                 "messages": [AIMessage(content=synth_text)]
@@ -2638,6 +2916,14 @@ def call_llm(state: AgentState):
                 t_name = tc.get("name")
                 if t_name in ("get_blockchain_audit", "get_fraud_analysis") and not has_fraud_or_audit_intent(latest_text):
                     continue
+                if t_name == "get_fraud_analysis":
+                    req_tx = get_request_transaction_id()
+                    res_tx, clar = resolve_transaction_id(latest_text, history=history_dicts, explicit_id=req_tx)
+                    if res_tx:
+                        tc["args"] = tc.get("args") or {}
+                        tc["args"]["transaction_id"] = res_tx
+                    else:
+                        return {"messages": [AIMessage(content=clar or "Please specify the transaction ID to inspect fraud analysis.")]}
                 cleaned_calls.append(tc)
             response.tool_calls = cleaned_calls
 
@@ -2652,10 +2938,33 @@ def call_llm(state: AgentState):
                 }]
             )
 
-        # Fallback guarantee 2: Explicit blockchain audit inquiry
+        # Fallback guarantee 2: Fraud analysis inquiry
+        if not getattr(response, "tool_calls", None) and (is_fraud_or_blocked_transaction_query(latest_text) or has_fraud_intent(latest_text)):
+            req_tx = get_request_transaction_id()
+            res_tx, clar = resolve_transaction_id(latest_text, history=history_dicts, explicit_id=req_tx)
+            if res_tx:
+                response = AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "get_fraud_analysis",
+                        "args": {"transaction_id": res_tx},
+                        "id": f"call_{uuid.uuid4().hex[:8]}"
+                    }]
+                )
+            else:
+                return {"messages": [AIMessage(content=clar or "Please provide the transaction ID to inspect fraud analysis.")]}
+
+        # Fallback guarantee 3: Explicit blockchain audit inquiry
         if not getattr(response, "tool_calls", None) and re.search(r"\b(?:blockchain|audit|ledger)\b", latest_text, re.IGNORECASE):
-            tx_match = re.search(r"\b(TX\d+|PP1-DEMO-\d+|EXE-[0-9a-f]+)\b", latest_text, re.IGNORECASE)
-            tx_id = tx_match.group(1).upper() if tx_match else "TX1001"
+            tx_match = re.search(r"\b(TX\d+|PP1-DEMO-\d+|EXE-[0-9a-fA-F]+|ui-[0-9a-zA-Z_-]+)\b", latest_text, re.IGNORECASE)
+            req_tx = get_request_transaction_id()
+            if tx_match:
+                raw_m = tx_match.group(1)
+                tx_id = raw_m if raw_m.lower().startswith("ui-") else raw_m.upper()
+            elif req_tx and req_tx.strip():
+                tx_id = req_tx.strip()
+            else:
+                tx_id = "TX1001"
             response = AIMessage(
                 content="",
                 tool_calls=[{
@@ -2665,7 +2974,7 @@ def call_llm(state: AgentState):
                 }]
             )
 
-        # Fallback guarantee 3: If all tool calls were filtered and query is market price or stock selection
+        # Fallback guarantee 4: If all tool calls were filtered and query is market price or stock selection
         if not getattr(response, "tool_calls", None):
             if is_current_market_price_query(latest_text) and not re.search(r"\bmy\s+holdings?|my\s+portfolio|our\s+holdings?|our\s+portfolio\b", latest_text, re.IGNORECASE):
                 return {"messages": [AIMessage(content=handle_current_market_price_query(latest_text))]}

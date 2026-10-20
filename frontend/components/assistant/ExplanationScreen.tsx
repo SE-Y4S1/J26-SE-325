@@ -76,8 +76,10 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
   } else if (session.mode === "fraud_and_audit" && fraud && audit) {
     const fraudSummary =
       fraud.provenanceType === "live"
-        ? `Transaction ${fraud.transactionId} evaluated in Component 2's live gateway audit trail with decision ${fraud.status} (Recorded Fraud Score: ${fraud.fraudScore.toFixed(4)}).`
-        : `Mock transaction record ${fraud.transactionId} lists a recorded fraud score of ${fraud.fraudScore.toFixed(2)}, ${fraud.riskLevel} risk level, and ${fraud.status} status (${fraud.factors.join(", ")}). Separately, the local synthetic Random Forest prototype provides illustrative SHAP attributions (uncalibrated probability ${fraud.prototypeProbability?.toFixed(4) ?? "1.0000"}). Component 2 live gateway service was not reached.`;
+        ? `Transaction ${fraud.transactionId} evaluated in Component 2's live gateway audit trail with decision ${fraud.status} (Recorded Fraud Score: ${fraud.fraudScore?.toFixed(4) ?? "N/A"}).`
+        : fraud.provenanceType === "not_found" || fraud.provenanceType === "unavailable"
+        ? `No verified live fraud decision was found for transaction ${fraud.transactionId} in Component 2's live decision store.`
+        : `Mock transaction record ${fraud.transactionId} lists a recorded fraud score of ${fraud.fraudScore?.toFixed(2) ?? "N/A"}, ${fraud.riskLevel} risk level, and ${fraud.status} status (${fraud.factors.join(", ")}). Separately, the local synthetic Random Forest prototype provides illustrative SHAP attributions (uncalibrated probability ${fraud.prototypeProbability?.toFixed(4) ?? "1.0000"}). Component 2 live gateway service was not reached.`;
     const auditSummary =
       audit.provenanceType === "live"
         ? `In Component 3's blockchain ledger, audit ID ${audit.auditId || "RECORDED"} is registered at block #${audit.blockNumber ?? "N/A"} with status ${audit.recordStatus}.`
@@ -88,12 +90,14 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
       const streamDetails = fraud.streamSignals
         ? `Dual-stream anomaly detection recorded a behavioral anomaly score of ${fraud.streamSignals.behavioralScore?.toFixed(4) ?? "N/A"} and relational risk score of ${fraud.streamSignals.graphScore?.toFixed(4) ?? "N/A"}.`
         : "";
-      explanationSummary = `Recorded in Component 2's live gateway audit trail with decision ${fraud.status} (Recorded Fraud Score: ${fraud.fraudScore.toFixed(4)}). Contributing factor: "${fraud.reason}". ${streamDetails} Component 4's local synthetic prototype Random Forest was not used for this live decision.`;
+      explanationSummary = `Recorded in Component 2's live gateway audit trail with decision ${fraud.status} (Recorded Fraud Score: ${fraud.fraudScore?.toFixed(4) ?? "N/A"}). Contributing factor: "${fraud.reason}". ${streamDetails} Component 4's local synthetic prototype Random Forest was not used for this live decision.`;
+    } else if (fraud.provenanceType === "not_found" || fraud.provenanceType === "unavailable") {
+      explanationSummary = `No verified live fraud decision was found for transaction ${fraud.transactionId} in Component 2's live decision store. Fraud score, status, and contributing factors are unavailable.`;
     } else if (fraud.provenanceType === "fallback") {
       const factorList =
         fraud.factors.length > 0 ? fraud.factors.join(", ") : "high transfer amount, unusual location, and new device";
       const protoProb = fraud.prototypeProbability != null ? fraud.prototypeProbability.toFixed(4) : "1.0000";
-      explanationSummary = `The available mock transaction record lists a recorded fraud score of ${fraud.fraudScore.toFixed(2)}, a ${fraud.riskLevel} risk level, and ${fraud.status} status based on stated risk factors: ${factorList}. Separately, the local synthetic Random Forest prototype outputs an uncalibrated fraud probability of ${protoProb} (distinct from the recorded score ${fraud.fraudScore.toFixed(2)}) and provides illustrative SHAP attributions. Device and location inputs were inferred from mock reason labels and do not explain Component 2's production fraud model. Component 2's live gateway audit service was not reached for this decision.`;
+      explanationSummary = `The available mock transaction record lists a recorded fraud score of ${fraud.fraudScore?.toFixed(2) ?? "N/A"}, a ${fraud.riskLevel} risk level, and ${fraud.status} status based on stated risk factors: ${factorList}. Separately, the local synthetic Random Forest prototype outputs an uncalibrated fraud probability of ${protoProb} (distinct from the recorded score ${fraud.fraudScore?.toFixed(2) ?? "N/A"}) and provides illustrative SHAP attributions. Device and location inputs were inferred from mock reason labels and do not explain Component 2's production fraud model. Component 2's live gateway audit service was not reached for this decision.`;
     }
   } else if (session.mode === "baseline") {
     if (showIllustrativeBaseline && baseline) {
@@ -709,7 +713,7 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
               <p className="text-xs text-neutral-500">
                 Local synthetic Random Forest prototype — SHAP attributions
                 {fraud.prototypeProbability != null && (
-                  <> (Prototype Probability: <span className="font-mono font-semibold text-neutral-700 dark:text-neutral-300">{fraud.prototypeProbability.toFixed(4)}</span>, distinct from recorded score {fraud.fraudScore.toFixed(2)})</>
+                  <> (Prototype Probability: <span className="font-mono font-semibold text-neutral-700 dark:text-neutral-300">{fraud.prototypeProbability.toFixed(4)}</span>, distinct from recorded score {fraud.fraudScore != null ? fraud.fraudScore.toFixed(2) : "N/A"})</>
                 )}
               </p>
             </div>
@@ -761,7 +765,7 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
           </div>
 
           <p className="mt-3 text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
-            These SHAP values explain the local synthetic Random Forest prototype (uncalibrated probability {fraud.prototypeProbability != null ? fraud.prototypeProbability.toFixed(4) : "1.0000"}), not Component 2&apos;s production fraud model or recorded score ({fraud.fraudScore.toFixed(2)}). Device and location inputs were inferred from mock reason labels and are not independently verified real-world observations.
+            These SHAP values explain the local synthetic Random Forest prototype (uncalibrated probability {fraud.prototypeProbability != null ? fraud.prototypeProbability.toFixed(4) : "1.0000"}), not Component 2&apos;s production fraud model or recorded score ({fraud.fraudScore != null ? fraud.fraudScore.toFixed(2) : "N/A"}). Device and location inputs were inferred from mock reason labels and are not independently verified real-world observations.
           </p>
         </div>
       ) : fraud && fraud.provenanceType === "live" && fraud.streamSignals ? (
@@ -800,7 +804,7 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
             <div className="rounded-lg border border-neutral-200 bg-neutral-50/80 p-4 dark:border-neutral-800 dark:bg-neutral-800/60">
               <span className="text-xs text-neutral-500">Fused Final Risk Score</span>
               <p className="mt-1 font-mono text-xl font-bold text-red-600 dark:text-red-400">
-                {fraud.streamSignals.riskScore?.toFixed(4) ?? fraud.fraudScore.toFixed(4)}
+                {fraud.streamSignals.riskScore?.toFixed(4) ?? (fraud.fraudScore != null ? fraud.fraudScore.toFixed(4) : "N/A")}
               </p>
               <p className="mt-1 text-[11px] text-neutral-500">Late fusion gateway input</p>
             </div>

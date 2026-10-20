@@ -107,7 +107,7 @@ class TestFraudToolsIntegration(unittest.TestCase):
         self.assertIn("NOT a benchmark model", output)
 
     def test_missing_transaction_live_fallback(self):
-        """Test when the live service is up but holds no decision for the transaction."""
+        """Test when the live service is up but holds no decision for the transaction: returns NOT FOUND with no mock data."""
         not_found = urllib.error.HTTPError(
             "http://localhost:8001/v1/transactions/TX1001", 404, "Not Found", {},
             io.BytesIO(b'{"detail": "No decision is held for this transaction."}'),
@@ -116,35 +116,29 @@ class TestFraudToolsIntegration(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=not_found):
             output = get_fraud_analysis.invoke({"transaction_id": "TX1001"})
 
-            # Must fall back to mock data with explicit labeling
-            self.assertIn("FRAUD ANALYSIS — FALLBACK MOCK DATA", output)
-            self.assertIn("FALLBACK NOTICE", output)
-            self.assertIn("This record is NOT a live lookup result from Component 2", output)
-            self.assertIn("not found in Component 2 live decision store", output)
-
-            # Mock data values preserved
-            self.assertIn("Transaction ID:\nTX1001", output)
-            self.assertIn("LKR 250,000.00", output)
-            self.assertIn("Recorded Fraud Score:\n0.92", output)
-            self.assertIn("Recorded Risk Level:\nHIGH", output)
-            self.assertIn("Recorded Status:\nBLOCKED", output)
-
-            # Prototype SHAP disclaimers preserved
-            self.assertIn("LOCAL SHAP PROTOTYPE — NOT THE TEAM MODEL", output)
-            self.assertIn("LIMITATION:", output)
+            # Must return RECORD NOT FOUND with unavailable states and 0 fabricated score
+            self.assertIn("FRAUD ANALYSIS — RECORD NOT FOUND / SERVICE UNAVAILABLE", output)
+            self.assertIn("RECORD_NOT_FOUND", output)
+            self.assertIn("Recorded Fraud Score:\nUnavailable", output)
+            self.assertIn("Recorded Status:\nUnavailable", output)
+            self.assertIn("Recorded Risk Level:\nUnavailable", output)
+            self.assertIn("does not substitute mock fallback data or fabricate fraud scores", output)
+            self.assertNotIn("0.92", output)
+            self.assertNotIn("LKR 250,000.00", output)
 
     def test_timeout_fallback(self):
-        """Test that timeout errors trigger graceful fallback to labeled mock data."""
+        """Test that timeout errors return SERVICE UNAVAILABLE with no fabricated scores."""
         with patch("urllib.request.urlopen", side_effect=TimeoutError("Request timed out")):
             output = get_fraud_analysis.invoke({"transaction_id": "TX1001"})
 
-            self.assertIn("FRAUD ANALYSIS — FALLBACK MOCK DATA", output)
-            self.assertIn("FALLBACK NOTICE", output)
+            self.assertIn("FRAUD ANALYSIS — RECORD NOT FOUND / SERVICE UNAVAILABLE", output)
+            self.assertIn("SERVICE_UNAVAILABLE", output)
             self.assertIn("Request timed out", output)
-            self.assertIn("Recorded Fraud Score:\n0.92", output)
+            self.assertIn("Recorded Fraud Score:\nUnavailable", output)
+            self.assertNotIn("0.92", output)
 
     def test_malformed_response_fallback(self):
-        """Test that invalid/non-JSON responses trigger graceful fallback."""
+        """Test that invalid/non-JSON responses return SERVICE UNAVAILABLE with no fabricated scores."""
         mock_response = MagicMock()
         mock_response.status = 502
         mock_response.read.return_value = b"<html><head><title>502 Bad Gateway</title></head></html>"
@@ -153,28 +147,40 @@ class TestFraudToolsIntegration(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=mock_response):
             output = get_fraud_analysis.invoke({"transaction_id": "TX1001"})
 
-            self.assertIn("FRAUD ANALYSIS — FALLBACK MOCK DATA", output)
-            self.assertIn("FALLBACK NOTICE", output)
+            self.assertIn("FRAUD ANALYSIS — RECORD NOT FOUND / SERVICE UNAVAILABLE", output)
+            self.assertIn("SERVICE_UNAVAILABLE", output)
             self.assertIn("non-JSON payload", output)
-            self.assertIn("Recorded Fraud Score:\n0.92", output)
+            self.assertIn("Recorded Fraud Score:\nUnavailable", output)
+            self.assertNotIn("0.92", output)
 
     def test_service_unavailable_fallback(self):
-        """Test that connection failure (e.g. port 8001 not running) falls back cleanly."""
+        """Test that connection failure (e.g. port 8001 not running) returns clean unavailable result."""
         with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
             output = get_fraud_analysis.invoke({"transaction_id": "TX1001"})
 
-            self.assertIn("FRAUD ANALYSIS — FALLBACK MOCK DATA", output)
-            self.assertIn("FALLBACK NOTICE", output)
+            self.assertIn("FRAUD ANALYSIS — RECORD NOT FOUND / SERVICE UNAVAILABLE", output)
+            self.assertIn("SERVICE_UNAVAILABLE", output)
             self.assertIn("Cannot connect to Component 2", output)
+            self.assertIn("Recorded Fraud Score:\nUnavailable", output)
+            self.assertNotIn("0.92", output)
+
+    def test_explicit_demo_mode_returns_labeled_demo_data(self):
+        """Test that demo mode works ONLY when explicitly enabled and is visibly labelled."""
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
+            output = get_fraud_analysis.invoke({"transaction_id": "TX1001", "demo_mode": True})
+
+            self.assertIn("DEMO / SYNTHETIC SPECIFICATION (EXPLICIT DEMO MODE)", output)
+            self.assertIn("DEMO NOTICE", output)
+            self.assertIn("EXPLICIT DEMO MODE", output)
             self.assertIn("Recorded Fraud Score:\n0.92", output)
+            self.assertIn("LOCAL SHAP PROTOTYPE — NOT THE PRODUCTION MODEL", output)
 
     def test_missing_from_both_live_and_mock(self):
         """Test clean message when transaction ID is unknown in both live audit and mock data."""
         with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
-            output = get_fraud_analysis.invoke({"transaction_id": "UNKNOWN_9999"})
+            output = get_fraud_analysis.invoke({"transaction_id": "UNKNOWN_9999", "demo_mode": True})
 
-            self.assertIn("No transaction was found for ID 'UNKNOWN_9999'", output)
-            self.assertIn("either live Component 2 audit records or fallback mock data", output)
+            self.assertIn("No demo transaction was found for ID 'UNKNOWN_9999'", output)
 
     def test_never_calls_score_mutation(self):
         """Verify that POST /score is NEVER called under any circumstance."""

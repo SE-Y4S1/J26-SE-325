@@ -3,7 +3,7 @@
 import React, { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { TabType, ChatMessage } from "@/components/assistant/types";
-import { MOCK_INITIAL_MESSAGES } from "@/components/assistant/mockData";
+import { INITIAL_ASSISTANT_MESSAGES, MOCK_INITIAL_MESSAGES } from "@/components/assistant/mockData";
 import { AssistantHeader } from "@/components/assistant/AssistantHeader";
 import { AssistantSidebar } from "@/components/assistant/AssistantSidebar";
 import { ResearchBanner } from "@/components/assistant/ResearchBanner";
@@ -22,21 +22,71 @@ function AssistantContent() {
 
   const tabQuery = searchParams.get("tab") as TabType | null;
   const activeTab: TabType = tabQuery && VALID_TABS.includes(tabQuery) ? tabQuery : "assistant";
+  const selectedTx = searchParams.get("tx") || searchParams.get("transactionId") || undefined;
+  const demoMode = searchParams.get("demo") === "true";
 
-  const [messages, setMessages] = useState<ChatMessage[]>(MOCK_INITIAL_MESSAGES);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+    if (demoMode) return MOCK_INITIAL_MESSAGES;
+    if (selectedTx) {
+      return [
+        {
+          id: "welcome_tx",
+          sender: "assistant",
+          text: `Hello! Transaction ${selectedTx} is selected. I can explain its fraud score, gateway decision, and contributing factors from Component 2. How can I assist you?`,
+          timestamp: "Just now",
+          hasWhyButton: false,
+          hasTrustPanelButton: false,
+        },
+      ];
+    }
+    return INITIAL_ASSISTANT_MESSAGES;
+  });
+
   const [latestEvidence, setLatestEvidence] = useState<Array<{ tool: string; result: string }>>([]);
   const [selectedEvidence, setSelectedEvidence] = useState<Array<{ tool: string; result: string }> | null>(null);
   const [isArchitectureOpen, setIsArchitectureOpen] = useState(false);
 
   const activeEvidence = selectedEvidence ?? latestEvidence;
 
+  // If selectedTx changes on the URL before the user has started chatting, update the greeting
+  React.useEffect(() => {
+    if (demoMode) return;
+    setMessages((prev) => {
+      if (prev.length <= 1 && prev[0]?.sender === "assistant") {
+        if (selectedTx) {
+          return [
+            {
+              id: "welcome_tx",
+              sender: "assistant",
+              text: `Hello! Transaction ${selectedTx} is selected. I can explain its fraud score, gateway decision, and contributing factors from Component 2. How can I assist you?`,
+              timestamp: "Just now",
+              hasWhyButton: false,
+              hasTrustPanelButton: false,
+            },
+          ];
+        } else {
+          return INITIAL_ASSISTANT_MESSAGES;
+        }
+      }
+      return prev;
+    });
+  }, [selectedTx, demoMode]);
+
   const handleSelectTab = (tab: TabType) => {
-    if (tab === "assistant") {
-      setSelectedEvidence(null);
-      router.push("/assistant");
+    const params = new URLSearchParams();
+    if (tab !== "assistant") {
+      params.set("tab", tab);
     } else {
-      router.push(`/assistant?tab=${tab}`);
+      setSelectedEvidence(null);
     }
+    if (selectedTx) {
+      params.set("tx", selectedTx);
+    }
+    if (demoMode) {
+      params.set("demo", "true");
+    }
+    const q = params.toString();
+    router.push(q ? `/assistant?${q}` : "/assistant");
   };
 
   const handleToggleArchitecture = () => {
@@ -73,6 +123,8 @@ function AssistantContent() {
             <ChatScreen
               messages={messages}
               setMessages={setMessages}
+              selectedTransactionId={selectedTx}
+              demoMode={demoMode}
               onNavigateToExplanation={(evidence) => {
                 setSelectedEvidence(evidence ?? latestEvidence);
                 handleSelectTab("explanation");
@@ -93,7 +145,10 @@ function AssistantContent() {
           )}
 
           {activeTab === "trust-panel" && (
-            <TrustPanelScreen latestEvidence={activeEvidence} />
+            <TrustPanelScreen
+              latestEvidence={activeEvidence}
+              selectedTransactionId={selectedTx}
+            />
           )}
 
           {activeTab === "responsible-ai" && (

@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import { ChatMessage } from "./types";
-import { MOCK_INITIAL_MESSAGES, SUGGESTED_QUESTIONS } from "./mockData";
+import { INITIAL_ASSISTANT_MESSAGES, MOCK_INITIAL_MESSAGES, SUGGESTED_QUESTIONS } from "./mockData";
 import { AgentWorkflowPanel, ExecutionTraceData } from "./AgentWorkflowPanel";
 import {
   BotIcon,
@@ -103,27 +103,31 @@ export function sanitizeAssistantResponse(
       )
       .trim();
 
-    if (
-      stripped &&
-      (stripped.includes("TX1001") ||
-        stripped.includes("0.92") ||
-        /fraud|blocked/i.test(stripped))
-    ) {
+    if (stripped) {
       return stripped;
     }
 
-    // Extract fraud values from tool evidence
+    // If answer became empty after stripping portfolio leak:
+    if (/RECORD NOT FOUND|SERVICE UNAVAILABLE|No decision is held/i.test(fraudText)) {
+      const txMatch = fraudText.match(/Transaction ID:\s*([A-Za-z0-9_-]+)/i);
+      const txId = txMatch ? txMatch[1] : "the requested transaction";
+      return `No verified live fraud decision was found for transaction ${txId} in Component 2's live decision store. The assistant cannot provide a fraud score or contributing factors without verified evidence.`;
+    }
+    if (/UNAUTHORIZED/i.test(fraudText)) {
+      return `Access to the requested transaction decision was not authorized.`;
+    }
+
     const txMatch = fraudText.match(/Transaction ID:\s*([A-Za-z0-9_-]+)/i);
-    const txId = txMatch ? txMatch[1] : "TX1001";
+    const txId = txMatch ? txMatch[1] : "the requested transaction";
 
     const scoreMatch = fraudText.match(/Recorded Fraud Score:\s*([0-9.]+)/i);
-    const score = scoreMatch ? scoreMatch[1] : "0.92";
+    const score = scoreMatch ? scoreMatch[1] : null;
 
     const statusMatch = fraudText.match(/Recorded Status:\s*([A-Za-z0-9_-]+)/i);
-    const status = statusMatch ? statusMatch[1] : "BLOCKED";
+    const status = statusMatch ? statusMatch[1] : null;
 
     const riskMatch = fraudText.match(/Recorded Risk Level:\s*([A-Za-z0-9_-]+)/i);
-    const riskLevel = riskMatch ? riskMatch[1] : "HIGH";
+    const riskLevel = riskMatch ? riskMatch[1] : null;
 
     const factorsMatch = fraudText.match(
       /RECORDED CONTRIBUTING FACTORS:\s*([\s\S]*?)(?=(?:COMPONENT 2|LOCAL SHAP|TRANSACTION TELEMETRY|LIMITATION|$))/i
@@ -135,22 +139,24 @@ export function sanitizeAssistantResponse(
         if (m && m[1].trim()) factors.push(m[1].trim());
       }
     }
-    const factorString =
-      factors.length > 0
-        ? factors.join(", ")
-        : "new device, unusual location, and high transfer amount";
+    const factorString = factors.length > 0 ? factors.join(", ") : "";
 
     const isFallback =
-      /FALLBACK MOCK DATA|Local mock baseline|FALLBACK NOTICE|NOT a live lookup result/i.test(
+      /FALLBACK MOCK DATA|Local mock baseline|FALLBACK NOTICE|NOT a live lookup result|DEMO \/ SYNTHETIC SPECIFICATION/i.test(
         fraudText
       );
 
-    return (
-      `For ${txId}, the available tool returned a recorded fraud score of ${score}, risk level ${riskLevel}, and status ${status} in a ` +
-      `${isFallback ? "mock transaction record (Component 4 local prototype fallback, not a live Component 2 result)" : "Component 2 live gateway record"}. ` +
-      `The recorded contributing factors are ${factorString}. ` +
-      `The meaning of the score as a calibrated probability is not established by the available evidence.`
-    );
+    if (score && status) {
+      return (
+        `For ${txId}, the available tool returned a recorded fraud score of ${score}` +
+        (riskLevel ? `, risk level ${riskLevel}` : "") +
+        `, and status ${status} in a ` +
+        `${isFallback ? "mock transaction record (Component 4 local prototype fallback, not a live Component 2 result)" : "Component 2 live gateway record"}.` +
+        (factorString ? ` The recorded contributing factors are ${factorString}.` : "") +
+        ` The meaning of the score as a calibrated probability is not established by the available evidence.`
+      );
+    }
+    return `Transaction evidence was retrieved for ${txId}, but no live decision was established.`;
   }
 
   // If blockchain audit evidence was returned without portfolio evidence
@@ -181,9 +187,21 @@ export function sanitizeAssistantResponse(
  */
 function getEvidenceBadge(item: { tool: string; result: string }): { label: string; isLive: boolean } {
   if (item.tool === "get_fraud_analysis") {
+    if (/RECORD NOT FOUND|SERVICE UNAVAILABLE|No decision is held/i.test(item.result)) {
+      return {
+        label: "Fraud Gateway (Record Not Found / Unavailable)",
+        isLive: false,
+      };
+    }
+    if (/DEMO \/ SYNTHETIC SPECIFICATION|EXPLICIT DEMO MODE/i.test(item.result)) {
+      return {
+        label: "Fraud Gateway (Explicit Demo Mode)",
+        isLive: false,
+      };
+    }
     const isLive = /LIVE COMPONENT 2|Live Component 2 Gateway Audit Log/i.test(item.result);
     return {
-      label: isLive ? "Fraud Gateway (Live Port 8001)" : "Fraud Telemetry (Synthetic Baseline)",
+      label: isLive ? "Fraud Gateway (Live Port 8001)" : "Fraud Telemetry (Synthetic Prototype)",
       isLive,
     };
   }
@@ -274,6 +292,8 @@ interface Props {
   onEvidenceReceived?: (evidence: Array<{ tool: string; result: string }>) => void;
   messages?: ChatMessage[];
   setMessages?: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  selectedTransactionId?: string;
+  demoMode?: boolean;
 }
 
 export function ChatScreen({
@@ -282,6 +302,8 @@ export function ChatScreen({
   onEvidenceReceived,
   messages: externalMessages,
   setMessages: externalSetMessages,
+  selectedTransactionId,
+  demoMode,
 }: Props) {
   const [internalMessages, setInternalMessages] = useState<ChatMessage[]>(MOCK_INITIAL_MESSAGES);
   const messages = externalMessages ?? internalMessages;
@@ -344,8 +366,14 @@ export function ChatScreen({
         responsible_ai?: Record<string, unknown>;
       }>("assistant", "/assistant/chat", {
         method: "POST",
-        body: { message: text, history: historyPayload, preferences },
-        auth: false,
+        body: {
+          message: text,
+          history: historyPayload,
+          preferences,
+          transaction_id: selectedTransactionId || null,
+          demo_mode: Boolean(demoMode),
+        },
+        auth: true,
       });
 
       const evidenceDetails = (response.evidence || []).map((e) => ({
@@ -422,9 +450,24 @@ export function ChatScreen({
               Financial Decision Dialogue
             </span>
           </div>
-          <span className="text-[11px] text-neutral-400 font-mono">
-            Grounding: Zero-Hallucination Policy
-          </span>
+          <div className="flex items-center gap-2">
+            {selectedTransactionId && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-neutral-600 dark:text-neutral-300">
+                <span>Transaction:</span>
+                <code className="rounded bg-blue-100/80 px-1.5 py-0.5 font-mono text-[10px] font-bold text-blue-800 dark:bg-blue-900/60 dark:text-blue-200">
+                  {selectedTransactionId}
+                </code>
+              </span>
+            )}
+            {demoMode && (
+              <span className="inline-flex items-center rounded bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-900 dark:bg-amber-950/60 dark:text-amber-300">
+                DEMO MODE
+              </span>
+            )}
+            <span className="text-[11px] text-neutral-400 font-mono">
+              Grounding: Zero-Hallucination Policy
+            </span>
+          </div>
         </div>
 
         {/* Message Thread */}

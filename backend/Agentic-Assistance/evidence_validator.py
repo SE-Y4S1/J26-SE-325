@@ -113,9 +113,19 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
             re.search(pattern, corrected_answer, re.IGNORECASE)
             for pattern in score_probability_patterns
         ):
-            issues.append("Recorded fraud score described as a calibrated probability")
-
+            issues.append("Fraud score treated as calibrated probability")
         checks_applied.append("fraud_score_probability_claims")
+
+        # Detect missing device or location signals asserted as verified facts
+        if "Device Signals: Unavailable" in evidence_text or "Location Signals: Unavailable" in evidence_text:
+            device_fact_patterns = [
+                r"\b(?:verified|confirmed|detected|found)\s+(?:that\s+)?(?:you\s+used\s+)?a\s+new\s+device\b",
+                r"\btransaction\s+(?:was\s+)?from\s+an?\s+unusual\s+location\b",
+                r"\b(?:verified|confirmed)\s+unusual\s+location\b",
+            ]
+            if any(re.search(p, corrected_answer, re.IGNORECASE) for p in device_fact_patterns):
+                issues.append("Unverified device or location signals presented as verified facts")
+            checks_applied.append("missing_telemetry_signal_claims")
 
     if "get_blockchain_audit" in tool_names:
         checks_applied.append("blockchain_audit_present")
@@ -299,25 +309,54 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
             if "get_fraud_analysis" in tool_names:
                 fraud_item = next((item for item in evidence if item.get("tool") == "get_fraud_analysis"), None)
                 fraud_text = str(fraud_item.get("result", "")) if fraud_item else ""
-                if "Optional SHAP feature-attribution details were suppressed" in fraud_text or "AI EXPLANATION NOTICE" in fraud_text:
+                tx_match = re.search(r"Transaction ID:\s*([^\n\r]+)", fraud_text)
+                tx_id = tx_match.group(1).strip() if tx_match else "the transaction"
+
+                if "RECORD NOT FOUND" in fraud_text or "SERVICE UNAVAILABLE" in fraud_text or "No verified live fraud record exists" in fraud_text:
+                    reason_m = re.search(r"Live Service Detail:\s*([^\n\r]+)", fraud_text) or re.search(r"Reason:\s*([^\n\r]+)", fraud_text)
+                    reason_str = reason_m.group(1).strip() if reason_m else "No decision is held on record"
                     parts.append(
-                        "For TX1001, the available tool returned a recorded fraud score of 0.92, risk level HIGH, and status BLOCKED in a "
-                        "mock transaction record. The meaning of the score as a calibrated probability is not established by the available evidence.\n\n"
+                        f"Notice: For transaction {tx_id}, no live fraud decision was found in Component 2's decision store ({reason_str}). "
+                        "No verified fraud score, decision, or risk factors are on record for this transaction. "
+                        "FinTrust Assistant does not fabricate scores or reasons when live records are unavailable."
+                    )
+                elif "AUTHORIZATION DENIED" in fraud_text:
+                    parts.append(
+                        f"Authorization notice: You are not authorized to view transaction {tx_id}, or it does not exist under your account."
+                    )
+                elif "LIVE COMPONENT 2 AUDIT RECORD" in fraud_text:
+                    score_m = re.search(r"Recorded Fraud Score:\s*([0-9.]+)", fraud_text)
+                    decision_m = re.search(r"Recorded Status:\s*([A-Za-z0-9_-]+)", fraud_text)
+                    model_m = re.search(r"Model Version:\s*([^\n\r]+)", fraud_text)
+                    factors_m = re.search(r"RECORDED CONTRIBUTING FACTORS:\s*\n-\s*([^\n\r]+)", fraud_text)
+                    score_val = score_m.group(1) if score_m else "N/A"
+                    decision_val = decision_m.group(1) if decision_m else "UNKNOWN"
+                    model_val = model_m.group(1) if model_m else "Component 2 engine"
+                    factors_val = factors_m.group(1) if factors_m else "gateway rules"
+                    parts.append(
+                        f"For transaction {tx_id}, Component 2's live gateway reports recorded status {decision_val} with a fraud score of {score_val} "
+                        f"(model version: {model_val}).\n\n"
+                        f"Recorded contributing factors: {factors_val}.\n\n"
+                        "Telemetry notice: Device and location signals were not retained in the gateway audit trail, "
+                        "and the meaning of the score as a calibrated probability is not established by the available evidence."
+                    )
+                elif "Optional SHAP feature-attribution details were suppressed" in fraud_text or "AI EXPLANATION NOTICE" in fraud_text:
+                    parts.append(
+                        f"DEMO EVIDENCE: For transaction {tx_id}, synthetic demo data lists a recorded fraud score of 0.92, risk level HIGH, and status BLOCKED. "
+                        "The meaning of the score as a calibrated probability is not established by the available evidence.\n\n"
                         "Detailed SHAP feature attributions and prototype model metrics were suppressed based on user preference (AI explanation disabled).\n\n"
-                        "The recorded contributing factors are new device, unusual location, and high transfer amount."
+                        "The recorded demo contributing factors are new device, unusual location, and high transfer amount."
                     )
                 else:
                     parts.append(
-                        "For TX1001, the available tool returned a recorded fraud score of 0.92, risk level HIGH, and status BLOCKED in a "
-                        "mock transaction record. The meaning of the score as a calibrated probability is not established by the available "
-                        "evidence.\n\n"
+                        f"DEMO EVIDENCE: For transaction {tx_id}, synthetic demo data lists a recorded fraud score of 0.92, risk level HIGH, and status BLOCKED. "
+                        "The meaning of the score as a calibrated probability is not established by the available evidence.\n\n"
                         "The local synthetic Random Forest prototype returned a fraud probability output of 1.0000. This is a prototype "
                         "model output, not proof of fraud or a verified real-world probability.\n\n"
-                        "The recorded contributing factors are new device, unusual location, and high transfer amount. The tool says the device "
-                        "and location inputs for the local prototype were inferred from mock reason labels. These are not independently "
-                        "verified real-world observations.\n\n"
-                        "The SHAP values explain the local synthetic prototype, not necessarily the model associated with the recorded "
-                        "score. Whether the models share training data is not established by the available evidence."
+                        "The recorded demo contributing factors are new device, unusual location, and high transfer amount. Device and location "
+                        "inputs for the local prototype were inferred from mock reason labels and are not independently verified observations.\n\n"
+                        "The SHAP values explain the local synthetic prototype, not the production fraud model. Whether the models share "
+                        "training data is not established by the available evidence."
                     )
             if "get_blockchain_audit" in tool_names:
                 audit_item = next((item for item in evidence if item.get("tool") == "get_blockchain_audit"), None)

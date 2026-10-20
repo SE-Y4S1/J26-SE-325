@@ -12,6 +12,7 @@ import {
 
 interface TrustPanelScreenProps {
   latestEvidence?: Array<{ tool: string; result: string }>;
+  selectedTransactionId?: string;
 }
 
 interface ParsedEvidenceData {
@@ -23,6 +24,10 @@ interface ParsedEvidenceData {
   status?: string;
   riskLevel?: string;
   factors?: string[];
+  modelVersion?: string;
+  benchmarkModel?: boolean;
+  unavailableSignals?: string[];
+  retrievalTimestamp?: string;
   auditId?: string;
   blockNumber?: number | string;
   recordStatus?: string;
@@ -43,7 +48,7 @@ interface ParsedEvidenceData {
   portfolioExpectedReturn?: number;
   portfolioHoldingCount?: number;
   hasShap: boolean;
-  provenanceType: "live" | "fallback" | "baseline";
+  provenanceType: "live" | "fallback" | "baseline" | "demo" | "not_found" | "unavailable";
   provenanceLabel: string;
 }
 
@@ -52,15 +57,22 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
   const auditItem = evidenceList.find((e) => e.tool === "get_blockchain_audit");
   const portfolioItem = evidenceList.find((e) => e.tool === "get_portfolio_analysis");
 
-  const isFraudFallback = fraudItem?.result
-    ? /FALLBACK MOCK DATA|Local mock baseline|FALLBACK NOTICE|NOT a live lookup result/i.test(fraudItem.result)
+  const isFraudNotFound = fraudItem?.result
+    ? /RECORD NOT FOUND|SERVICE UNAVAILABLE|RECORD_NOT_FOUND|SERVICE_UNAVAILABLE|No verified live fraud record exists/i.test(fraudItem.result)
     : false;
+  const isFraudDemo = fraudItem?.result
+    ? /DEMO \/ SYNTHETIC|DEMO SYNTHETIC|EXPLICIT DEMO MODE/i.test(fraudItem.result)
+    : false;
+  const isFraudFallback = !isFraudNotFound && !isFraudDemo && (fraudItem?.result
+    ? /FALLBACK MOCK DATA|Local mock baseline|FALLBACK NOTICE|NOT a live lookup result/i.test(fraudItem.result)
+    : false);
   const isFraudLive =
-    !isFraudFallback &&
+    !isFraudFallback && !isFraudNotFound && !isFraudDemo &&
     Boolean(
       fraudItem?.result &&
       (/LIVE COMPONENT 2 AUDIT RECORD/i.test(fraudItem.result) ||
-        /Live Component 2 Gateway Audit Log/i.test(fraudItem.result))
+        /Live Component 2 Gateway Audit Log/i.test(fraudItem.result) ||
+        /Live Component 2 Gateway Decision Store/i.test(fraudItem.result))
     );
 
   const isAuditFallback = auditItem?.result
@@ -115,7 +127,7 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
     ? "empty"
     : "fallback";
 
-  let provenanceType: "live" | "fallback" | "baseline" = "baseline";
+  let provenanceType: "live" | "fallback" | "baseline" | "demo" | "not_found" | "unavailable" = "baseline";
   if (fraudItem && auditItem && portfolioItem) {
     provenanceType = isFraudLive && isAuditLive && isPortfolioLive ? "live" : "fallback";
   } else if (fraudItem && auditItem) {
@@ -125,7 +137,16 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
   } else if (auditItem && portfolioItem) {
     provenanceType = isAuditLive && isPortfolioLive ? "live" : "fallback";
   } else if (fraudItem) {
-    provenanceType = isFraudLive ? "live" : "fallback";
+    if (isFraudLive) provenanceType = "live";
+    else if (isFraudDemo) provenanceType = "demo";
+    else if (isFraudNotFound) {
+      const isServiceError =
+        /Lookup Status:\s*SERVICE_UNAVAILABLE/i.test(fraudItem.result) ||
+        (!/Lookup Status:\s*RECORD_NOT_FOUND/i.test(fraudItem.result) &&
+          /Connection refused|Cannot connect|timed out/i.test(fraudItem.result));
+      provenanceType = isServiceError ? "unavailable" : "not_found";
+    }
+    else provenanceType = "fallback";
   } else if (auditItem) {
     provenanceType = isAuditLive ? "live" : "fallback";
   } else if (portfolioItem) {
@@ -137,11 +158,17 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
   let provenanceLabel =
     provenanceType === "live"
       ? "Active Session: Live Service Evidence"
-      : provenanceType === "fallback"
-        ? portfolioItem && !fraudItem && !auditItem
-          ? "Active Session: Tool Evidence — Synthetic Demo Data"
-          : "Active Session: Fallback Mock Data"
-        : "Mock Baseline (No Active Session Evidence)";
+      : provenanceType === "demo"
+        ? "Active Session: Synthetic Demo Data (Explicit Demo Mode)"
+        : provenanceType === "not_found"
+          ? "Active Session: Component 2 Record Not Found"
+          : provenanceType === "unavailable"
+            ? "Active Session: Component 2 Service Unavailable"
+            : provenanceType === "fallback"
+              ? portfolioItem && !fraudItem && !auditItem
+                ? "Active Session: Tool Evidence — Synthetic Demo Data"
+                : "Active Session: Fallback Mock Data"
+              : "Mock Baseline (No Active Session Evidence)";
 
   if (portfolioItem && !fraudItem && !auditItem) {
     if (portfolioStatusType === "service_error") {
@@ -154,7 +181,7 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
   }
 
   const parsed: ParsedEvidenceData = {
-    hasFraudEvidence: !!(fraudItem?.result && !fraudItem.result.includes("No transaction was found")),
+    hasFraudEvidence: !!(fraudItem?.result && !fraudItem.result.includes("No transaction was found") && !isFraudNotFound),
     hasAuditEvidence: !!(auditItem?.result && !auditItem.result.includes("No audit record found")),
     hasPortfolioEvidence: !!(portfolioItem?.result && portfolioItem.result.trim().length > 0),
     isPortfolioFallback,
@@ -169,6 +196,21 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
     const text = fraudItem.result;
     const txIdMatch = text.match(/Transaction ID:\s*([A-Za-z0-9_-]+)/i);
     if (txIdMatch) parsed.transactionId = txIdMatch[1];
+
+    if (isFraudNotFound) {
+      parsed.status = provenanceType === "unavailable" ? "SERVICE_UNAVAILABLE" : "RECORD_NOT_FOUND";
+      parsed.riskLevel = "UNAVAILABLE";
+      parsed.fraudScore = undefined;
+      parsed.unavailableSignals = [
+        "Fraud Score (Live lookup failed)",
+        "Decision Status (Unavailable)",
+        "Device Signals (Unavailable)",
+        "Location Signals (Unavailable)",
+        "Amount Risk Assessment (Unavailable)",
+      ];
+      parsed.factors = [];
+      return parsed;
+    }
 
     const amountMatch = text.match(/Transaction Amount:\s*([A-Za-z]+)?\s*([0-9,]+(?:\.[0-9]+)?)/i);
     if (amountMatch) {
@@ -188,19 +230,38 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
     const riskMatch = text.match(/Recorded Risk Level:\s*([A-Za-z0-9_-]+)/i);
     if (riskMatch) parsed.riskLevel = riskMatch[1];
 
+    const verMatch = text.match(/Model Version:\s*([^\n\r]+)/i);
+    if (verMatch) parsed.modelVersion = verMatch[1].trim();
+    parsed.benchmarkModel = /Benchmark Status:[^\n\r]*benchmark/i.test(text) && !/NOT a benchmark/i.test(text);
+
+    const unavailableSigs: string[] = [];
+    if (/Device Signals:[^\n\r]*Unavailable/i.test(text)) {
+      unavailableSigs.push("Device Telemetry (Not retained)");
+    }
+    if (/Location Signals:[^\n\r]*Unavailable/i.test(text)) {
+      unavailableSigs.push("Location Telemetry (Not retained)");
+    }
+    if (/Amount Risk Assessment:[^\n\r]*Unavailable/i.test(text)) {
+      unavailableSigs.push("Amount Risk Threshold (Not retained)");
+    }
+    parsed.unavailableSignals = unavailableSigs;
+
+    const timeMatch = text.match(/(?:Audit Timestamp|Decision Timestamp):\s*([^\n\r]+)/i);
+    if (timeMatch) parsed.retrievalTimestamp = timeMatch[1].trim();
+
     const factorsMatch = text.match(
-      /RECORDED CONTRIBUTING FACTORS:\s*([\s\S]*?)(?=(?:COMPONENT 2|LOCAL SHAP|TRANSACTION TELEMETRY|LIMITATION|$))/i
+      /(?:RECORDED CONTRIBUTING FACTORS|DECISION RULES & REASONING|FEATURE ATTRIBUTIONS & CONTRIBUTING FACTORS):\s*([\s\S]*?)(?=(?:COMPONENT 2|LOCAL SHAP|TRANSACTION TELEMETRY|SIGNALS|LIMITATION|$))/i
     );
     if (factorsMatch?.[1]) {
       const items: string[] = [];
       for (const line of factorsMatch[1].split("\n")) {
         const m = line.match(/^\s*-\s*(.+)/);
-        if (m && m[1].trim()) items.push(m[1].trim());
+        if (m && m[1].trim() && !m[1].startsWith("None returned")) items.push(m[1].trim());
       }
       if (items.length > 0) parsed.factors = items;
     }
 
-    parsed.hasShap = /SHAP (?:CONTRIBUTIONS|EXPLANATION)/i.test(text);
+    parsed.hasShap = /SHAP (?:CONTRIBUTIONS|EXPLANATION)/i.test(text) && isFraudDemo;
   }
 
   if (auditItem?.result) {
@@ -258,7 +319,7 @@ function parseLatestEvidence(evidenceList: Array<{ tool: string; result: string 
   return parsed;
 }
 
-export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps) {
+export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }: TrustPanelScreenProps) {
   const [actionState, setActionState] = useState<TrustActionState>("pending");
   const [persistedRecord, setPersistedRecord] = useState<GovernanceDecisionRecord | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -268,10 +329,19 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
 
   const parsed = parseLatestEvidence(latestEvidence);
   // Session policy: Active session evidence is valid only when tools returned results in this response.
-  const hasLiveEvidence = latestEvidence.length > 0 && (parsed.hasFraudEvidence || parsed.hasAuditEvidence || Boolean(parsed.hasPortfolioEvidence));
+  const hasLiveEvidence =
+    latestEvidence.length > 0 &&
+    (parsed.hasFraudEvidence ||
+      parsed.hasAuditEvidence ||
+      Boolean(parsed.hasPortfolioEvidence) ||
+      parsed.provenanceType === "not_found" ||
+      parsed.provenanceType === "unavailable");
   const isPortfolio = Boolean(parsed.hasPortfolioEvidence && !parsed.hasFraudEvidence && !parsed.hasAuditEvidence);
 
-  const displayTxId = parsed.transactionId ?? (hasLiveEvidence ? "TX1001" : tx.id);
+  const displayTxId =
+    parsed.transactionId ??
+    selectedTransactionId ??
+    (hasLiveEvidence ? "Unknown" : tx.id);
   const displayAmount = parsed.amount ?? (hasLiveEvidence ? undefined : tx.amount);
   const displayCurrency = parsed.currency ?? (hasLiveEvidence ? "LKR" : tx.currency);
   const displayStatus = isPortfolio
@@ -475,11 +545,19 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
                 ) : (
                   <>Live portfolio record retrieved from the platform portfolio store. Recorded market value: <span className="font-semibold text-neutral-900 dark:text-white">{parsed.portfolioCurrency || "USD"} {parsed.portfolioTotalValue}</span> across <span className="font-semibold text-neutral-900 dark:text-white">{parsed.portfolioHoldingCount}</span> verified holdings.</>
                 )
-              ) : parsed.hasFraudEvidence ? (
-                parsed.provenanceType === "live" ? (
-                  <>Component 2 gateway audit trail reports status <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> with risk score <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore?.toFixed(4) ?? "N/A"}</span>. The recorded decision factor is {parsed.factors?.[0] || "recorded dual-stream signals"}. The production model&apos;s internal reasoning has not been independently established.</>
+              ) : parsed.hasFraudEvidence || parsed.provenanceType === "not_found" || parsed.provenanceType === "unavailable" ? (
+                parsed.provenanceType === "not_found" || parsed.provenanceType === "unavailable" ? (
+                  <>
+                    Notice: No verified fraud decision was found for transaction <span className="font-semibold text-neutral-900 dark:text-white">{displayTxId}</span> in Component 2&apos;s live decision store. Live lookup failed and mock fallback data is not substituted under FinTrust Responsible AI rules.
+                  </>
+                ) : parsed.provenanceType === "live" ? (
+                  <>
+                    Component 2 live decision store reports status <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> with verified fraud score <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore?.toFixed(4) ?? "N/A"}</span> ({parsed.riskLevel || "HIGH"} risk) for transaction <span className="font-semibold text-neutral-900 dark:text-white">{displayTxId}</span>. Decision reasoning: {parsed.factors?.[0] || "dual-stream anomaly evaluation"}. Component 4&apos;s local Random Forest prototype is NOT used for this live transaction.
+                  </>
                 ) : (
-                  <>The available mock transaction record lists a recorded fraud score of <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"}</span>, <span className="font-semibold text-neutral-900 dark:text-white">{parsed.riskLevel || "HIGH"}</span> risk level, and <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> status based on stated risk factors ({parsed.factors?.join(", ") || "high transfer amount, unusual location, and new device"}). Separately, the local synthetic Random Forest prototype provides illustrative SHAP attributions (uncalibrated probability {parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}, distinct from recorded score {parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"}). Device and location features were inferred from mock labels and do not explain Component 2&apos;s production model. Component 2&apos;s live gateway was not reached for this decision.</>
+                  <>
+                    The available mock transaction record lists a recorded fraud score of <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"}</span>, <span className="font-semibold text-neutral-900 dark:text-white">{parsed.riskLevel || "HIGH"}</span> risk level, and <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> status based on stated risk factors ({parsed.factors?.join(", ") || "high transfer amount, unusual location, and new device"}). Separately, the local synthetic Random Forest prototype provides illustrative SHAP attributions (uncalibrated probability {parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}, distinct from recorded score {parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"}). Device and location features were inferred from mock labels and do not explain Component 2&apos;s production model.
+                  </>
                 )
               ) : (
                 <>Blockchain audit record for transaction {displayTxId} was retrieved from Component 3 bridge. Status: <span className="font-semibold text-neutral-900 dark:text-white">{parsed.recordStatus || "RECORDED"}</span>.</>
@@ -579,14 +657,33 @@ export function TrustPanelScreen({ latestEvidence = [] }: TrustPanelScreenProps)
                 <>
                   {/* Row 1: Fraud score evidence */}
                   {hasLiveEvidence ? (
-                    parsed.hasFraudEvidence ? (
-                      <div className="flex items-center gap-2">
-                        <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                    parsed.provenanceType === "not_found" || parsed.provenanceType === "unavailable" ? (
+                      <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
+                        <AlertTriangleIcon className="size-4 shrink-0" />
                         <span>
-                          {parsed.provenanceType === "live"
-                            ? `Live gateway fraud score: ${parsed.fraudScore?.toFixed(4) ?? "N/A"} (verification and probability calibration not established)`
-                            : `Recorded mock fraud score: ${parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"} (distinct from prototype prob ${parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}; calibration not established)`}
+                          Component 2 live decision store: {parsed.provenanceType === "unavailable" ? "Service Unavailable" : "Record Not Found"} for transaction {displayTxId} (Fraud score: Unavailable; no mock score substituted)
                         </span>
+                      </div>
+                    ) : parsed.hasFraudEvidence ? (
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center gap-2">
+                          <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
+                          <span>
+                            {parsed.provenanceType === "live"
+                              ? `Live Component 2 fraud decision: ${parsed.status || "UNKNOWN"} (Score: ${parsed.fraudScore?.toFixed(4) ?? "N/A"}, Risk: ${parsed.riskLevel || "N/A"})`
+                              : `Recorded mock fraud score: ${parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"} (Synthetic Demo Mode)`}
+                          </span>
+                        </div>
+                        {parsed.modelVersion && (
+                          <div className="ml-6 text-[11px] text-neutral-600 dark:text-neutral-400">
+                            Model Version: {parsed.modelVersion} ({parsed.benchmarkModel ? "Public benchmark model" : "Untrained heuristic"})
+                          </div>
+                        )}
+                        {parsed.unavailableSignals && parsed.unavailableSignals.length > 0 && (
+                          <div className="ml-6 text-[11px] text-amber-700 dark:text-amber-400">
+                            Unavailable telemetry: {parsed.unavailableSignals.join(", ")}
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">

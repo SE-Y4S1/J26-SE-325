@@ -108,7 +108,7 @@ class TestExplanationPreferenceEnforcement(unittest.TestCase):
     """Test AI explanation disabled preference enforcement on fraud tools and explanations."""
 
     def test_explanation_enabled_true_includes_shap_evidence(self):
-        token = set_current_preferences({"explanation_enabled": True})
+        token = set_current_preferences({"explanation_enabled": True, "demo_mode": True})
         try:
             output = get_fraud_analysis.invoke({"transaction_id": "TX1001"})
             self.assertIn("Recorded Fraud Score:\n0.92", output)
@@ -120,7 +120,7 @@ class TestExplanationPreferenceEnforcement(unittest.TestCase):
             reset_current_preferences(token)
 
     def test_explanation_enabled_false_suppresses_shap_details(self):
-        token = set_current_preferences({"explanation_enabled": False})
+        token = set_current_preferences({"explanation_enabled": False, "demo_mode": True})
         try:
             with patch("tools.fraud_tools.explain_transaction") as mock_explain:
                 output = get_fraud_analysis.invoke({"transaction_id": "TX1001"})

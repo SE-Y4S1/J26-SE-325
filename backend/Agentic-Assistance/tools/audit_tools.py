@@ -6,6 +6,7 @@ import urllib.request
 from pathlib import Path
 
 from langchain_core.tools import tool
+from preferences_context import get_request_transaction_id
 
 
 DATA_FILE = (
@@ -30,10 +31,11 @@ def query_live_audit_service(transaction_id: str, base_url: str = AUDIT_SERVICE_
     Query the live blockchain audit service for transaction verification.
     Returns a dict with query status and payload/error details.
     """
+    req_tx = get_request_transaction_id()
     clean_id = (
         str(transaction_id).strip().strip("'\"")
         if transaction_id and str(transaction_id).strip().lower() not in ("none", "null", "")
-        else "TX1001"
+        else (req_tx.strip() if req_tx and req_tx.strip() else "TX1001")
     )
     quoted_id = urllib.parse.quote(clean_id, safe="")
     url = f"{base_url}/api/audit/{quoted_id}/verify"
@@ -97,10 +99,11 @@ def get_blockchain_audit(transaction_id: str = "TX1001") -> str:
       (e.g., 'PP1-DEMO-001', 'TX1001'). If the user mentions a specific transaction ID in their
       message, pass that exact transaction ID. If no transaction ID is mentioned, use 'TX1001'.
     """
+    req_tx = get_request_transaction_id()
     target_id = (
         str(transaction_id).strip().strip("'\"")
         if transaction_id and str(transaction_id).strip().lower() not in ("none", "null", "")
-        else "TX1001"
+        else (req_tx.strip() if req_tx and req_tx.strip() else "TX1001")
     )
 
     mock_data = load_data()
@@ -296,7 +299,7 @@ Verification established against the configured blockchain network. Independent 
 """
 
     # 2. LIVE SERVICE UNAVAILABLE, TIMED OUT, OR RETURNED UNEXPECTED/MALFORMED ERROR
-    reason = live_res["error"] or "Unknown service error"
+    reason = live_res.get("error") or "Unknown service error"
 
     if mock_audit:
         return f"""

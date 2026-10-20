@@ -566,7 +566,7 @@ class TestAgentInvocationAndToolRouting(unittest.TestCase):
         with patch.object(agent, "llm", mock_llm), patch.object(agent, "llm_with_tools", mock_binding):
             state = {
                 "messages": [
-                    HumanMessage(content="Why was my transaction blocked?")
+                    HumanMessage(content="Why was transaction TX1001 blocked?")
                 ]
             }
 
@@ -581,6 +581,18 @@ class TestAgentInvocationAndToolRouting(unittest.TestCase):
             response_msg = result["messages"][0]
             self.assertEqual(len(response_msg.tool_calls), 1)
             self.assertEqual(response_msg.tool_calls[0]["name"], "get_fraud_analysis")
+
+    def test_unresolved_fraud_query_asks_clarification(self):
+        """'Why was my transaction blocked?' must ask for clarification instead of defaulting to TX1001."""
+        state = {
+            "messages": [
+                HumanMessage(content="Why was my transaction blocked?")
+            ]
+        }
+        result = call_llm(state)
+        response_msg = result["messages"][0]
+        self.assertFalse(hasattr(response_msg, "tool_calls") and bool(response_msg.tool_calls))
+        self.assertIn("provide the transaction ID", response_msg.content)
 
     def test_audit_query_routes_to_audit_tool(self):
         """Blockchain ledger/audit verification questions should use get_blockchain_audit."""

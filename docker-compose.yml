@@ -220,6 +220,7 @@ services:
       PLATFORM_SERVICE_URL: http://platform:8100
       AUDIT_SERVICE_URL: http://component3:8002
       FRAUD_SERVICE_URL: http://component2:8001
+      PORTFOLIO_OPTIMIZATION_URL: http://component1:8000
     depends_on:
       ollama:
         condition: service_healthy
