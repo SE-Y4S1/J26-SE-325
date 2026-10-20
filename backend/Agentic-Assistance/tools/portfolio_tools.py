@@ -69,12 +69,24 @@ DEFAULT_PORTFOLIO_ID = os.getenv("PORTFOLIO_ID", "1")
 DEFAULT_USER_ID = os.getenv("PLATFORM_USER_ID", os.getenv("DEFAULT_USER_ID", "1"))
 
 
+def get_component1_url() -> str:
+    """Resolve Component 1 service URL from environment or fallback default."""
+    val = (
+        os.getenv("PORTFOLIO_OPTIMIZATION_URL")
+        or os.getenv("COMPONENT1_SERVICE_URL")
+        or os.getenv("COMPONENT1_URL")
+        or COMPONENT1_SERVICE_URL
+    )
+    return str(val).rstrip("/")
+
+
 def query_component1_health(timeout: float = 1.0) -> dict:
     """
     Query Component 1 (Portfolio-Optimization service) health, model status, and available forecasters.
     Returns status dict without raising exceptions.
     """
-    url = f"{COMPONENT1_SERVICE_URL}/health"
+    base_url = get_component1_url()
+    url = f"{base_url}/health"
     try:
         req = urllib.request.Request(
             url,
@@ -88,7 +100,7 @@ def query_component1_health(timeout: float = 1.0) -> dict:
                 "model_version": data.get("model_version", "unregistered"),
                 "available_forecasters": data.get("available_forecasters", []),
                 "kafka_connected": data.get("kafka_connected", False),
-                "url": COMPONENT1_SERVICE_URL,
+                "url": base_url,
             }
     except Exception as exc:
         return {
@@ -97,7 +109,7 @@ def query_component1_health(timeout: float = 1.0) -> dict:
             "model_version": "unavailable",
             "available_forecasters": [],
             "kafka_connected": False,
-            "url": COMPONENT1_SERVICE_URL,
+            "url": base_url,
         }
 
 

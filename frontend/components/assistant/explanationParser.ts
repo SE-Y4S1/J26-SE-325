@@ -10,14 +10,14 @@ export interface ParsedShapItem {
 
 export interface ParsedFraudEvidence {
   hasEvidence: boolean;
-  provenanceType: "live" | "fallback" | "baseline";
+  provenanceType: "live" | "fallback" | "baseline" | "demo" | "not_found" | "unavailable";
   provenanceLabel: string;
   transactionId: string;
   amount?: number;
   currency: string;
   status: string;
   riskLevel: string;
-  fraudScore: number;
+  fraudScore?: number;
   prototypeProbability?: number;
   prototypePrediction?: string;
   reason: string;
@@ -29,6 +29,10 @@ export interface ParsedFraudEvidence {
     riskScore?: number;
     timestamp?: string;
   };
+  modelVersion?: string;
+  benchmarkModel?: boolean;
+  unavailableSignals?: string[];
+  retrievalTimestamp?: string;
 }
 
 export interface ParsedAuditEvidence {
@@ -77,43 +81,91 @@ export interface ParsedSessionEvidence {
 }
 
 export function parseFraudResult(text: string): ParsedFraudEvidence {
-  // Safe provenance derivation from actual text content:
-  // If the text contains explicit fallback indicators, it must NEVER be classified as live.
-  const isFallback =
+  const isNotFound = /RECORD NOT FOUND|SERVICE UNAVAILABLE|RECORD_NOT_FOUND|SERVICE_UNAVAILABLE|No verified live fraud record exists/i.test(text);
+  const isDemo = /DEMO \/ SYNTHETIC|DEMO SYNTHETIC|EXPLICIT DEMO MODE/i.test(text);
+  const isFallback = !isNotFound && !isDemo &&
     /FALLBACK MOCK DATA|Local mock baseline|FALLBACK NOTICE|NOT a live lookup result/i.test(text);
-
-  const isLive =
-    !isFallback &&
+  const isLive = !isFallback && !isNotFound && !isDemo &&
     Boolean(
       /LIVE COMPONENT 2 AUDIT RECORD/i.test(text) ||
-      /Live Component 2 Gateway Audit Log/i.test(text)
+      /Live Component 2 Gateway Audit Log/i.test(text) ||
+      /Live Component 2 Gateway Decision Store/i.test(text)
     );
 
-  const provenanceType: "live" | "fallback" | "baseline" = isLive
+  const txIdMatch = text.match(/Transaction ID:\s*([A-Za-z0-9_-]+)/i);
+  const txId = txIdMatch ? txIdMatch[1] : (isDemo ? MOCK_TRANSACTION.id : "TX1001");
+
+  if (isNotFound) {
+    const statusMatch = text.match(/Lookup Status:\s*([A-Za-z0-9_-]+)/i);
+    const lookupStatus = statusMatch ? statusMatch[1].toUpperCase() : "";
+    const isServiceError =
+      lookupStatus === "SERVICE_UNAVAILABLE" ||
+      (!lookupStatus && /Connection refused|Cannot connect|timed out|Service unavailable/i.test(text));
+    const detailMatch = text.match(/Live Service Detail:\s*([^\n\r]+)/i);
+    const reasonText = detailMatch
+      ? detailMatch[1].trim()
+      : isServiceError
+      ? "Component 2 live decision store is unreachable."
+      : `Transaction '${txId}' was not found in Component 2's live decision store.`;
+
+    return {
+      hasEvidence: true,
+      provenanceType: isServiceError ? "unavailable" : "not_found",
+      provenanceLabel: isServiceError
+        ? "Service Unavailable (Component 2 Fraud Decision Store)"
+        : "Record Not Found (Component 2 Live Gateway Decision Store)",
+      transactionId: txId,
+      amount: undefined,
+      currency: "LKR",
+      status: isServiceError ? "SERVICE_UNAVAILABLE" : "RECORD_NOT_FOUND",
+      riskLevel: "UNAVAILABLE",
+      fraudScore: undefined,
+      prototypeProbability: undefined,
+      prototypePrediction: undefined,
+      reason: reasonText,
+      factors: [],
+      shapContributions: [],
+      streamSignals: undefined,
+      modelVersion: undefined,
+      benchmarkModel: false,
+      unavailableSignals: [
+        "Fraud Score (Live lookup failed / no verified record)",
+        "Decision Status (Unavailable)",
+        "Device Signals (Unavailable)",
+        "Location Signals (Unavailable)",
+        "Amount Risk Assessment (Unavailable)",
+        "Biometrics / Telemetry (Unavailable)",
+      ],
+      retrievalTimestamp: new Date().toISOString(),
+    };
+  }
+
+  const provenanceType: "live" | "fallback" | "baseline" | "demo" = isLive
     ? "live"
+    : isDemo
+    ? "demo"
     : isFallback
     ? "fallback"
     : "baseline";
 
   const provenanceLabel = isLive
-    ? "Live Service Evidence (Component 2 Gateway Audit Log)"
+    ? "Live Service Evidence (Component 2 Gateway Decision Store)"
+    : isDemo
+    ? "Synthetic Demo Data (Explicit Demo Mode)"
     : "Fallback Mock Data (Component 4 Local Prototype)";
-
-  const txIdMatch = text.match(/Transaction ID:\s*([A-Za-z0-9_-]+)/i);
-  const txId = txIdMatch ? txIdMatch[1] : MOCK_TRANSACTION.id;
 
   const amountMatch = text.match(/Transaction Amount:\s*([A-Za-z]+)?\s*([0-9,]+(?:\.[0-9]+)?)/i);
   const amount = amountMatch
     ? parseFloat(amountMatch[2].replace(/,/g, ""))
     : isLive
     ? undefined
-    : txId === MOCK_TRANSACTION.id
+    : (isDemo || txId === MOCK_TRANSACTION.id)
     ? MOCK_TRANSACTION.amount
     : undefined;
   const currency = amountMatch?.[1] || "LKR";
 
   const scoreMatch = text.match(/Recorded Fraud Score:\s*([0-9.]+)/i);
-  const fraudScore = scoreMatch ? parseFloat(scoreMatch[1]) : MOCK_TRANSACTION.fraudScore;
+  const fraudScore = scoreMatch ? parseFloat(scoreMatch[1]) : (isDemo ? MOCK_TRANSACTION.fraudScore : undefined);
 
   const protoProbMatch = text.match(/Prototype fraud probability:\s*([0-9.]+)/i);
   const prototypeProbability = protoProbMatch ? parseFloat(protoProbMatch[1]) : undefined;
@@ -122,20 +174,38 @@ export function parseFraudResult(text: string): ParsedFraudEvidence {
   const prototypePrediction = protoPredMatch ? protoPredMatch[1].trim() : undefined;
 
   const statusMatch = text.match(/Recorded Status:\s*([A-Za-z0-9_-]+)/i);
-  const status = statusMatch ? statusMatch[1] : MOCK_TRANSACTION.status;
+  const status = statusMatch ? statusMatch[1] : (isDemo ? MOCK_TRANSACTION.status : "UNKNOWN");
 
   const riskMatch = text.match(/Recorded Risk Level:\s*([A-Za-z0-9_-]+)/i);
-  const riskLevel = riskMatch ? riskMatch[1] : MOCK_TRANSACTION.riskLevel;
+  const riskLevel = riskMatch ? riskMatch[1] : (isDemo ? MOCK_TRANSACTION.riskLevel : "UNKNOWN");
+
+  const modelVerMatch = text.match(/Model Version:\s*([A-Za-z0-9_.-]+)/i);
+  const modelVersion = modelVerMatch ? modelVerMatch[1].trim() : undefined;
+  const benchmarkModel =
+    (/trained bundle validated on a public benchmark/i.test(text) ||
+      /Benchmark Status:[^\n\r]*benchmark/i.test(text)) &&
+    !/NOT a benchmark/i.test(text);
+
+  const unavailableSignals: string[] = [];
+  if (/Device Signals:[^\n\r]*Unavailable/i.test(text)) {
+    unavailableSignals.push("Device Telemetry (Not retained in audit trail)");
+  }
+  if (/Location Signals:[^\n\r]*Unavailable/i.test(text)) {
+    unavailableSignals.push("Location Telemetry (Not retained in audit trail)");
+  }
+  if (/Amount Risk Assessment:[^\n\r]*Unavailable/i.test(text)) {
+    unavailableSignals.push("Amount Risk Threshold (Not retained in audit trail)");
+  }
 
   const factorsSection = text.match(
-    /RECORDED CONTRIBUTING FACTORS:\s*([\s\S]*?)(?=(?:COMPONENT 2|LOCAL SHAP|TRANSACTION TELEMETRY|LIMITATION|$))/i
+    /(?:RECORDED CONTRIBUTING FACTORS|DECISION RULES & REASONING|FEATURE ATTRIBUTIONS & CONTRIBUTING FACTORS):\s*([\s\S]*?)(?=(?:COMPONENT 2|LOCAL SHAP|TRANSACTION TELEMETRY|SIGNALS|LIMITATION|$))/i
   );
   const factors: string[] = [];
   if (factorsSection?.[1]) {
     const lines = factorsSection[1].split("\n");
     for (const l of lines) {
       const m = l.match(/^\s*-\s*(.+)/);
-      if (m && m[1].trim()) {
+      if (m && m[1].trim() && !m[1].startsWith("None returned")) {
         factors.push(m[1].trim());
       }
     }
@@ -144,7 +214,7 @@ export function parseFraudResult(text: string): ParsedFraudEvidence {
   // Extract SHAP contributions ONLY when actually present in this evidence
   const shapSection = text.match(/SHAP CONTRIBUTIONS:\s*([\s\S]*?)(?=(?:LIMITATION|$))/i);
   const shapContributions: ParsedShapItem[] = [];
-  if (shapSection?.[1]) {
+  if (shapSection?.[1] && (isDemo || !isLive)) {
     const lines = shapSection[1].split("\n");
     for (const l of lines) {
       const m = l.match(/-\s*([A-Za-z0-9_-]+):\s*SHAP value\s*=\s*([0-9.-]+)(?:;\s*(.*))?/i);
@@ -174,8 +244,8 @@ export function parseFraudResult(text: string): ParsedFraudEvidence {
   if (isLive) {
     const behMatch = text.match(/Behavioral Stream Anomaly Score[^:]*:\s*([0-9.]+)/i);
     const relMatch = text.match(/Relational Stream Risk Score[^:]*:\s*([0-9.]+)/i);
-    const fusedMatch = text.match(/Fused Final Risk Score:\s*([0-9.]+)/i);
-    const timeMatch = text.match(/Audit Timestamp:\s*([^\n\r]+)/i);
+    const fusedMatch = text.match(/(?:Fused Final Risk Score|Combined Risk Score)[^:]*:\s*([0-9.]+)/i);
+    const timeMatch = text.match(/(?:Audit Timestamp|Decision Timestamp):\s*([^\n\r]+)/i);
 
     streamSignals = {
       behavioralScore: behMatch ? parseFloat(behMatch[1]) : undefined,
@@ -184,6 +254,9 @@ export function parseFraudResult(text: string): ParsedFraudEvidence {
       timestamp: timeMatch ? timeMatch[1].trim() : undefined,
     };
   }
+
+  const timeMatch = text.match(/(?:Audit Timestamp|Decision Timestamp):\s*([^\n\r]+)/i);
+  const retrievalTimestamp = timeMatch ? timeMatch[1].trim() : new Date().toISOString();
 
   return {
     hasEvidence: true,
@@ -197,10 +270,14 @@ export function parseFraudResult(text: string): ParsedFraudEvidence {
     fraudScore,
     prototypeProbability,
     prototypePrediction,
-    reason: factors.join("; ") || "No specific factors recorded",
-    factors: factors.length > 0 ? factors : txId === MOCK_TRANSACTION.id ? MOCK_TRANSACTION.factors : [],
+    reason: factors.join("; ") || (isLive ? `Recorded Gateway Decision: ${status}` : "No specific factors recorded"),
+    factors: factors.length > 0 ? factors : isDemo ? MOCK_TRANSACTION.factors : [],
     shapContributions,
     streamSignals,
+    modelVersion,
+    benchmarkModel,
+    unavailableSignals,
+    retrievalTimestamp,
   };
 }
 

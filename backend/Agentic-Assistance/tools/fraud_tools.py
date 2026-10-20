@@ -146,18 +146,50 @@ def query_live_fraud_service(
 
 
 @tool
-def get_fraud_analysis(transaction_id: str = "TX1001") -> str:
+def get_fraud_analysis(transaction_id: str = "", demo_mode: bool = False) -> str:
     """
-    Retrieve fraud analysis and risk assessment for a transaction.
-    Attempts a safe read-only query against Component 2's live audit log,
-    falling back to mock data if the transaction is not found or the service is unavailable.
-
-    Use this tool when explaining a transaction's fraud risk.
-    If no ID is supplied, use TX1001.
+    Retrieve fraud analysis and risk assessment for a specific transaction ID.
+    Performs a safe read-only query against Component 2's live decision store (GET /v1/transactions/{id}).
+    
+    Parameters:
+    - transaction_id: The specific transaction identifier (e.g., 'PP1-DEMO-001', 'EXE-1', 'TX1001').
+      Must be provided. Never invent or assume a default transaction ID when none is specified.
+    - demo_mode: Set to True ONLY when explicitly requested for synthetic demonstration purposes.
     """
     prefs = get_current_preferences()
     explanation_enabled = prefs.get("explanation_enabled", True)
-    target_id = str(transaction_id).strip() if transaction_id else "TX1001"
+
+    raw_id = (transaction_id or "").strip()
+    if not raw_id:
+        req_id = get_request_transaction_id()
+        if req_id:
+            raw_id = req_id.strip()
+
+    from preferences_context import get_request_demo_mode
+    effective_demo_mode = bool(demo_mode or prefs.get("demo_mode", False) or get_request_demo_mode())
+
+    if not raw_id:
+        return (
+            "TRANSACTION ID REQUIRED:\n"
+            "No specific transaction ID was provided. Please specify the transaction ID "
+            "(for example, a TX... or execution ID) to inspect fraud analysis."
+        )
+
+    target_id = raw_id
+
+    # Authorization Check: if querying an execution ID (starts with EXE- / exe-)
+    from request_auth import get_caller_authorization
+    authorization = get_caller_authorization()
+    if target_id.upper().startswith("EXE-"):
+        from tools.execution_tools import query_execution_trace
+        trace_res = query_execution_trace(target_id)
+        if trace_res.get("available") and not trace_res.get("trace"):
+            reason = trace_res.get("reason", "")
+            return (
+                f"AUTHORIZATION DENIED:\n"
+                f"Execution '{target_id}' was not found or does not belong to the authenticated user "
+                f"({reason}). Unauthorized users cannot inspect another user's execution or fraud decision."
+            )
 
     from governance_store import default_governance_store
     gov_decision = default_governance_store.get_latest_decision(target_id)
@@ -178,7 +210,7 @@ HUMAN OVERSIGHT GOVERNANCE STATUS:
     if live_res.get("available") and live_res.get("entry") is not None:
         entry = live_res["entry"]
         tx_id = entry.get("transaction_id", target_id)
-        user_id = entry.get("user_id", "N/A")
+        user_id = entry.get("user_id", "not disclosed by Component 2")
         risk_score = float(entry.get("risk_score", 0.0))
         decision = str(entry.get("decision", "UNKNOWN"))
         reason = str(entry.get("reason", "No recorded reason"))
@@ -202,8 +234,9 @@ HUMAN OVERSIGHT GOVERNANCE STATUS:
 
         attack_line = f"- Tagged Scenario: {attack_type}\n" if attack_type else ""
         factor_lines = "\n".join(
-            f"- {f.get('name')}: contribution {float(f.get('contribution', 0.0)):+.4f} "
-            f"({'increases' if float(f.get('contribution', 0.0)) > 0 else 'decreases'} fraud risk)"
+            f"- {f.get('name')}: contribution {float(f.get('contribution', 0.0)):+.4f} ({'increases' if float(f.get('contribution', 0.0)) > 0 else 'decreases'} fraud risk)"
+            if isinstance(f, dict)
+            else f"- {f}"
             for f in top_factors
         ) or "- None returned (the untrained heuristic scores on amount and reputation only)"
         model_line = (
@@ -211,6 +244,34 @@ HUMAN OVERSIGHT GOVERNANCE STATUS:
             if benchmark_model
             else "NOT a benchmark model (untrained heuristic or unvalidated bundle)"
         )
+
+        reason_lower = reason.lower()
+        has_device_rule = "device" in reason_lower
+        has_location_rule = "location" in reason_lower or "ip" in reason_lower
+        has_amount_factor = any(
+            isinstance(f, dict) and f.get("name") in ("TransactionAmt", "amount")
+            for f in top_factors
+        )
+
+        device_signal_desc = (
+            f"Supported by recorded rule ({reason})"
+            if has_device_rule
+            else "Unavailable (device fingerprint and new-device telemetry not collected or retained in gateway audit trail)"
+        )
+        location_signal_desc = (
+            f"Supported by recorded rule ({reason})"
+            if has_location_rule
+            else "Unavailable (geographic location and IP coordinates not collected or retained in gateway audit trail)"
+        )
+        amt_factor_parts = [
+            f"{f.get('name')}: {float(f.get('contribution', 0.0)):+.4f}"
+            for f in top_factors
+            if isinstance(f, dict) and f.get("name") in ("TransactionAmt", "amount")
+        ]
+        if has_amount_factor and amt_factor_parts:
+            amount_signal_desc = f"Evaluated by gateway risk model / feature attribution ({', '.join(amt_factor_parts)})"
+        else:
+            amount_signal_desc = "Evaluated during gateway ingestion; threshold details not retained in audit trail"
 
         return f"""
 FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD
@@ -247,8 +308,11 @@ COMPONENT 2 DUAL-STREAM MODEL SIGNALS:
 COMPONENT 2 FEATURE ATTRIBUTIONS (the engine's own linear attributions, largest first):
 {factor_lines}
 
-TRANSACTION TELEMETRY NOTE:
-Raw transaction telemetry (amount, device fingerprint, geographic location, keystroke dynamics) is evaluated during ingestion and is not retained in the gateway audit trail.
+GENUINE SIGNALS & TELEMETRY STATUS:
+- Device Signals: {device_signal_desc}
+- Location Signals: {location_signal_desc}
+- Amount Risk Assessment: {amount_signal_desc}
+- Keystroke Dynamics / Biometrics: Unavailable (not collected or retained)
 
 MODEL PROVENANCE & EXPLANATION NOTICE:
 - The fraud score ({risk_score:.4f}) and decision ({decision}) were produced by Component 2's dual-stream engine and deterministic security gateway.
@@ -257,16 +321,55 @@ MODEL PROVENANCE & EXPLANATION NOTICE:
 - Probability calibration not established.
 {gov_section}"""
 
-    # 2. FALLBACK TO MOCK DATA (SERVICE OFFLINE, NOT FOUND, TIMED OUT, OR MALFORMED)
+    # 2. RECORD NOT FOUND OR LIVE SERVICE UNAVAILABLE
     fallback_reason = live_res.get("reason") or "Live Component 2 service returned no record"
 
+    if not effective_demo_mode:
+        status_label = "RECORD_NOT_FOUND" if live_res.get("status_code") == 404 else "SERVICE_UNAVAILABLE"
+        return f"""
+FRAUD ANALYSIS — RECORD NOT FOUND / SERVICE UNAVAILABLE
+
+Data Source:
+Component 2 Live Gateway Decision Store ({FRAUD_SERVICE_URL}/v1/transactions).
+
+Transaction ID:
+{target_id}
+
+Lookup Status:
+{status_label}
+
+Live Service Detail:
+{fallback_reason}
+
+Recorded Fraud Score:
+Unavailable (no verified live decision)
+
+Recorded Risk Level:
+Unavailable
+
+Recorded Status:
+Unavailable
+
+SIGNALS & TELEMETRY STATUS:
+- Device Signals: Unavailable
+- Location Signals: Unavailable
+- Amount Risk Assessment: Unavailable
+- Keystroke Dynamics / Biometrics: Unavailable
+
+EXPLANATION NOTICE:
+No verified live fraud record exists for transaction '{target_id}' in Component 2's decision store ({fallback_reason}).
+FinTrust Assistant does not substitute mock fallback data or fabricate fraud scores for unknown transactions.
+If you wish to view synthetic baseline demonstration data, please request demo mode explicitly.
+{gov_section}"""
+
+    # 3. EXPLICIT DEMO MODE ONLY (VISIBLY LABELLED SYNTHETIC DEMO SPECIFICATION)
     data = load_data()
     transaction = data.get("transactions", {}).get(target_id)
 
     if transaction is None:
         return (
-            f"No transaction was found for ID '{target_id}' in either live Component 2 "
-            f"audit records or fallback mock data. (Live service note: {fallback_reason})"
+            f"No demo transaction was found for ID '{target_id}' in local synthetic demonstration data. "
+            f"(Live service note: {fallback_reason})"
         )
 
     reasons = transaction.get("reasons", [])
@@ -305,7 +408,7 @@ MODEL PROVENANCE & EXPLANATION NOTICE:
             for item in shap_result["shap_explanation"]
         )
 
-        shap_section = f"""LOCAL SHAP PROTOTYPE — NOT THE TEAM MODEL
+        shap_section = f"""LOCAL SHAP PROTOTYPE — NOT THE PRODUCTION MODEL
 
 Prototype prediction:
 {shap_result["prediction"]}
@@ -338,35 +441,39 @@ These results are baseline mock evidence, not verified production output.
 Probability calibration not established."""
 
     return f"""
-FRAUD ANALYSIS — FALLBACK MOCK DATA
+FRAUD ANALYSIS — DEMO / SYNTHETIC SPECIFICATION (EXPLICIT DEMO MODE)
 
 Data Source:
-Local mock baseline (mock_financial_data.json).
-Live service status ({FRAUD_SERVICE_URL}): {fallback_reason}.
+Local mock baseline (mock_financial_data.json) — DEMO MODE EXPLICITLY ENABLED.
+Live Component 2 status ({FRAUD_SERVICE_URL}): {fallback_reason}.
 
-FALLBACK NOTICE:
-This is FALLBACK MOCK DATA because the live Component 2 service did not provide a record for {target_id}.
-Reason: {fallback_reason}.
-This record is NOT a live lookup result from Component 2.
+DEMO NOTICE:
+This is SYNTHETIC DEMO EVIDENCE for demonstration purposes only.
+It is NOT live transaction evidence from Component 2 and does NOT represent an authenticated user transaction.
 
 Transaction ID:
-{target_id}
+{target_id} [DEMO]
 
 Transaction Amount:
-LKR {amount_lkr:,.2f}
+LKR {amount_lkr:,.2f} (Demo Baseline)
 
 Recorded Fraud Score:
-{transaction["fraud_score"]}
+{transaction["fraud_score"]} (Demo Baseline)
 
 Recorded Risk Level:
-{transaction["risk_level"]}
+{transaction["risk_level"]} (Demo Baseline)
 
 Recorded Status:
-{transaction["status"]}
+{transaction["status"]} (Demo Baseline)
 
 RECORDED CONTRIBUTING FACTORS:
 {reasons_text}
 
+SIGNALS & TELEMETRY NOTE:
+Device and location inputs were inferred from mock demo labels for prototype demonstration.
+They are not verified real-world telemetry observations.
+
 {shap_section}
 {gov_section}"""
+
 

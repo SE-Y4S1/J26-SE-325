@@ -62,6 +62,17 @@ export const MOCK_WORKFLOW_STEPS: WorkflowStep[] = [
   { id: "10", name: "Trust Panel", description: "Dispatched to human-in-the-loop oversight interface", status: "completed" },
 ];
 
+export const INITIAL_ASSISTANT_MESSAGES: ChatMessage[] = [
+  {
+    id: "welcome_init",
+    sender: "assistant",
+    text: "Hello! I am FinTrust Assistant, your financial decision-support companion. I can help analyze your portfolio holdings, explain transaction fraud decisions from Component 2, or verify blockchain audit records. How can I assist you today?",
+    timestamp: "Just now",
+    hasWhyButton: false,
+    hasTrustPanelButton: false,
+  },
+];
+
 export const MOCK_INITIAL_MESSAGES: ChatMessage[] = [
   {
     id: "m1",
