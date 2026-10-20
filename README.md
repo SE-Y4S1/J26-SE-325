@@ -270,7 +270,7 @@ JWT_SECRET=... AUTH_REQUIRED=true uv run uvicorn service.api:app --port 8000
 
 # components 2-4
 cd backend/Fraud-Detection      && pip install -r requirements.txt && FRAUD_API_PORT=8001 python scripts/run_api.py
-cd backend/Blockchain-Auditability/backend && npm install && PORT=8002 node src/index.js
+cd backend/Blockchain-Auditability && npm install && PORT=8002 node src/index.js
 cd backend/Agentic-Assistance   && pip install -r requirements.txt && uvicorn main:app --port 8003
 
 # frontend
@@ -737,10 +737,8 @@ backend/
     docker/                   Dockerfile, Prometheus config
     tests/
   Fraud-Detection/          Component 2 (src/fraud_engine: models, gateway, api, evaluation; experiments)
-  Blockchain-Auditability/  Component 3
-    backend/                  Express API (policy, hashing, ledger adapter)
-    blockchain/               AuditRegistry.sol, Hardhat config, tests
-    frontend/                 standalone Vite demo UI
+  Blockchain-Auditability/  Component 3 (src/ Express API: policy, hashing, ledger adapter; tests/;
+                              blockchain/ AuditRegistry.sol + Hardhat; scripts/). UI: frontend/app/(platform)/audit
   Agentic-Assistance/       Component 4 (agent, tools, xai, responsible_ai)
 frontend/                   Next.js 16 web app (app/, components/, lib/api/, e2e/)
 docs/                       TAF and research documents
@@ -855,11 +853,11 @@ Next.js version differs from older guides.
 | Component 1 (pytest) | 636 collected | `cd backend/Portfolio-Optimization && uv run pytest -q` |
 | Platform (pytest) | 64 | `cd backend/Platform && uv run pytest -q` |
 | Component 2 (pytest) | 33 | `cd backend/Fraud-Detection && pytest -q` |
-| Component 3 backend (Jest) | 28 | `cd backend/Blockchain-Auditability/backend && npm test` |
+| Component 3 backend (Jest) | 34 | `cd backend/Blockchain-Auditability && npm test` |
 | Component 4 (pytest) | 107 | `cd backend/Agentic-Assistance && pytest -q tests` |
 | Frontend unit (Jest) | 53 | `cd frontend && npm test` |
 | Frontend end-to-end (Playwright) | | `npm run test:e2e` |
-| Contract (Hardhat) | | `cd backend/Blockchain-Auditability/blockchain && npx hardhat test` |
+| Contract (Hardhat) | 12 | `cd backend/Blockchain-Auditability/blockchain && npx hardhat test` |
 
 * Playwright runs against the **real** Platform and Component 1 services, which it starts
   itself; it does not use mocks.

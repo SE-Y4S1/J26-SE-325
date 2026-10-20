@@ -111,7 +111,7 @@ export default function AuditPage() {
             <Notice tone="info" title="Audit bridge is not running">
               Start it with <code>docker compose up component3</code>, or{" "}
               <code>node src/index.js</code> from{" "}
-              <code>backend/Blockchain-Auditability/backend</code>. Every other screen works without
+              <code>backend/Blockchain-Auditability</code>. Every other screen works without
               it.
             </Notice>
           )}

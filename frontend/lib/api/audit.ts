@@ -2,7 +2,7 @@
  * Component 3 — Privacy-Preserving AI-to-Smart-Contract Audit Bridge (Abeysekara W C S M).
  *
  * An Express service, not FastAPI, so there is no OpenAPI document to generate from. Routes
- * mirror `backend/Blockchain-Auditability/backend/src/routes/auditRoutes.js`.
+ * mirror `backend/Blockchain-Auditability/src/routes/auditRoutes.js`.
  */
 
 import { request } from "./client";

@@ -1,7 +1,7 @@
 const hre = require("hardhat");
 const fs = require("fs");
 const path = require("path");
-const { computePolicyHash } = require("../../backend/src/services/policyDefinition");
+const { computePolicyHash } = require("../../src/services/policyDefinition");
 
 async function main() {
   console.log("=============================================================");
@@ -37,7 +37,7 @@ async function main() {
     artifact = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
   }
 
-  const backendConfigDir = path.join(__dirname, "../../backend/src/config");
+  const backendConfigDir = path.join(__dirname, "../../src/config");
   if (!fs.existsSync(backendConfigDir)) {
     fs.mkdirSync(backendConfigDir, { recursive: true });
   }

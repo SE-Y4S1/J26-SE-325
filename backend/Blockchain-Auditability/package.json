@@ -11,6 +11,10 @@
     "dev": "cross-env PORT=8002 node src/index.js",
     "test": "jest --runInBand --detectOpenHandles --forceExit"
   },
+  "jest": {
+    "roots": ["<rootDir>/tests"],
+    "testEnvironment": "node"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "cross-env": "^7.0.3",

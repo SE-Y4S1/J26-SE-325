@@ -1,6 +1,6 @@
 # Component 03 — Privacy-Preserving AI-to-Smart-Contract Audit Bridge
 
-**Owner:** Abeysekara W.C.S.M · **Backend Port:** 8002 · **Frontend Port:** 3001 · **Status:** Operational
+**Owner:** Abeysekara W.C.S.M · **Backend Port:** 8002 · **UI:** shared Nexa app, `frontend/app/(platform)/audit` · **Status:** Operational
 
 > **Sub-objective (TAF):** Design a privacy-preserving, tamper-evident blockchain audit layer that bridges continuous AI decisions to deterministic on-chain smart contract enforcement.
 
@@ -39,17 +39,17 @@ Component 3 bridges AI decision evaluation outputs (such as fraud detection, ris
 - **Write-Once Enforcement:** Custom errors (`InvalidAuditId`, `InvalidRecordHash`, `PolicyNotActive`, `AuditAlreadyExists`) guarantee records cannot be overwritten, modified, or deleted once mined.
 - **Policy Registry:** Ensures an audit commitment can only be anchored if its evaluated policy specification (`policyHash`) is registered and active.
 
-### B. Cryptographic Hash Service (`backend/src/services/hashService.js`)
+### B. Cryptographic Hash Service (`src/services/hashService.js`)
 - **Salt Generation:** Generates cryptographically secure 32-byte random hex salts.
 - **Pseudonymous Audit ID:** `auditId = "0x" + sha256(transactionId + ":" + salt)`. Prevents on-chain transaction correlation.
 - **Deterministic Canonical Serialization:** Canonical JSON string sorting 16 fields alphabetically to guarantee cross-platform hash determinism.
 
-### C. Persistent Storage (`backend/src/db/database.js`)
+### C. Persistent Storage (`src/db/database.js`)
 - **Durable SQLite Storage:** Operates in `WAL` mode (`journal_mode = WAL`) with prepared statements.
 - **Dual-Engine Adapter:** Supports both Node.js built-in `node:sqlite` (Node 22+) and `better-sqlite3` (Node 20 / Linux containers) transparently.
 - **Data Protection:** API responses mask cryptographic salts (`saltMasked: "a1b2c3d4…"`) while storing the full salt securely off-chain.
 
-### D. Strict Verification Engine (`backend/src/services/auditService.js`)
+### D. Strict Verification Engine (`src/services/auditService.js`)
 Evaluates integrity against 5 discrete states:
 1. `VERIFIED_ON_CHAIN`: Calculated hash matches the immutable on-chain smart contract commitment.
 2. `VERIFIED_SIMULATED`: Validated against mock adapter when `BLOCKCHAIN_MODE=mock`.
@@ -99,17 +99,18 @@ npx hardhat run scripts/deploy.js --network localhost
 
 ### Step 3: Start the Backend Service
 ```bash
-cd backend/Blockchain-Auditability/backend
+cd backend/Blockchain-Auditability
 npm start
 ```
 *Backend runs on `http://localhost:8002`.*
 
-### Step 4: Start the Frontend UI
+### Step 4: Open the UI
+The audit console is part of the shared Nexa web app:
 ```bash
-cd backend/Blockchain-Auditability/frontend
+cd frontend
 npm run dev
 ```
-*Frontend runs on `http://localhost:3001` (proxies `/api` requests to `8002`).*
+*Open `http://localhost:3000/audit` (the browser calls this service on `8002` directly).*
 
 ---
 
@@ -124,7 +125,7 @@ npx hardhat test
 
 ### Running Backend Unit & E2E Integration Tests
 ```bash
-cd backend/Blockchain-Auditability/backend
+cd backend/Blockchain-Auditability
 npm test
 ```
 *Result: 22 passing tests covering deterministic hashing, duplicate prevention (HTTP 409), human review flows, and tamper detection.*
