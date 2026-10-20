@@ -252,24 +252,35 @@ export default function SimulatorPage({ onDecisionComplete }) {
                     </div>
                   </div>
 
-                  {/* Hash Commitment */}
-                  <div className="bg-slate-900/80 p-3.5 rounded-xl border border-slate-800 space-y-1">
+                  {/* Pseudonymous On-Chain Audit ID */}
+                  <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-800 space-y-1">
                     <span className="text-[11px] text-slate-400 block font-sans font-medium flex items-center space-x-1">
-                      <Hash className="w-3.5 h-3.5 text-purple-400" />
-                      <span>Deterministic SHA-256 Hash Commitment</span>
+                      <Lock className="w-3.5 h-3.5 text-purple-400" />
+                      <span>Pseudonymous Audit ID (bytes32)</span>
                     </span>
                     <p className="text-[11px] text-purple-300 break-all select-all font-bold">
-                      {result.record.hash}
+                      {result.record.auditId}
+                    </p>
+                  </div>
+
+                  {/* Hash Commitment */}
+                  <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-800 space-y-1">
+                    <span className="text-[11px] text-slate-400 block font-sans font-medium flex items-center space-x-1">
+                      <Hash className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Deterministic SHA-256 Hash Commitment</span>
+                    </span>
+                    <p className="text-[11px] text-emerald-300 break-all select-all font-bold">
+                      {result.record.recordHash || result.record.hash}
                     </p>
                   </div>
 
                   {/* Blockchain Transaction ID */}
-                  <div className="bg-slate-900/80 p-3.5 rounded-xl border border-slate-800 space-y-1">
+                  <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-800 space-y-1">
                     <span className="text-[11px] text-slate-400 block font-sans font-medium">
-                      Blockchain Transaction ID
+                      Smart Contract Transaction Hash
                     </span>
                     <p className="text-[11px] text-blue-300 break-all select-all">
-                      {result.record.blockchainTransactionId}
+                      {result.record.blockchainTxId || result.record.blockchainTransactionId || 'RECORDED'}
                     </p>
                   </div>
 

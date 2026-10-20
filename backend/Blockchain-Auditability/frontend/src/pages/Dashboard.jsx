@@ -198,7 +198,7 @@ export default function Dashboard({ setActiveTab, setSelectedTxForVerify }) {
                       {rec.modelVersion} / {rec.policyId}-v{rec.policyVersion}
                     </td>
                     <td className="py-3.5 px-3 text-purple-300 text-[11px]">
-                      {rec.hash?.substring(0, 16)}...
+                      {(rec.recordHash || rec.hash)?.substring(0, 16)}...
                     </td>
                     <td className="py-3.5 px-3 text-right">
                       <button

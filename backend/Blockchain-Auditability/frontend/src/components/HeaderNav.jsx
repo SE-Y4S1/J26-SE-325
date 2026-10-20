@@ -2,7 +2,7 @@ import React from 'react';
 import { Shield, Cpu, Database, Binary, Activity, Layers, Lock } from 'lucide-react';
 
 export default function HeaderNav({ activeTab, setActiveTab, stats }) {
-  const isHardhatLive = stats?.blockchainStatus?.isLiveNetwork;
+  const isHardhatLive = stats?.blockchainStatus && !stats.blockchainStatus.isMock;
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: Activity },
