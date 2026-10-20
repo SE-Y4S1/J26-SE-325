@@ -27,6 +27,32 @@ function loadSqliteEngine() {
 // Component 2's enforced decision and Component 1's plan hash; see hashService.
 const PROVENANCE_COLUMNS = ["upstreamSource", "upstreamDecision", "upstreamModelVersion", "planHash"];
 
+// Schema v2 (record v2: assurance result, decision-time anchoring, linked review commitment).
+// All nullable and added in place, so every v1 row stays valid and v1 code ignores them.
+const V2_COLUMNS = {
+  recordVersion: "INTEGER",
+  decisionFinalDecision: "TEXT",
+  assurance: "TEXT",
+  subjectRef: "TEXT",
+  reviewAuditId: "TEXT",
+  reviewRecordHash: "TEXT",
+  parentRecordHash: "TEXT",
+  reviewerKind: "TEXT",
+  reviewerRef: "TEXT",
+  reviewReason: "TEXT",
+  reviewBlockchainTxId: "TEXT",
+  reviewBlockNumber: "INTEGER"
+};
+// Written once, when the decision is created; never by an update.
+const IMMUTABLE_V2 = ["recordVersion", "decisionFinalDecision", "assurance", "subjectRef"];
+const REVIEW_V2 = Object.keys(V2_COLUMNS).filter((c) => !IMMUTABLE_V2.includes(c));
+
+const SCHEMA_VERSION = 2;
+
+// Fields the tamper-evidence demonstration may alter. reviewerDecision exercises the review
+// commitment of a v2 record.
+const TAMPERABLE_FIELDS = ["riskScore", "confidence", "amount", "finalDecision", "aiDecision", "reviewerDecision"];
+
 const { DuplicateTransactionError } = require("./errors");
 
 class AuditDatabase {
@@ -104,6 +130,52 @@ class AuditDatabase {
         this.db.exec(`ALTER TABLE audits ADD COLUMN ${column} TEXT`);
       }
     }
+
+    this.db.exec("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    const row = this.db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get();
+    const from = row ? Number(row.value) : 1;
+    this.migration = { from, to: Math.max(from, SCHEMA_VERSION), backupPath: null };
+    if (from < 2) {
+      this.migrateToV2(columns);
+    }
+  }
+
+  /**
+   * v1 -> v2. Additive only: new nullable columns and two new tables; no existing value is
+   * rewritten. A file database holding records is first copied with VACUUM INTO (consistent
+   * even under WAL) to <db>.bak-v1-<timestamp>, which scripts/db-rollback.js restores.
+   */
+  migrateToV2(columns) {
+    const rowCount = this.db.prepare("SELECT COUNT(*) AS n FROM audits").get().n;
+    if (rowCount > 0 && this.dbPath !== ":memory:") {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const backupPath = `${this.dbPath}.bak-v1-${stamp}`;
+      this.db.exec(`VACUUM INTO '${backupPath.replace(/'/g, "''")}'`);
+      this.migration.backupPath = backupPath;
+    }
+    this.db.exec("BEGIN");
+    try {
+      for (const [column, type] of Object.entries(V2_COLUMNS)) {
+        if (!columns.has(column)) {
+          this.db.exec(`ALTER TABLE audits ADD COLUMN ${column} ${type}`);
+        }
+      }
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_audits_reviewAuditId ON audits(reviewAuditId);
+        CREATE TABLE IF NOT EXISTS evidence_exports (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          transactionId TEXT NOT NULL,
+          actorRef TEXT NOT NULL,
+          exportedAt TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_evidence_exports_tx ON evidence_exports(transactionId);
+      `);
+      this.db.prepare("INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   prepareStatements() {
@@ -116,7 +188,8 @@ class AuditDatabase {
           transactionType, reason, timestamp, reviewedAt, blockchainTxId,
           blockNumber, verificationStatus, isTampered, tamperedAt, tamperedField,
           previousValue, lastVerifiedAt, createdAt, updatedAt,
-          upstreamSource, upstreamDecision, upstreamModelVersion, planHash
+          upstreamSource, upstreamDecision, upstreamModelVersion, planHash,
+          ${Object.keys(V2_COLUMNS).join(", ")}
         ) VALUES (
           @transactionId, @auditId, @salt, @policyHash, @recordHash,
           @policyId, @policyVersion, @modelVersion, @aiDecision, @finalDecision,
@@ -124,7 +197,8 @@ class AuditDatabase {
           @transactionType, @reason, @timestamp, @reviewedAt, @blockchainTxId,
           @blockNumber, @verificationStatus, @isTampered, @tamperedAt, @tamperedField,
           @previousValue, @lastVerifiedAt, @createdAt, @updatedAt,
-          @upstreamSource, @upstreamDecision, @upstreamModelVersion, @planHash
+          @upstreamSource, @upstreamDecision, @upstreamModelVersion, @planHash,
+          ${Object.keys(V2_COLUMNS).map((c) => `@${c}`).join(", ")}
         )
       `),
       update: this.db.prepare(`
@@ -142,8 +216,15 @@ class AuditDatabase {
           tamperedField = @tamperedField,
           previousValue = @previousValue,
           lastVerifiedAt = @lastVerifiedAt,
-          updatedAt = @updatedAt
+          updatedAt = @updatedAt,
+          ${REVIEW_V2.map((c) => `${c} = @${c}`).join(",\n          ")}
         WHERE transactionId = @transactionId
+      `),
+      logExport: this.db.prepare(`
+        INSERT INTO evidence_exports (transactionId, actorRef, exportedAt) VALUES (?, ?, ?)
+      `),
+      getExports: this.db.prepare(`
+        SELECT actorRef, exportedAt FROM evidence_exports WHERE transactionId = ? ORDER BY id
       `),
       getByTxId: this.db.prepare(`
         SELECT * FROM audits WHERE transactionId = ?
@@ -162,7 +243,7 @@ class AuditDatabase {
 
   formatRow(row) {
     if (!row) return null;
-    return {
+    const out = {
       ...row,
       reviewRequired: Boolean(row.reviewRequired),
       isTampered: Boolean(row.isTampered),
@@ -170,6 +251,26 @@ class AuditDatabase {
       riskScore: Number(row.riskScore),
       confidence: Number(row.confidence)
     };
+    // v1 rows: drop the v2 columns rather than surface a dozen nulls, so a v1 record reads
+    // exactly as it did before the migration.
+    if (row.recordVersion === null || row.recordVersion === undefined) {
+      for (const column of Object.keys(V2_COLUMNS)) delete out[column];
+    } else {
+      out.recordVersion = Number(row.recordVersion);
+      out.assurance = row.assurance ? JSON.parse(row.assurance) : null;
+    }
+    return out;
+  }
+
+  v2Payload(record, columns) {
+    const out = {};
+    for (const column of columns) {
+      const value = record[column];
+      if (value === undefined || value === null) out[column] = null;
+      else if (column === "assurance") out[column] = typeof value === "string" ? value : JSON.stringify(value);
+      else out[column] = value;
+    }
+    return out;
   }
 
   toInsertPayload(record) {
@@ -207,7 +308,8 @@ class AuditDatabase {
       upstreamSource: record.upstreamSource || null,
       upstreamDecision: record.upstreamDecision || null,
       upstreamModelVersion: record.upstreamModelVersion || null,
-      planHash: record.planHash || null
+      planHash: record.planHash || null,
+      ...this.v2Payload(record, Object.keys(V2_COLUMNS))
     };
   }
 
@@ -228,7 +330,8 @@ class AuditDatabase {
       tamperedField: record.tamperedField || null,
       previousValue: record.previousValue !== undefined ? String(record.previousValue) : null,
       lastVerifiedAt: record.lastVerifiedAt || null,
-      updatedAt: now
+      updatedAt: now,
+      ...this.v2Payload(record, REVIEW_V2)
     };
   }
 
@@ -290,8 +393,16 @@ class AuditDatabase {
     return { success: true, message: "All off-chain SQLite audit records cleared successfully." };
   }
 
+  logEvidenceExport(transactionId, actorRef) {
+    this.stmts.logExport.run(transactionId, actorRef, new Date().toISOString());
+  }
+
+  getEvidenceExports(transactionId) {
+    return this.stmts.getExports.all(transactionId).map((r) => ({ actorRef: r.actorRef, exportedAt: r.exportedAt }));
+  }
+
   tamperRecord(transactionId, fieldToTamper, tamperedValue) {
-    const allowedFields = ["riskScore", "confidence", "amount", "finalDecision", "aiDecision"];
+    const allowedFields = TAMPERABLE_FIELDS;
     if (!allowedFields.includes(fieldToTamper)) {
       throw new Error(`Field '${fieldToTamper}' is not allowed for tampering simulation.`);
     }
@@ -364,5 +475,7 @@ module.exports = {
   AuditDatabase,
   DuplicateTransactionError,
   getDatabase,
-  useDatabase
+  useDatabase,
+  SCHEMA_VERSION,
+  TAMPERABLE_FIELDS
 };

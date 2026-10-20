@@ -15,7 +15,10 @@ const { DuplicateTransactionError } = require("./errors");
  */
 
 
-const TAMPERABLE_FIELDS = ["riskScore", "confidence", "amount", "finalDecision", "aiDecision"];
+const TAMPERABLE_FIELDS = ["riskScore", "confidence", "amount", "finalDecision", "aiDecision", "reviewerDecision"];
+
+// Record v2 fields fixed when the decision is created; an update never changes them.
+const IMMUTABLE_V2 = ["recordVersion", "decisionFinalDecision", "assurance", "subjectRef"];
 
 class PostgresAuditDatabase {
   /** `pool` is for tests: an in-process Postgres (pg-mem) stands in for a server. */
@@ -43,7 +46,23 @@ class PostgresAuditDatabase {
         audit_id TEXT PRIMARY KEY,
         entry JSONB NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS audit_schema_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS audit_evidence_exports (
+        id SERIAL PRIMARY KEY,
+        transaction_id TEXT NOT NULL,
+        actor_ref TEXT NOT NULL,
+        exported_at TEXT NOT NULL
+      );
     `);
+    // Schema v2 needs no change to audit_records: each record is stored whole as JSONB, so the
+    // v2 fields live inside it and v1 rows are left exactly as they were. Nothing to back up.
+    const { rows } = await this.pool.query("SELECT value FROM audit_schema_meta WHERE key = 'schema_version'");
+    if (!rows.length) {
+      await this.pool.query("INSERT INTO audit_schema_meta (key, value) VALUES ('schema_version', '2')");
+    }
   }
 
   async query(text, params) {
@@ -105,7 +124,11 @@ class PostgresAuditDatabase {
     if (!existing) {
       throw new Error(`Record ${record.transactionId} not found for update`);
     }
-    const row = this.normalise({ ...existing, ...record }, existing);
+    const merged = { ...existing, ...record };
+    if (existing.recordVersion !== undefined && existing.recordVersion !== null) {
+      for (const field of IMMUTABLE_V2) merged[field] = existing[field];
+    }
+    const row = this.normalise(merged, existing);
     await this.query("UPDATE audit_records SET record = $2 WHERE transaction_id = $1", [row.transactionId, row]);
     return this.getRecord(record.transactionId);
   }
@@ -133,6 +156,21 @@ class PostgresAuditDatabase {
   async clearAllRecords() {
     await this.query("DELETE FROM audit_records");
     return { success: true, message: "All off-chain audit records cleared successfully." };
+  }
+
+  async logEvidenceExport(transactionId, actorRef) {
+    await this.query(
+      "INSERT INTO audit_evidence_exports (transaction_id, actor_ref, exported_at) VALUES ($1, $2, $3)",
+      [transactionId, actorRef, new Date().toISOString()]
+    );
+  }
+
+  async getEvidenceExports(transactionId) {
+    const { rows } = await this.query(
+      "SELECT actor_ref, exported_at FROM audit_evidence_exports WHERE transaction_id = $1 ORDER BY id",
+      [transactionId]
+    );
+    return rows.map((r) => ({ actorRef: r.actor_ref, exportedAt: r.exported_at }));
   }
 
   async tamperRecord(transactionId, fieldToTamper, tamperedValue) {

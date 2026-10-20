@@ -81,4 +81,30 @@ describe("Postgres audit store", () => {
     const stats = await request(app).get("/api/audit/stats");
     expect(stats.status).toBe(200);
   });
+
+  test("record v2 in Postgres: assurance kept, review linked, decision fields immutable on update", async () => {
+    await request(app).post("/api/audit/evaluate").send(payload("PG-V2", {
+      riskScore: 42, upstreamDecision: undefined,
+      signals: { modelScores: { lstm: 0.38, gnn: 0.44 }, rules: [], benchmarkModel: true, sourceModelVersion: "b1" }
+    }));
+    const stored = await db.getRecord("PG-V2");
+    expect(stored).toMatchObject({ recordVersion: 2, decisionFinalDecision: "PENDING_HUMAN_REVIEW" });
+    expect(stored.assurance.route).toBe("VERIFY");
+
+    // An update cannot rewrite what the decision commitment covers.
+    await db.updateRecord({ ...stored, assurance: { ...stored.assurance, route: "AUTO" }, decisionFinalDecision: "APPROVE" });
+    expect((await db.getRecord("PG-V2")).assurance.route).toBe("VERIFY");
+
+    const review = await request(app).post("/api/audit/review").send({ transactionId: "PG-V2", reviewerDecision: "APPROVE" });
+    expect(review.status).toBe(200);
+    const verify = await request(app).get("/api/audit/PG-V2/verify");
+    expect(verify.body).toMatchObject({ verified: true });
+    expect(verify.body.details.commitments.review.linkIntact).toBe(true);
+  });
+
+  test("evidence exports are logged in Postgres", async () => {
+    const res = await request(app).get("/api/audit/PG-V2/evidence");
+    expect(res.status).toBe(200);
+    expect(await db.getEvidenceExports("PG-V2")).toHaveLength(1);
+  });
 });

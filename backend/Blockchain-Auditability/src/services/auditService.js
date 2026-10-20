@@ -1,7 +1,14 @@
-const { getDatabase, DuplicateTransactionError } = require("../db/database");
+const { getDatabase } = require("../db/database");
 const hashService = require("./hashService");
-const { blockchainService, BlockchainUnavailableError, BlockchainTransactionError } = require("./blockchainService");
-const { computePolicyHash } = require("./policyDefinition");
+const { blockchainService, BlockchainUnavailableError } = require("./blockchainService");
+const { policyRegistry } = require("./policyRegistry");
+
+const PENDING = "PENDING_HUMAN_REVIEW";
+
+/** The status a caller of /evaluate would have seen for this record. */
+function legacyStatus(record) {
+  return record.finalDecision === PENDING ? "HUMAN_REVIEW_REQUIRED" : "COMPLETED";
+}
 
 /**
  * Off-Chain Audit Service & Verification Engine
@@ -23,6 +30,9 @@ class AuditService {
       masked.saltMasked = `${masked.salt.substring(0, 8)}…`;
       delete masked.salt;
     }
+    // A keyed pseudonym is not personal data, but it links every decision about one person;
+    // it appears only in the restricted evidence bundle.
+    delete masked.subjectRef;
     return masked;
   }
 
@@ -87,6 +97,10 @@ class AuditService {
           message: `Audit record for '${transactionId}' was not found in off-chain database.`
         };
       }
+    }
+
+    if (Number(record.recordVersion) === 2) {
+      return this.verifyRecordV2(record);
     }
 
     // 1. Verify internal pseudonymous auditId derivation
@@ -191,45 +205,260 @@ class AuditService {
   }
 
   /**
-   * Retries publishing an on-chain commitment for records that previously failed.
+   * Record v2 verification: the decision commitment, the review commitment when there is one,
+   * and the link between them. Reported statuses:
+   *   VERIFIED_ON_CHAIN / VERIFIED_SIMULATED  every commitment matches the ledger;
+   *   MODIFIED          current data no longer hashes to what was anchored;
+   *   CHAIN_BROKEN      the review does not point at this record's decision commitment;
+   *   ON_CHAIN_MISSING  a commitment was never anchored;
+   *   BLOCKCHAIN_UNAVAILABLE  the ledger could not be read.
+   */
+  async verifyRecordV2(record) {
+    const now = new Date().toISOString();
+    const persist = async (status) => {
+      record.verificationStatus = status;
+      record.lastVerifiedAt = now;
+      await this.db.saveRecord(record);
+    };
+
+    const expectedAuditId = hashService.computeAuditId(record.transactionId, record.salt);
+    const reviewed = Boolean(record.reviewAuditId);
+    const expectedReviewId = reviewed ? hashService.computeReviewAuditId(record.transactionId, record.salt) : null;
+    if (expectedAuditId.toLowerCase() !== String(record.auditId).toLowerCase()
+        || (reviewed && expectedReviewId.toLowerCase() !== String(record.reviewAuditId).toLowerCase())) {
+      await persist("MODIFIED");
+      return {
+        verified: false,
+        status: "MODIFIED",
+        message: "ALERT: Cryptographic auditId derivation mismatch. The transaction salt or ID has been tampered with.",
+        details: { transactionId: record.transactionId, auditId: record.auditId, expectedAuditId, isTampered: true, recordVersion: 2 }
+      };
+    }
+
+    const decision = hashService.decisionCommitment(record);
+    const review = reviewed ? hashService.reviewCommitment(record) : null;
+
+    let onDecision;
+    let onReview = null;
+    try {
+      onDecision = await blockchainService.getAudit(record.auditId);
+      if (reviewed) onReview = await blockchainService.getAudit(record.reviewAuditId);
+    } catch (err) {
+      if (err instanceof BlockchainUnavailableError) {
+        return {
+          verified: false,
+          status: "BLOCKCHAIN_UNAVAILABLE",
+          message: `Cannot verify on-chain integrity: ${err.message}`,
+          details: { transactionId: record.transactionId, auditId: record.auditId, calculatedCurrentHash: (review || decision).hash, recordVersion: 2 }
+        };
+      }
+      throw err;
+    }
+
+    const matches = (calculated, onChain) => Boolean(onChain && onChain.exists)
+      && calculated.toLowerCase() === String(onChain.recordHash).toLowerCase()
+      && String(record.policyHash).toLowerCase() === String(onChain.policyHash).toLowerCase();
+
+    const decisionMatches = matches(decision.hash, onDecision);
+    const linkIntact = !reviewed || String(record.parentRecordHash).toLowerCase() === decision.hash.toLowerCase();
+    const reviewMatches = !reviewed || matches(review.hash, onReview);
+    // Without a review, the outcome must still be the one committed at decision time.
+    const outcomeUnchanged = reviewed || record.finalDecision === record.decisionFinalDecision;
+
+    const isMock = Boolean(onDecision.isMock);
+    let status;
+    let message;
+    if (!onDecision.exists || (reviewed && !onReview.exists)) {
+      status = "ON_CHAIN_MISSING";
+      message = `No on-chain commitment exists for the ${!onDecision.exists ? "decision" : "review"} of this record. It has not been anchored to the blockchain.`;
+    } else if (!decisionMatches || !outcomeUnchanged) {
+      status = "MODIFIED";
+      message = "ALERT: Cryptographic integrity failure detected! Current record data does not match the decision committed on-chain.";
+    } else if (!linkIntact) {
+      status = "CHAIN_BROKEN";
+      message = "ALERT: The review commitment does not link to this record's decision commitment.";
+    } else if (!reviewMatches) {
+      status = "MODIFIED";
+      message = "ALERT: Cryptographic integrity failure detected! The review outcome does not match the review committed on-chain.";
+    } else {
+      status = isMock ? "VERIFIED_SIMULATED" : "VERIFIED_ON_CHAIN";
+      message = isMock
+        ? "Record integrity verified against simulated blockchain adapter."
+        : "Cryptographic integrity successfully verified against immutable on-chain smart contract commitment.";
+    }
+    const verified = status === "VERIFIED_SIMULATED" || status === "VERIFIED_ON_CHAIN";
+    await persist(status);
+
+    const latest = reviewed ? review : decision;
+    const latestOnChain = reviewed ? onReview : onDecision;
+    const lifecycle = reviewed ? "REVIEWED" : record.finalDecision === PENDING ? "AWAITING_REVIEW" : "DECIDED";
+    return {
+      verified,
+      status,
+      message,
+      details: {
+        transactionId: record.transactionId,
+        auditId: record.auditId,
+        recordVersion: 2,
+        lifecycle,
+        storedOffChainHash: reviewed ? record.reviewRecordHash : record.recordHash,
+        calculatedCurrentHash: latest.hash,
+        blockchainOnChainHash: latestOnChain.exists ? latestOnChain.recordHash : null,
+        policyHash: record.policyHash,
+        onChainPolicyHash: latestOnChain.exists ? latestOnChain.policyHash : null,
+        blockTimestamp: latestOnChain.exists ? latestOnChain.timestamp : null,
+        submitter: latestOnChain.exists ? latestOnChain.submitter : null,
+        isTampered: Boolean(record.isTampered) || !verified,
+        canonicalPayload: latest.canonicalPayload,
+        onChainData: latestOnChain,
+        commitments: {
+          decision: {
+            auditId: record.auditId,
+            calculatedHash: decision.hash,
+            onChainHash: onDecision.exists ? onDecision.recordHash : null,
+            matches: decisionMatches && outcomeUnchanged,
+            blockTimestamp: onDecision.exists ? onDecision.timestamp : null
+          },
+          review: reviewed
+            ? {
+                auditId: record.reviewAuditId,
+                calculatedHash: review.hash,
+                onChainHash: onReview.exists ? onReview.recordHash : null,
+                matches: reviewMatches,
+                parentRecordHash: record.parentRecordHash,
+                linkIntact,
+                blockTimestamp: onReview.exists ? onReview.timestamp : null
+              }
+            : null
+        }
+      }
+    };
+  }
+
+  /**
+   * Publishes whatever a record has not yet anchored -- its decision commitment, and for a
+   * reviewed v2 record its review commitment -- skipping anything already on-chain.
    */
   async retryBlockchainCommitment(transactionId) {
     const record = await this.getRecord(transactionId);
     if (!record) {
       throw new Error(`Record ${transactionId} not found`);
     }
-
-    // Reconciliation: check if it was already recorded on-chain
-    const onChain = await blockchainService.getAudit(record.auditId);
-    if (onChain.exists) {
-      record.verificationStatus = onChain.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
-      await this.db.saveRecord(record);
-      return {
-        success: true,
-        reconciled: true,
-        message: "Record was already committed on-chain.",
-        record: this.maskRecord(record)
-      };
+    const v2 = Number(record.recordVersion) === 2;
+    if (!v2 && record.recordHash === "PENDING_REVIEW") {
+      throw new Error(`Record ${transactionId} is awaiting human review; there is no commitment to publish yet.`);
     }
 
-    const blockchainRes = await blockchainService.recordAudit(
-      record.auditId,
-      record.recordHash,
-      record.policyHash
-    );
+    const pending = [{ kind: "decision", auditId: record.auditId, recordHash: record.recordHash }];
+    if (v2 && record.reviewAuditId) {
+      pending.push({ kind: "review", auditId: record.reviewAuditId, recordHash: record.reviewRecordHash });
+    }
 
-    record.blockchainTxId = blockchainRes.blockchainTxId;
-    record.blockNumber = blockchainRes.blockNumber;
-    record.verificationStatus = blockchainRes.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
+    let published = null;
+    let isMock = false;
+    for (const commitment of pending) {
+      const onChain = await blockchainService.getAudit(commitment.auditId);
+      isMock = Boolean(onChain.isMock);
+      if (onChain.exists) continue;
+      published = await blockchainService.recordAudit(commitment.auditId, commitment.recordHash, record.policyHash);
+      isMock = Boolean(published.isMock);
+      if (commitment.kind === "decision") {
+        record.blockchainTxId = published.blockchainTxId;
+        record.blockNumber = published.blockNumber;
+      } else {
+        record.reviewBlockchainTxId = published.blockchainTxId;
+        record.reviewBlockNumber = published.blockNumber;
+      }
+    }
 
+    record.verificationStatus = isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
     await this.db.saveRecord(record);
 
     return {
       success: true,
-      reconciled: false,
-      message: "Successfully published commitment to smart contract.",
-      blockchain: blockchainRes,
+      reconciled: !published,
+      status: legacyStatus(record),
+      message: published ? "Successfully published commitment to smart contract." : "Record was already committed on-chain.",
+      ...(published ? { blockchain: published } : {}),
+      ...(record.assurance ? { assurance: record.assurance } : {}),
       record: this.maskRecord(record)
+    };
+  }
+
+  /** Decisions held for verification or review, oldest first. */
+  async getQueue() {
+    const records = await this.getAllRecords(true);
+    return records
+      .filter((r) => r.finalDecision === PENDING)
+      .map((r) => ({ ...r, route: r.assurance ? r.assurance.route : "HUMAN_REVIEW" }))
+      .sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+  }
+
+  /**
+   * Everything an auditor needs to check one decision without trusting this service: the
+   * committed payloads with the salt, the policy document, the anchors, and how each hash is
+   * computed. Sensitive (it contains the amount, scores and salt) but holds no personal data;
+   * every export is logged.
+   */
+  async buildEvidenceBundle(transactionId, actorRef) {
+    const record = (await this.getRecord(transactionId)) || (await this.getRecordByAuditId(transactionId));
+    if (!record) return null;
+    const v2 = Number(record.recordVersion) === 2;
+    const decision = v2 ? hashService.decisionCommitment(record) : hashService.generateCanonicalHashV1(record);
+    const review = v2 && record.reviewAuditId ? hashService.reviewCommitment(record) : null;
+    const policy = policyRegistry.getByHash(record.policyHash);
+    const verification = await this.verifyRecord(record.transactionId);
+    const ledger = blockchainService.getStatus();
+
+    await this.db.logEvidenceExport(record.transactionId, actorRef);
+
+    return {
+      bundleVersion: 1,
+      generatedAt: new Date().toISOString(),
+      recordVersion: v2 ? 2 : 1,
+      transactionId: record.transactionId,
+      salt: record.salt,
+      hashing: {
+        auditId: "sha256(transactionId + ':' + salt)",
+        reviewAuditId: "sha256(transactionId + ':' + salt + ':review')",
+        recordHash: v2
+          ? "sha256(canonical JSON of the payload: keys sorted at every depth, no whitespace)"
+          : "sha256(JSON.stringify(payload, sorted top-level keys))",
+        policyHash: policy && policy.hashScheme === "v1"
+          ? "sha256(JSON.stringify(document, sorted top-level keys)) -- legacy scheme v1"
+          : "sha256(canonical JSON of the policy document)"
+      },
+      commitments: {
+        decision: {
+          auditId: record.auditId,
+          payload: decision.canonicalPayload,
+          recordHash: decision.hash,
+          anchor: { blockchainTxId: record.blockchainTxId || null, blockNumber: record.blockNumber ?? null }
+        },
+        review: review
+          ? {
+              auditId: record.reviewAuditId,
+              payload: review.canonicalPayload,
+              recordHash: review.hash,
+              anchor: { blockchainTxId: record.reviewBlockchainTxId || null, blockNumber: record.reviewBlockNumber ?? null }
+            }
+          : null
+      },
+      policy: policy
+        ? { id: policy.id, version: policy.version, hashScheme: policy.hashScheme, policyHash: policy.policyHash, document: policy.document }
+        : { policyHash: record.policyHash, document: null, note: "This policy hash is not in the service's registry." },
+      ledger: {
+        isMock: ledger.isMock,
+        network: ledger.isMock ? "simulated" : "evm",
+        chainId: ledger.chainId,
+        contractAddress: ledger.contractAddress
+      },
+      verificationAtExport: { status: verification.status, verified: verification.verified, message: verification.message },
+      privacy: {
+        personalData: "None. No name, email, account key or platform user id is included; subjectRef and reviewerRef are keyed pseudonyms that cannot be reversed without the service key.",
+        sensitiveFields: ["amount", "riskScore", "confidence", "salt"],
+        handling: "Restricted. Share only with an authorised auditor; the salt links this bundle to its on-chain auditId."
+      }
     };
   }
 }

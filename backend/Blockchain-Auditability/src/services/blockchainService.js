@@ -220,13 +220,25 @@ class BlockchainService {
     }
   }
 
+  /** The deployed contract's config, read without connecting (status reporting only). */
+  readConfig() {
+    if (this.config) return this.config;
+    try {
+      return JSON.parse(fs.readFileSync(this.getConfigPath(), "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
   getStatus() {
     const isMock = this.isMockMode();
+    const config = isMock ? null : this.readConfig();
     return {
       isMock,
       mode: isMock ? "Simulated Blockchain Adapter (Mock)" : "Live Hardhat Blockchain (Ethers.js)",
       rpcUrl: isMock ? null : (process.env.BLOCKCHAIN_RPC_URL || "http://127.0.0.1:8545"),
-      contractAddress: this.config ? this.config.address : null,
+      contractAddress: config ? config.address : null,
+      chainId: config ? String(config.chainId) : null,
       isConfigured: fs.existsSync(this.getConfigPath())
     };
   }

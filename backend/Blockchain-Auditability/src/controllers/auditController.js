@@ -5,6 +5,9 @@ const assuranceEngine = require("../services/assuranceEngine");
 const { policyRegistry } = require("../services/policyRegistry");
 const { DuplicateTransactionError } = require("../db/database");
 
+const { authRequired, canSeeRecordContents } = require("../auth/auth");
+
+const PENDING = "PENDING_HUMAN_REVIEW";
 const SIGNAL_KEYS = new Set(["modelScores", "rules", "benchmarkModel", "sourceModelVersion", "subjectRef"]);
 const MODEL_NAME = /^[A-Za-z0-9_.-]{1,32}$/;
 
@@ -188,52 +191,11 @@ class AuditController {
       const auditId = hashService.computeAuditId(inputData.transactionId, salt);
       const policyHash = policy.policyHash;
       const reviewRequired = policyResult.action === "HUMAN_REVIEW";
+      const outcome = reviewRequired ? PENDING : policyResult.action;
 
-      if (reviewRequired) {
-        // Pending human review state
-        const pendingRecord = {
-          transactionId: inputData.transactionId,
-          auditId,
-          salt,
-          policyHash,
-          recordHash: "PENDING_REVIEW",
-          riskScore: inputData.riskScore,
-          confidence: inputData.confidence,
-          amount: inputData.amount,
-          transactionType: inputData.transactionType,
-          aiDecision: policyResult.action,
-          finalDecision: "PENDING_HUMAN_REVIEW",
-          modelVersion: inputData.modelVersion,
-          policyId: policyResult.policyId,
-          policyVersion: policyResult.policyVersion,
-          reason: policyResult.reason,
-          timestamp,
-          reviewRequired: true,
-          reviewerDecision: null,
-          verificationStatus: "PENDING_HUMAN_REVIEW",
-          isTampered: false,
-          ...provenance
-        };
-
-        try {
-          await auditService.saveRecord(pendingRecord);
-        } catch (dbErr) {
-          if (dbErr instanceof DuplicateTransactionError) {
-            return res.status(409).json({ success: false, message: dbErr.message });
-          }
-          throw dbErr;
-        }
-
-        return res.status(200).json({
-          success: true,
-          status: "HUMAN_REVIEW_REQUIRED",
-          policyResult,
-          assurance,
-          record: auditService.maskRecord(pendingRecord)
-        });
-      }
-
-      // Automated decision (APPROVE or REJECT)
+      // 3. Record v2: every decision -- including one held for verification or review -- is
+      // committed now, so the AI's decision and its assurance result are tamper-evident from
+      // the moment they are made. A later review is a second, linked commitment.
       const auditRecord = {
         transactionId: inputData.transactionId,
         auditId,
@@ -244,21 +206,27 @@ class AuditController {
         amount: inputData.amount,
         transactionType: inputData.transactionType,
         aiDecision: policyResult.action,
-        finalDecision: policyResult.action,
+        finalDecision: outcome,
+        decisionFinalDecision: outcome,
         modelVersion: inputData.modelVersion,
         policyId: policyResult.policyId,
         policyVersion: policyResult.policyVersion,
         reason: policyResult.reason,
         timestamp,
-        reviewRequired: false,
+        reviewRequired,
         reviewerDecision: null,
         isTampered: false,
+        recordVersion: 2,
+        assurance,
+        subjectRef: (inputData.signals && inputData.signals.subjectRef) || null,
         ...provenance
       };
-
-      // 3. Generate Canonical SHA-256 Hash
-      const { hash: recordHash } = hashService.generateCanonicalHash(auditRecord);
+      const { hash: recordHash } = hashService.decisionCommitment(auditRecord);
       auditRecord.recordHash = recordHash;
+
+      // Stored before anchoring: a duplicate is refused before anything reaches the chain, and
+      // a failed anchor leaves a record that /retry can publish.
+      await auditService.createRecord({ ...auditRecord, verificationStatus: "ANCHOR_PENDING" });
 
       // 4. Commit to Smart Contract
       let blockchainRes = null;
@@ -266,13 +234,16 @@ class AuditController {
         blockchainRes = await blockchainService.recordAudit(auditId, recordHash, policyHash);
         auditRecord.blockchainTxId = blockchainRes.blockchainTxId;
         auditRecord.blockNumber = blockchainRes.blockNumber;
-        auditRecord.verificationStatus = blockchainRes.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
+        // A held decision keeps the status callers already read as "awaiting review".
+        auditRecord.verificationStatus = reviewRequired
+          ? PENDING
+          : blockchainRes.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
 
-        await auditService.createRecord(auditRecord);
+        await auditService.saveRecord(auditRecord);
 
         return res.status(200).json({
           success: true,
-          status: "COMPLETED",
+          status: reviewRequired ? "HUMAN_REVIEW_REQUIRED" : "COMPLETED",
           policyResult,
           assurance,
           blockchain: blockchainRes,
@@ -339,8 +310,20 @@ class AuditController {
           message: "This decision did not require human review."
         });
       }
+      if (existingRecord.reviewerDecision) {
+        return res.status(409).json({ success: false, message: `Record ${transactionId} has already been reviewed.` });
+      }
+      const reason = req.body.reason;
+      if (reason !== undefined && reason !== null && (typeof reason !== "string" || reason.length > 500)) {
+        return res.status(400).json({ success: false, message: "reason must be a string of at most 500 characters." });
+      }
 
-      // Update record with Human Reviewer Decision
+      if (Number(existingRecord.recordVersion) === 2) {
+        return this.submitReviewV2(req, res, existingRecord, reviewerDecision, reason || null);
+      }
+
+      // Record v1 (held before decision-time anchoring existed): its single commitment is
+      // written now, as it always was.
       existingRecord.reviewerDecision = reviewerDecision;
       existingRecord.finalDecision = reviewerDecision === "APPROVE" ? "HUMAN_APPROVED" : "HUMAN_REJECTED";
       existingRecord.reviewedAt = new Date().toISOString();
@@ -390,13 +373,88 @@ class AuditController {
   }
 
   /**
+   * Review of a v2 record: anchored as a second commitment that links to the decision's.
+   *
+   * Who may resolve what (enforced when AUTH_REQUIRED is on):
+   *   VERIFY        the platform service, after the account holder passes step-up, or an analyst;
+   *   HUMAN_REVIEW  an analyst in AUDIT_REVIEWER_IDS only.
+   * Separation of duties: whenever the reviewer is identifiable, a review of a decision about
+   * that same person is refused, by comparing keyed references.
+   */
+  async submitReviewV2(req, res, record, reviewerDecision, reason) {
+    const route = record.assurance ? record.assurance.route : "HUMAN_REVIEW";
+    const caller = req.caller;
+
+    if (authRequired() && route === "HUMAN_REVIEW" && !(caller && caller.isReviewer)) {
+      return res.status(403).json({ success: false, message: "This decision was routed to HUMAN_REVIEW and must be reviewed by an authorised analyst." });
+    }
+    if (caller && !caller.isService && record.subjectRef && caller.ref && caller.ref === record.subjectRef) {
+      return res.status(403).json({ success: false, message: "Separation of duties: a reviewer cannot review a decision about themselves." });
+    }
+    if (["ANCHOR_PENDING", "BLOCKCHAIN_FAILED"].includes(record.verificationStatus)) {
+      return res.status(409).json({ success: false, message: `The decision for ${record.transactionId} is not anchored yet; publish it with /api/audit/${record.transactionId}/retry first.` });
+    }
+
+    const reviewed = {
+      ...record,
+      reviewerDecision,
+      finalDecision: reviewerDecision === "APPROVE" ? "HUMAN_APPROVED" : "HUMAN_REJECTED",
+      reviewedAt: new Date().toISOString(),
+      reviewerKind: !caller ? "UNAUTHENTICATED" : caller.isService ? "ACCOUNT_HOLDER_STEP_UP" : "ANALYST",
+      reviewerRef: caller ? caller.ref : null,
+      reviewReason: reason,
+      reviewAuditId: hashService.computeReviewAuditId(record.transactionId, record.salt),
+      parentRecordHash: record.recordHash
+    };
+    const { hash: reviewHash } = hashService.reviewCommitment(reviewed);
+    reviewed.reviewRecordHash = reviewHash;
+
+    let blockchainRes;
+    try {
+      blockchainRes = await blockchainService.recordAudit(reviewed.reviewAuditId, reviewHash, reviewed.policyHash);
+    } catch (chainErr) {
+      // Nothing is saved: a review counts only once it is anchored, so the reviewer can submit
+      // it again when the ledger is back.
+      const status = chainErr instanceof BlockchainUnavailableError ? 503 : 502;
+      return res.status(status).json({
+        success: false,
+        status: status === 503 ? "BLOCKCHAIN_UNAVAILABLE" : "BLOCKCHAIN_ERROR",
+        message: `The review was not recorded: anchoring failed (${chainErr.message}). Submit it again once the ledger is available.`
+      });
+    }
+
+    reviewed.reviewBlockchainTxId = blockchainRes.blockchainTxId;
+    reviewed.reviewBlockNumber = blockchainRes.blockNumber;
+    reviewed.verificationStatus = blockchainRes.isMock ? "VERIFIED_SIMULATED" : "RECORDED_ON_CHAIN";
+    await auditService.saveRecord(reviewed);
+
+    return res.status(200).json({
+      success: true,
+      message: "Human review recorded and on-chain commitment published successfully.",
+      blockchain: blockchainRes,
+      separationOfDuties: caller ? "ENFORCED" : "NOT_ENFORCED_ANONYMOUS_REVIEWER",
+      ...(record.assurance ? { assurance: record.assurance } : {}),
+      record: auditService.maskRecord(reviewed)
+    });
+  }
+
+  /** Strips record contents from a verification result for callers not allowed to see them. */
+  redactVerification(req, result) {
+    if (canSeeRecordContents(req) || !result.details) return result;
+    const details = { ...result.details };
+    delete details.canonicalPayload; // amounts, scores, salt
+    delete details.onChainData;
+    return { ...result, details, redacted: true };
+  }
+
+  /**
    * GET /api/audit/:transactionId/verify
    */
   async verifyAudit(req, res) {
     try {
       const { transactionId } = req.params;
       const verificationResult = await auditService.verifyRecord(transactionId);
-      return res.status(200).json(verificationResult);
+      return res.status(200).json(this.redactVerification(req, verificationResult));
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });
     }
@@ -409,7 +467,7 @@ class AuditController {
     try {
       const { auditId } = req.params;
       const verificationResult = await auditService.verifyRecord(auditId);
-      return res.status(200).json(verificationResult);
+      return res.status(200).json(this.redactVerification(req, verificationResult));
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });
     }
@@ -466,8 +524,71 @@ class AuditController {
    */
   async clearRecords(req, res) {
     try {
+      // Deleting the off-chain store is a demonstration reset, gated like tamper simulation.
+      if (process.env.NODE_ENV === "production" && process.env.ALLOW_DEMO_TAMPER !== "true") {
+        return res.status(403).json({
+          success: false,
+          message: "Resetting audit records is a demonstration feature disabled in production. Set ALLOW_DEMO_TAMPER=true to enable."
+        });
+      }
       const result = await auditService.clearAllRecords();
       return res.status(200).json(result);
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  /**
+   * GET /api/audit/queue
+   * Decisions held for step-up verification or analyst review, oldest first.
+   */
+  async getQueue(req, res) {
+    try {
+      const queue = await auditService.getQueue();
+      return res.status(200).json({ success: true, count: queue.length, queue });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  /**
+   * GET /api/audit/records/:transactionId
+   * One record with its assurance result and the policy that routed it.
+   */
+  async getRecordDetail(req, res) {
+    try {
+      const record = await auditService.getRecord(req.params.transactionId);
+      if (!record) {
+        return res.status(404).json({ success: false, message: `Record ${req.params.transactionId} not found.` });
+      }
+      const policy = policyRegistry.getByHash(record.policyHash);
+      return res.status(200).json({
+        success: true,
+        record: auditService.maskRecord(record),
+        policy: policy
+          ? { id: policy.id, version: policy.version, engine: policy.engine, status: policy.status, hashScheme: policy.hashScheme, policyHash: policy.policyHash }
+          : null,
+        evidenceExports: await auditService.db.getEvidenceExports(record.transactionId)
+      });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  /**
+   * GET /api/audit/:transactionId/evidence
+   * The independently verifiable evidence bundle (scripts/verify-evidence.js checks it).
+   * Restricted, never cached, and every export is logged with the caller's keyed reference.
+   */
+  async getEvidence(req, res) {
+    try {
+      const actorRef = req.caller ? req.caller.ref || req.caller.sub : "anonymous (AUTH_REQUIRED off)";
+      const bundle = await auditService.buildEvidenceBundle(req.params.transactionId, actorRef);
+      res.set("Cache-Control", "no-store");
+      if (!bundle) {
+        return res.status(404).json({ success: false, message: `Record ${req.params.transactionId} not found.` });
+      }
+      return res.status(200).json(bundle);
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });
     }
@@ -534,14 +655,27 @@ class AuditController {
       let verified = 0;
       let integrityFailures = 0;
       let onChainMissing = 0;
+      let pendingReview = 0;
+      // Routing as decided by the assurance engine; records anchored before it count as LEGACY.
+      const routes = { AUTO: 0, VERIFY: 0, HUMAN_REVIEW: 0, LEGACY: 0 };
+      const signalQuality = { FULL: 0, DEGRADED: 0, LEGACY: 0 };
 
       records.forEach((r) => {
         if (r.finalDecision === "APPROVE" || r.finalDecision === "HUMAN_APPROVED") approved++;
         if (r.finalDecision === "REJECT" || r.finalDecision === "HUMAN_REJECTED") rejected++;
         if (r.reviewRequired) humanReview++;
+        if (r.finalDecision === PENDING) pendingReview++;
         if (r.verificationStatus === "VERIFIED_ON_CHAIN" || r.verificationStatus === "VERIFIED_SIMULATED") verified++;
-        if (r.verificationStatus === "MODIFIED" || r.isTampered) integrityFailures++;
-        if (r.verificationStatus === "ON_CHAIN_MISSING" || r.verificationStatus === "BLOCKCHAIN_FAILED") onChainMissing++;
+        if (r.verificationStatus === "MODIFIED" || r.verificationStatus === "CHAIN_BROKEN" || r.isTampered) integrityFailures++;
+        if (["ON_CHAIN_MISSING", "BLOCKCHAIN_FAILED", "ANCHOR_PENDING"].includes(r.verificationStatus)) onChainMissing++;
+        const a = r.assurance;
+        if (a && a.signalQuality !== "LEGACY") {
+          routes[a.route] = (routes[a.route] || 0) + 1;
+          signalQuality[a.signalQuality] = (signalQuality[a.signalQuality] || 0) + 1;
+        } else {
+          routes.LEGACY++;
+          signalQuality.LEGACY++;
+        }
       });
 
       return res.status(200).json({
@@ -554,6 +688,10 @@ class AuditController {
           verified,
           integrityFailures,
           onChainMissing,
+          pendingReview,
+          routes,
+          signalQuality,
+          activePolicyId: policyRegistry.getActive().id,
           blockchainStatus
         }
       });
@@ -575,5 +713,8 @@ module.exports = {
   clearRecords: controller.clearRecords.bind(controller),
   getRecords: controller.getRecords.bind(controller),
   getStats: controller.getStats.bind(controller),
-  getPolicies: controller.getPolicies.bind(controller)
+  getPolicies: controller.getPolicies.bind(controller),
+  getQueue: controller.getQueue.bind(controller),
+  getRecordDetail: controller.getRecordDetail.bind(controller),
+  getEvidence: controller.getEvidence.bind(controller)
 };

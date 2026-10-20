@@ -254,7 +254,7 @@ async function runDemo() {
   // -------------------------------------------------------------
   console.log('--- [Step 8] Write-Once Idempotency & Duplicate Rejection ---');
   try {
-    auditService.createRecord(record2);
+    await auditService.createRecord(record2);
     console.log('    ERROR: Duplicate was not rejected!');
   } catch (err) {
     console.log(`    Success: Duplicate transaction '${tx2Id}' correctly rejected.`);
@@ -265,7 +265,7 @@ async function runDemo() {
   // Durability & Restart Persistence
   // -------------------------------------------------------------
   console.log('--- [Step 9] Durability & Engine Restart Persistence ---');
-  const preRestartCount = auditService.getAllRecords().length;
+  const preRestartCount = (await auditService.getAllRecords()).length;
   // Re-instantiate database connection to simulate complete server reboot
   const newDb = getDatabase();
   const postRestartRecords = newDb.getAllRecords();
