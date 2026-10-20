@@ -93,6 +93,26 @@ py -m pytest
 
 A passing test means that command was run in this environment. Do not treat unread test names as results.
 
+## Frontend
+
+The research dashboard is a separate React app in `frontend/`. It calls this API and reads the saved experiment JSON files. It does not retrain models.
+
+```powershell
+cd Fraud-Detection
+.\.venv\Scripts\Activate.ps1
+py scripts\run_api.py
+```
+
+In a second terminal:
+
+```powershell
+cd Fraud-Detection\frontend
+npm install
+npm run dev
+```
+
+Open http://127.0.0.1:5173 . The API base URL defaults to http://127.0.0.1:8082 . Override it with `VITE_API_BASE_URL` if needed. See `frontend/.env.example`.
+
 ## Demonstration
 
 Follow [docs/DEMO.md](docs/DEMO.md). The method notes and the latest executed run are in [experiments/EXPERIMENT_REPORT.md](experiments/EXPERIMENT_REPORT.md).

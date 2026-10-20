@@ -150,6 +150,23 @@ def test_simulated_signal_must_be_labelled(tmp_path: Path) -> None:
     assert any("Simulated signals" in note for note in accepted.json()["explanation"]["notes"])
 
 
+def test_recent_decisions_are_returned_as_json(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    scored = client.post(
+        "/v1/transactions/score",
+        json={"transaction_id": "history-1", "amount": 25, "account_key": "acct-hidden"},
+    )
+    assert scored.status_code == 200
+    listed = client.get("/v1/decisions")
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["scope"] == "this API process only"
+    assert body["decisions"][0]["transaction_id"] == "history-1"
+    assert body["decisions"][0]["decision"] == scored.json()["decision"]
+    assert "scored_at" in body["decisions"][0]
+    assert "acct-hidden" not in listed.text
+
+
 def test_service_failure_is_a_503(tmp_path: Path) -> None:
     client = _client(tmp_path)
 
