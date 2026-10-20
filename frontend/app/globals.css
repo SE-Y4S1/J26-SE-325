@@ -27,3 +27,25 @@ body {
      re-applied `font-sans` on its own wrapper. */
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
+
+/* Landing page entrance: hero copy, then the flow beside it. Motion only for people who
+   have not asked for less of it. */
+@media (prefers-reduced-motion: no-preference) {
+  .nexa-rise {
+    animation: nexa-rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .nexa-delay {
+    animation-delay: 0.12s;
+  }
+}
+
+@keyframes nexa-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
