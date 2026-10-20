@@ -2,6 +2,7 @@ const hre = require("hardhat");
 const fs = require("fs");
 const path = require("path");
 const { computePolicyHash } = require("../../src/services/policyDefinition");
+const { registerPolicies } = require("./policies");
 
 async function main() {
   console.log("=============================================================");
@@ -24,11 +25,9 @@ async function main() {
   await grantTx.wait();
   console.log(`Granted SUBMITTER_ROLE to: ${deployer.address}`);
 
-  // 2. Register initial canonical policy hash (P001)
+  // 2. Register every policy document (P001 baseline, P002 assurance policy, ...)
   const policyHash = computePolicyHash();
-  const policyTx = await auditRegistry.registerPolicy(policyHash);
-  await policyTx.wait();
-  console.log(`Registered canonical policy hash on-chain: ${policyHash}`);
+  const policies = await registerPolicies(auditRegistry);
 
   // 3. Export contract configuration and ABI
   const artifactPath = path.join(__dirname, "../artifacts/contracts/AuditRegistry.sol/AuditRegistry.json");
@@ -48,6 +47,7 @@ async function main() {
     chainId: (await hre.ethers.provider.getNetwork()).chainId.toString(),
     submitterAddress: deployer.address,
     policyHash: policyHash,
+    policies,
     deployedAt: new Date().toISOString(),
     abi: artifact.abi || []
   };

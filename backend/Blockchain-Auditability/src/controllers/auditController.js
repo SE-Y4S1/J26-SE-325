@@ -1,9 +1,12 @@
-const policyEngine = require("../services/policyEngine");
 const hashService = require("../services/hashService");
 const { blockchainService, BlockchainUnavailableError, BlockchainTransactionError } = require("../services/blockchainService");
 const auditService = require("../services/auditService");
-const { computePolicyHash } = require("../services/policyDefinition");
+const assuranceEngine = require("../services/assuranceEngine");
+const { policyRegistry } = require("../services/policyRegistry");
 const { DuplicateTransactionError } = require("../db/database");
+
+const SIGNAL_KEYS = new Set(["modelScores", "rules", "benchmarkModel", "sourceModelVersion", "subjectRef"]);
+const MODEL_NAME = /^[A-Za-z0-9_.-]{1,32}$/;
 
 // Component 2's gateway actions mapped onto P001's. STEP_UP is a challenge the user must
 // pass before the transaction proceeds, so it holds the record for review like HUMAN_REVIEW.
@@ -48,8 +51,69 @@ class AuditController {
     if (data.planHash !== undefined && data.planHash !== null && !/^0x[0-9a-f]{64}$/.test(data.planHash)) {
       errors.push("planHash must be a 0x-prefixed lowercase SHA-256 hex digest.");
     }
+    if (data.signals !== undefined) {
+      errors.push(...this.validateSignals(data.signals));
+    }
 
     return errors;
+  }
+
+  /**
+   * Assurance signals are validated strictly and never coerced: a malformed signal must be
+   * rejected, not quietly read as "missing" and routed on a degraded basis.
+   */
+  validateSignals(signals) {
+    const errors = [];
+    if (signals === null || typeof signals !== "object" || Array.isArray(signals)) {
+      return ["signals must be an object."];
+    }
+    const unknown = Object.keys(signals).filter((k) => !SIGNAL_KEYS.has(k));
+    if (unknown.length) {
+      errors.push(`signals has unknown field(s): ${unknown.join(", ")}.`);
+    }
+    if (signals.modelScores !== undefined) {
+      const scores = signals.modelScores;
+      if (scores === null || typeof scores !== "object" || Array.isArray(scores)) {
+        errors.push("signals.modelScores must be an object of model name to score.");
+      } else {
+        const entries = Object.entries(scores);
+        if (entries.length > 10) errors.push("signals.modelScores accepts at most 10 models.");
+        for (const [name, value] of entries) {
+          if (!MODEL_NAME.test(name)) errors.push(`signals.modelScores has an invalid model name '${name}'.`);
+          if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+            errors.push(`signals.modelScores.${name} must be a number between 0 and 1.`);
+          }
+        }
+      }
+    }
+    if (signals.rules !== undefined) {
+      if (!Array.isArray(signals.rules) || signals.rules.length > 50
+          || !signals.rules.every((r) => typeof r === "string" && r.length > 0 && r.length <= 64)) {
+        errors.push("signals.rules must be an array of at most 50 non-empty strings (max 64 chars).");
+      }
+    }
+    if (signals.benchmarkModel !== undefined && typeof signals.benchmarkModel !== "boolean") {
+      errors.push("signals.benchmarkModel must be a boolean.");
+    }
+    if (signals.sourceModelVersion !== undefined
+        && (typeof signals.sourceModelVersion !== "string" || signals.sourceModelVersion.length > 128)) {
+      errors.push("signals.sourceModelVersion must be a string of at most 128 characters.");
+    }
+    if (signals.subjectRef !== undefined && !/^[0-9a-f]{64}$/.test(String(signals.subjectRef))) {
+      errors.push("signals.subjectRef must be a 64-character lowercase hex keyed reference.");
+    }
+    return errors;
+  }
+
+  /**
+   * Which policy routes this request. Callers that send assurance signals get the active
+   * assurance policy; callers that do not (every client written before the engine existed)
+   * keep P001, so their outcomes do not change underneath them. ASSURANCE_REQUIRE_SIGNALS
+   * routes everything through the active policy, on a degraded basis when signals are absent.
+   */
+  selectPolicy(inputData) {
+    const requireSignals = String(process.env.ASSURANCE_REQUIRE_SIGNALS || "").toLowerCase() === "true";
+    return inputData.signals !== undefined || requireSignals ? policyRegistry.getActive() : policyRegistry.getLegacy();
   }
 
   /**
@@ -95,13 +159,21 @@ class AuditController {
         });
       }
 
-      // 2. Policy Engine Evaluation
+      // 2. Assurance assessment under the selected policy, then any decision already
+      // enforced upstream (stricter wins). policyResult keeps its original shape.
       const upstream = inputData.upstreamDecision || null;
+      const policy = this.selectPolicy(inputData);
+      const assessed = assuranceEngine.assess(inputData, policy);
+      const assurance = assuranceEngine.applyUpstream(assessed, upstream);
       const policyResult = this.combineWithUpstream(
-        policyEngine.evaluate({
-          riskScore: inputData.riskScore,
-          confidence: inputData.confidence
-        }),
+        {
+          action: assessed.legacyAction,
+          reason: assessed.reasons.join(" "),
+          policyId: policy.id,
+          policyVersion: policy.version,
+          policyHash: policy.policyHash,
+          evaluatedAt: new Date().toISOString()
+        },
         upstream
       );
       const provenance = {
@@ -114,7 +186,7 @@ class AuditController {
       const timestamp = new Date().toISOString();
       const salt = hashService.generateSalt();
       const auditId = hashService.computeAuditId(inputData.transactionId, salt);
-      const policyHash = computePolicyHash();
+      const policyHash = policy.policyHash;
       const reviewRequired = policyResult.action === "HUMAN_REVIEW";
 
       if (reviewRequired) {
@@ -156,6 +228,7 @@ class AuditController {
           success: true,
           status: "HUMAN_REVIEW_REQUIRED",
           policyResult,
+          assurance,
           record: auditService.maskRecord(pendingRecord)
         });
       }
@@ -201,6 +274,7 @@ class AuditController {
           success: true,
           status: "COMPLETED",
           policyResult,
+          assurance,
           blockchain: blockchainRes,
           record: auditService.maskRecord(auditRecord)
         });
@@ -412,6 +486,41 @@ class AuditController {
   }
 
   /**
+   * GET /api/audit/policies
+   * Every policy document with the hash recomputed from it, and whether that hash is active
+   * on-chain, so a reader can check the commitment themselves.
+   */
+  async getPolicies(req, res) {
+    try {
+      const activeId = policyRegistry.getActive().id;
+      const policies = await Promise.all(policyRegistry.list().map(async (p) => {
+        let onChain = { active: null, error: null };
+        try {
+          onChain.active = await blockchainService.isPolicyActive(p.policyHash);
+        } catch (err) {
+          onChain.error = err.message;
+        }
+        return {
+          id: p.id,
+          version: p.version,
+          engine: p.engine,
+          status: p.status,
+          baseline: p.baseline,
+          routesSignalRequests: p.id === activeId,
+          hashScheme: p.hashScheme,
+          policyHash: p.policyHash,
+          description: p.description,
+          document: p.document,
+          onChain
+        };
+      }));
+      return res.status(200).json({ success: true, activePolicyId: activeId, legacyPolicyId: "P001", policies });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  /**
    * GET /api/audit/stats
    */
   async getStats(req, res) {
@@ -465,5 +574,6 @@ module.exports = {
   simulateTampering: controller.simulateTampering.bind(controller),
   clearRecords: controller.clearRecords.bind(controller),
   getRecords: controller.getRecords.bind(controller),
-  getStats: controller.getStats.bind(controller)
+  getStats: controller.getStats.bind(controller),
+  getPolicies: controller.getPolicies.bind(controller)
 };

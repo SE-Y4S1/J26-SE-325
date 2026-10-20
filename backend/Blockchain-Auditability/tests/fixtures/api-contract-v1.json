@@ -1,0 +1,512 @@
+{
+  "evaluate_approve": {
+    "httpStatus": 200,
+    "body": {
+      "blockchain": {
+        "blockNumber": "number",
+        "blockTimestamp": "number",
+        "blockchainTxId": "string",
+        "isMock": "=true",
+        "network": "string",
+        "success": "=true"
+      },
+      "policyResult": {
+        "action": "=\"APPROVE\"",
+        "evaluatedAt": "string",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "reason": "string"
+      },
+      "record": {
+        "aiDecision": "=\"APPROVE\"",
+        "amount": "number",
+        "auditId": "string",
+        "blockNumber": "number",
+        "blockchainTxId": "string",
+        "confidence": "number",
+        "finalDecision": "=\"APPROVE\"",
+        "isTampered": "=false",
+        "modelVersion": "string",
+        "planHash": "null",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "reason": "string",
+        "recordHash": "string",
+        "reviewRequired": "=false",
+        "reviewerDecision": "null",
+        "riskScore": "number",
+        "saltMasked": "string",
+        "timestamp": "string",
+        "transactionId": "string",
+        "transactionType": "string",
+        "upstreamDecision": "null",
+        "upstreamModelVersion": "null",
+        "upstreamSource": "null",
+        "verificationStatus": "=\"VERIFIED_SIMULATED\""
+      },
+      "status": "=\"COMPLETED\"",
+      "success": "=true"
+    }
+  },
+  "evaluate_reject": {
+    "httpStatus": 200,
+    "body": {
+      "blockchain": {
+        "blockNumber": "number",
+        "blockTimestamp": "number",
+        "blockchainTxId": "string",
+        "isMock": "=true",
+        "network": "string",
+        "success": "=true"
+      },
+      "policyResult": {
+        "action": "=\"REJECT\"",
+        "evaluatedAt": "string",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "reason": "string"
+      },
+      "record": {
+        "aiDecision": "=\"REJECT\"",
+        "amount": "number",
+        "auditId": "string",
+        "blockNumber": "number",
+        "blockchainTxId": "string",
+        "confidence": "number",
+        "finalDecision": "=\"REJECT\"",
+        "isTampered": "=false",
+        "modelVersion": "string",
+        "planHash": "null",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "reason": "string",
+        "recordHash": "string",
+        "reviewRequired": "=false",
+        "reviewerDecision": "null",
+        "riskScore": "number",
+        "saltMasked": "string",
+        "timestamp": "string",
+        "transactionId": "string",
+        "transactionType": "string",
+        "upstreamDecision": "null",
+        "upstreamModelVersion": "null",
+        "upstreamSource": "null",
+        "verificationStatus": "=\"VERIFIED_SIMULATED\""
+      },
+      "status": "=\"COMPLETED\"",
+      "success": "=true"
+    }
+  },
+  "evaluate_review": {
+    "httpStatus": 200,
+    "body": {
+      "policyResult": {
+        "action": "=\"HUMAN_REVIEW\"",
+        "evaluatedAt": "string",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "reason": "string"
+      },
+      "record": {
+        "aiDecision": "=\"HUMAN_REVIEW\"",
+        "amount": "number",
+        "auditId": "string",
+        "confidence": "number",
+        "finalDecision": "=\"PENDING_HUMAN_REVIEW\"",
+        "isTampered": "=false",
+        "modelVersion": "string",
+        "planHash": "null",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "reason": "string",
+        "recordHash": "string",
+        "reviewRequired": "=true",
+        "reviewerDecision": "null",
+        "riskScore": "number",
+        "saltMasked": "string",
+        "timestamp": "string",
+        "transactionId": "string",
+        "transactionType": "string",
+        "upstreamDecision": "null",
+        "upstreamModelVersion": "null",
+        "upstreamSource": "null",
+        "verificationStatus": "=\"PENDING_HUMAN_REVIEW\""
+      },
+      "status": "=\"HUMAN_REVIEW_REQUIRED\"",
+      "success": "=true"
+    }
+  },
+  "evaluate_upstream": {
+    "httpStatus": 200,
+    "body": {
+      "policyResult": {
+        "action": "=\"HUMAN_REVIEW\"",
+        "evaluatedAt": "string",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "reason": "string"
+      },
+      "record": {
+        "aiDecision": "=\"HUMAN_REVIEW\"",
+        "amount": "number",
+        "auditId": "string",
+        "confidence": "number",
+        "finalDecision": "=\"PENDING_HUMAN_REVIEW\"",
+        "isTampered": "=false",
+        "modelVersion": "string",
+        "planHash": "string",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "reason": "string",
+        "recordHash": "string",
+        "reviewRequired": "=true",
+        "reviewerDecision": "null",
+        "riskScore": "number",
+        "saltMasked": "string",
+        "timestamp": "string",
+        "transactionId": "string",
+        "transactionType": "string",
+        "upstreamDecision": "=\"STEP_UP\"",
+        "upstreamModelVersion": "string",
+        "upstreamSource": "=\"component2\"",
+        "verificationStatus": "=\"PENDING_HUMAN_REVIEW\""
+      },
+      "status": "=\"HUMAN_REVIEW_REQUIRED\"",
+      "success": "=true"
+    }
+  },
+  "evaluate_invalid": {
+    "httpStatus": 400,
+    "body": {
+      "errors": [
+        "string"
+      ],
+      "message": "string",
+      "success": "=false"
+    }
+  },
+  "evaluate_duplicate": {
+    "httpStatus": 409,
+    "body": {
+      "message": "string",
+      "success": "=false"
+    }
+  },
+  "review": {
+    "httpStatus": 200,
+    "body": {
+      "blockchain": {
+        "blockNumber": "number",
+        "blockTimestamp": "number",
+        "blockchainTxId": "string",
+        "isMock": "=true",
+        "network": "string",
+        "success": "=true"
+      },
+      "message": "string",
+      "record": {
+        "aiDecision": "=\"HUMAN_REVIEW\"",
+        "amount": "number",
+        "auditId": "string",
+        "blockNumber": "number",
+        "blockchainTxId": "string",
+        "confidence": "number",
+        "createdAt": "string",
+        "finalDecision": "=\"HUMAN_APPROVED\"",
+        "isTampered": "=false",
+        "lastVerifiedAt": "null",
+        "modelVersion": "string",
+        "planHash": "null",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "previousValue": "null",
+        "reason": "string",
+        "recordHash": "string",
+        "reviewRequired": "=true",
+        "reviewedAt": "string",
+        "reviewerDecision": "=\"APPROVE\"",
+        "riskScore": "number",
+        "saltMasked": "string",
+        "tamperedAt": "null",
+        "tamperedField": "null",
+        "timestamp": "string",
+        "transactionId": "string",
+        "transactionType": "string",
+        "updatedAt": "string",
+        "upstreamDecision": "null",
+        "upstreamModelVersion": "null",
+        "upstreamSource": "null",
+        "verificationStatus": "=\"VERIFIED_SIMULATED\""
+      },
+      "success": "=true"
+    }
+  },
+  "verify_ok": {
+    "httpStatus": 200,
+    "body": {
+      "details": {
+        "auditId": "string",
+        "blockTimestamp": "number",
+        "blockchainOnChainHash": "string",
+        "calculatedCurrentHash": "string",
+        "canonicalPayload": {
+          "aiDecision": "=\"APPROVE\"",
+          "amount": "number",
+          "auditId": "string",
+          "confidence": "number",
+          "finalDecision": "=\"APPROVE\"",
+          "modelVersion": "string",
+          "policyHash": "string",
+          "policyId": "=\"P001\"",
+          "policyVersion": "=\"1.0\"",
+          "reviewRequired": "=false",
+          "reviewerDecision": "null",
+          "riskScore": "number",
+          "salt": "string",
+          "timestamp": "string",
+          "transactionId": "string",
+          "transactionType": "string"
+        },
+        "isTampered": "=false",
+        "onChainData": {
+          "exists": "boolean",
+          "isMock": "=true",
+          "policyHash": "string",
+          "recordHash": "string",
+          "submitter": "string",
+          "timestamp": "number"
+        },
+        "onChainPolicyHash": "string",
+        "policyHash": "string",
+        "storedOffChainHash": "string",
+        "submitter": "string",
+        "transactionId": "string"
+      },
+      "message": "string",
+      "status": "=\"VERIFIED_SIMULATED\"",
+      "verified": "=true"
+    }
+  },
+  "verify_missing": {
+    "httpStatus": 200,
+    "body": {
+      "message": "string",
+      "status": "=\"NOT_FOUND\"",
+      "verified": "=false"
+    }
+  },
+  "tamper": {
+    "httpStatus": 200,
+    "body": {
+      "message": "string",
+      "success": "=true",
+      "tamperedRecord": {
+        "aiDecision": "=\"REJECT\"",
+        "amount": "number",
+        "auditId": "string",
+        "blockNumber": "number",
+        "blockchainTxId": "string",
+        "confidence": "number",
+        "createdAt": "string",
+        "finalDecision": "=\"REJECT\"",
+        "isTampered": "=true",
+        "lastVerifiedAt": "null",
+        "modelVersion": "string",
+        "planHash": "null",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "previousValue": "string",
+        "reason": "string",
+        "recordHash": "string",
+        "reviewRequired": "=false",
+        "reviewedAt": "null",
+        "reviewerDecision": "null",
+        "riskScore": "number",
+        "saltMasked": "string",
+        "tamperedAt": "string",
+        "tamperedField": "string",
+        "timestamp": "string",
+        "transactionId": "string",
+        "transactionType": "string",
+        "updatedAt": "string",
+        "upstreamDecision": "null",
+        "upstreamModelVersion": "null",
+        "upstreamSource": "null",
+        "verificationStatus": "=\"TAMPER_SUSPECTED\""
+      }
+    }
+  },
+  "verify_tampered": {
+    "httpStatus": 200,
+    "body": {
+      "details": {
+        "auditId": "string",
+        "blockTimestamp": "number",
+        "blockchainOnChainHash": "string",
+        "calculatedCurrentHash": "string",
+        "canonicalPayload": {
+          "aiDecision": "=\"REJECT\"",
+          "amount": "number",
+          "auditId": "string",
+          "confidence": "number",
+          "finalDecision": "=\"REJECT\"",
+          "modelVersion": "string",
+          "policyHash": "string",
+          "policyId": "=\"P001\"",
+          "policyVersion": "=\"1.0\"",
+          "reviewRequired": "=false",
+          "reviewerDecision": "null",
+          "riskScore": "number",
+          "salt": "string",
+          "timestamp": "string",
+          "transactionId": "string",
+          "transactionType": "string"
+        },
+        "isTampered": "=true",
+        "onChainData": {
+          "exists": "boolean",
+          "isMock": "=true",
+          "policyHash": "string",
+          "recordHash": "string",
+          "submitter": "string",
+          "timestamp": "number"
+        },
+        "onChainPolicyHash": "string",
+        "policyHash": "string",
+        "storedOffChainHash": "string",
+        "submitter": "string",
+        "transactionId": "string"
+      },
+      "message": "string",
+      "status": "=\"MODIFIED\"",
+      "verified": "=false"
+    }
+  },
+  "retry": {
+    "httpStatus": 200,
+    "body": {
+      "message": "string",
+      "reconciled": "=true",
+      "record": {
+        "aiDecision": "=\"APPROVE\"",
+        "amount": "number",
+        "auditId": "string",
+        "blockNumber": "number",
+        "blockchainTxId": "string",
+        "confidence": "number",
+        "createdAt": "string",
+        "finalDecision": "=\"APPROVE\"",
+        "isTampered": "=false",
+        "lastVerifiedAt": "string",
+        "modelVersion": "string",
+        "planHash": "null",
+        "policyHash": "string",
+        "policyId": "=\"P001\"",
+        "policyVersion": "=\"1.0\"",
+        "previousValue": "string",
+        "reason": "string",
+        "recordHash": "string",
+        "reviewRequired": "=false",
+        "reviewedAt": "null",
+        "reviewerDecision": "null",
+        "riskScore": "number",
+        "saltMasked": "string",
+        "tamperedAt": "null",
+        "tamperedField": "null",
+        "timestamp": "string",
+        "transactionId": "string",
+        "transactionType": "string",
+        "updatedAt": "string",
+        "upstreamDecision": "null",
+        "upstreamModelVersion": "null",
+        "upstreamSource": "null",
+        "verificationStatus": "=\"VERIFIED_SIMULATED\""
+      },
+      "success": "=true"
+    }
+  },
+  "records": {
+    "httpStatus": 200,
+    "body": {
+      "count": "number",
+      "records": [
+        {
+          "aiDecision": "=\"HUMAN_REVIEW\"",
+          "amount": "number",
+          "auditId": "string",
+          "blockNumber": "null",
+          "blockchainTxId": "null",
+          "confidence": "number",
+          "createdAt": "string",
+          "finalDecision": "=\"PENDING_HUMAN_REVIEW\"",
+          "isTampered": "=false",
+          "lastVerifiedAt": "null",
+          "modelVersion": "string",
+          "planHash": "string",
+          "policyHash": "string",
+          "policyId": "=\"P001\"",
+          "policyVersion": "=\"1.0\"",
+          "previousValue": "null",
+          "reason": "string",
+          "recordHash": "string",
+          "reviewRequired": "=true",
+          "reviewedAt": "null",
+          "reviewerDecision": "null",
+          "riskScore": "number",
+          "saltMasked": "string",
+          "tamperedAt": "null",
+          "tamperedField": "null",
+          "timestamp": "string",
+          "transactionId": "string",
+          "transactionType": "string",
+          "updatedAt": "string",
+          "upstreamDecision": "=\"STEP_UP\"",
+          "upstreamModelVersion": "string",
+          "upstreamSource": "=\"component2\"",
+          "verificationStatus": "=\"PENDING_HUMAN_REVIEW\""
+        }
+      ],
+      "success": "=true"
+    }
+  },
+  "stats": {
+    "httpStatus": 200,
+    "body": {
+      "stats": {
+        "approved": "number",
+        "blockchainStatus": {
+          "contractAddress": "null",
+          "isConfigured": "boolean",
+          "isMock": "=true",
+          "mode": "string",
+          "rpcUrl": "null"
+        },
+        "humanReview": "number",
+        "integrityFailures": "number",
+        "onChainMissing": "number",
+        "rejected": "number",
+        "totalDecisions": "number",
+        "verified": "=2"
+      },
+      "success": "=true"
+    }
+  },
+  "health": {
+    "httpStatus": 200,
+    "body": {
+      "component": "string",
+      "status": "=\"online\"",
+      "timestamp": "string"
+    }
+  }
+}

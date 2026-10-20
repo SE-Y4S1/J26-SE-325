@@ -9,6 +9,7 @@ router.get("/records", auditController.getRecords);
 router.delete("/records", auditController.clearRecords);
 router.post("/reset", auditController.clearRecords);
 router.get("/stats", auditController.getStats);
+router.get("/policies", auditController.getPolicies);
 
 // Verification and Tampering Endpoints
 router.get("/:transactionId/verify", auditController.verifyAudit);
