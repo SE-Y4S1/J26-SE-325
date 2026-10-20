@@ -18,8 +18,10 @@ services:
       # calling back here on each request. The service refuses to start if it is unset,
       # short, or still the placeholder from .env.example.
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in a repo-root .env — see .env.example}
-      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
-      DATABASE_URL: sqlite:////app/artifacts/platform.sqlite
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      # Unset in .env = SQLite in the platform_data volume; set = Postgres (e.g. Prisma).
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/artifacts/platform.sqlite}
+      PIPELINE_TIMEOUT_SECONDS: ${PIPELINE_TIMEOUT_SECONDS:-10}
       # Executions run Component 1 plans through Components 2 and 3 (service/pipeline.py).
       # In-network names; if either is down, executions are HELD, never run unscreened.
       FRAUD_SERVICE_URL: http://component2:8001
@@ -37,11 +39,24 @@ services:
       - "8000:8000"
     environment:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in a repo-root .env}
-      AUTH_REQUIRED: "true"
-      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-true}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_ENABLED: "true"
       MLFLOW_TRACKING_URI: sqlite:///artifacts/mlflow.db
+      BASE_CURRENCY: ${BASE_CURRENCY:-LKR}
+      FX_SPREAD_FIAT: ${FX_SPREAD_FIAT:-0.0075}
+      FX_SPREAD_STABLECOIN: ${FX_SPREAD_STABLECOIN:-0.01}
+      SENTIMENT_BACKEND: ${SENTIMENT_BACKEND:-auto}
+      # Optional data channels; empty = reported as not configured.
+      NEWSAPI_KEY: ${NEWSAPI_KEY:-}
+      JINA_API_KEY: ${JINA_API_KEY:-}
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
+      REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-j26-se-325-component1/0.1}
+      TWITTER_AUTH_TOKEN: ${TWITTER_AUTH_TOKEN:-}
+      TWITTER_CT0: ${TWITTER_CT0:-}
+      SEC_USER_AGENT: ${SEC_USER_AGENT:-}
     volumes:
       # The model registry lives here; Component 3 anchors model_version on-chain, so a
       # version that vanished on restart would break its provenance chain.
@@ -58,11 +73,11 @@ services:
         # Baked in at build time: NEXT_PUBLIC_* is inlined into the client bundle, never read
         # at runtime. These are the URLs the BROWSER uses, so they are localhost — not the
         # compose service names, which only resolve inside the network.
-        NEXT_PUBLIC_PLATFORM_URL: http://localhost:8100
-        NEXT_PUBLIC_PORTFOLIO_URL: http://localhost:8000
-        NEXT_PUBLIC_FRAUD_URL: http://localhost:8001
-        NEXT_PUBLIC_AUDIT_URL: http://localhost:8002
-        NEXT_PUBLIC_ASSISTANT_URL: http://localhost:8003
+        NEXT_PUBLIC_PLATFORM_URL: ${NEXT_PUBLIC_PLATFORM_URL:-http://localhost:8100}
+        NEXT_PUBLIC_PORTFOLIO_URL: ${NEXT_PUBLIC_PORTFOLIO_URL:-http://localhost:8000}
+        NEXT_PUBLIC_FRAUD_URL: ${NEXT_PUBLIC_FRAUD_URL:-http://localhost:8001}
+        NEXT_PUBLIC_AUDIT_URL: ${NEXT_PUBLIC_AUDIT_URL:-http://localhost:8002}
+        NEXT_PUBLIC_ASSISTANT_URL: ${NEXT_PUBLIC_ASSISTANT_URL:-http://localhost:8003}
     ports:
       - "3000:3000"
     depends_on:
@@ -136,7 +151,9 @@ services:
     ports: ["8001:8001"]
     environment:
       FRAUD_API_PORT: "8001"
-      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      FRAUD_ENABLE_KAFKA: ${FRAUD_ENABLE_KAFKA:-false}
+      FRAUD_KAFKA_BOOTSTRAP: kafka:9092
     volumes:
       # A bundle trained with scripts/train_benchmark.py lands here and is loaded on start;
       # without one the service answers with the labelled heuristic-untrained scorer.
@@ -150,16 +167,31 @@ services:
     restart: unless-stopped
 
   component3:                      # Blockchain Auditability  (Abeysekara W C S M)
-    image: node:20-slim
+    # Node 22 for its built-in SQLite: better-sqlite3 needs a compiler the slim image lacks.
+    image: node:22-slim
     working_dir: /app
     volumes:
       - ./backend/Blockchain-Auditability/backend:/app
+      # The container's own node_modules, never the host's: a Windows checkout's native
+      # modules do not load on Linux.
+      - component3_node_modules:/app/node_modules
+      # Off-chain records outlive the container, as the platform's accounts do.
+      - component3_data:/data
     # PORT is read from the environment by its index.js, so it runs on 8002 without any
     # change to the source.
-    command: sh -c "npm install --silent && node src/index.js"
+    command: sh -c "npm install --silent --no-audit --no-fund && node src/index.js"
     ports: ["8002:8002"]
     environment:
       PORT: "8002"
+      # No chain runs in this stack. Without this the service expects a Hardhat node at
+      # 127.0.0.1:8545, every anchor fails, and every execution is held.
+      BLOCKCHAIN_MODE: ${BLOCKCHAIN_MODE:-mock}
+      BLOCKCHAIN_RPC_URL: ${BLOCKCHAIN_RPC_URL:-}
+      SIGNER_PRIVATE_KEY: ${SIGNER_PRIVATE_KEY:-}
+      # Postgres when DATABASE_URL is set in .env (shared with the platform), else SQLite here.
+      DATABASE_URL: ${DATABASE_URL:-}
+      DB_PATH: /data/audits.sqlite
+      ALLOW_DEMO_TAMPER: ${ALLOW_DEMO_TAMPER:-true}
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:8002/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
       interval: 15s
@@ -201,9 +233,9 @@ services:
         until ollama list > /dev/null 2>&1; do
           sleep 1
         done
-        echo "Checking and pulling llama3.2:3b model into persistent storage..."
-        ollama pull llama3.2:3b
-        echo "llama3.2:3b model is ready for Component 4."
+        echo "Checking and pulling ${OLLAMA_MODEL:-llama3.2:3b} into persistent storage..."
+        ollama pull ${OLLAMA_MODEL:-llama3.2:3b}
+        echo "${OLLAMA_MODEL:-llama3.2:3b} is ready for Component 4."
     depends_on:
       ollama:
         condition: service_healthy
@@ -215,8 +247,14 @@ services:
     ports: ["8003:8003"]
     environment:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in a repo-root .env}
-      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-250}
+      LLM_KEEP_ALIVE: ${LLM_KEEP_ALIVE:-60m}
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-true}
+      PLATFORM_USER_ID: ${PLATFORM_USER_ID:-1}
+      PORTFOLIO_ID: ${PORTFOLIO_ID:-1}
       PLATFORM_SERVICE_URL: http://platform:8100
       AUDIT_SERVICE_URL: http://component3:8002
       FRAUD_SERVICE_URL: http://component2:8001
@@ -238,5 +276,7 @@ services:
 
 volumes:
   platform_data:
+  component3_node_modules:
+  component3_data:
   kafka_data:
   ollama_data:
