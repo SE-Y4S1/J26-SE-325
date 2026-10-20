@@ -16,6 +16,9 @@ describe("saved experiment files", () => {
     const fused = ieee?.models.find((model) => model.model === "fused_lstm_gnn");
     const gnn = ieee?.models.find((model) => model.model === "gnn_only");
     expect(fused?.auroc).toBe(gnn?.auroc);
+    expect(fused?.allow).toBe(2777);
+    expect(fused?.stepUp).toBe(158);
+    expect(fused?.block).toBe(65);
     expect(ieee?.bestModel).toBe("Random forest");
   });
 
