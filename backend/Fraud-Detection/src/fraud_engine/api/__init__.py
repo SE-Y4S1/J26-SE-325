@@ -53,16 +53,18 @@ def create_app(settings: dict | None = None, bundle_path: Path | None | object =
     )
     app.state.service = service
     app.state.settings = resolved
-    # The platform frontend calls this service from the browser. No origins are allowed
-    # unless ALLOWED_ORIGINS names them.
-    origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-    if origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=origins,
-            allow_methods=["GET", "POST"],
-            allow_headers=["Authorization", "Content-Type"],
-        )
+    # One CORS layer for every browser caller: two stacked CORSMiddleware instances reject
+    # each other's preflights. The research dashboard (frontend/, Vite on 5173) is always
+    # allowed; the platform frontend's origins come from ALLOWED_ORIGINS.
+    dashboard_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
+    configured = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=dashboard_origins + [o for o in configured if o not in dashboard_origins],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "Accept"],
+    )
 
     @app.get("/health")
     def health() -> dict:
@@ -111,6 +113,20 @@ def create_app(settings: dict | None = None, bundle_path: Path | None | object =
 
     @app.get("/v1/decisions/summary")
     def decision_summary() -> dict:
-        return dict(service.decision_counts)
+        with service.lock:
+            return dict(service.decision_counts)
+
+    @app.get("/v1/decisions")
+    def decisions() -> dict:
+        """Recent gateway decisions already stored by this process."""
+        with service.lock:
+            rows = list(service.recent)
+            counts = dict(service.decision_counts)
+        rows.reverse()
+        return {
+            "decisions": rows,
+            "counts": counts,
+            "scope": "this API process only",
+        }
 
     return app
