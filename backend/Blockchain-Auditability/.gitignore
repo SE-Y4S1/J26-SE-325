@@ -8,6 +8,8 @@
 **/.env.development.local
 **/.env.test.local
 **/.env.production.local
+# Templates hold no values and document the settings, so they are committed.
+!**/.env.example
 *.pem
 *.key
 *.crt
