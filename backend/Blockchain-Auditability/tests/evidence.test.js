@@ -41,8 +41,9 @@ describe("evidence bundles", () => {
   beforeAll(async () => {
     db = getDatabase(testDbPath);
     await request(app).post("/api/audit/evaluate").send({
-      transactionId: "EV-AUTO", riskScore: 10, confidence: 90, amount: 750, transactionType: "PAYMENT", modelVersion: "m",
-      signals: { modelScores: { lstm: 0.1, gnn: 0.12 }, rules: [], ...VALIDATED, subjectRef: SUBJECT_REF }
+      // Clearly safe under every P002 version, so it is AUTO whichever version is in force.
+      transactionId: "EV-AUTO", riskScore: 1, confidence: 90, amount: 750, transactionType: "PAYMENT", modelVersion: "m",
+      signals: { modelScores: { lstm: 0.01, gnn: 0.02 }, rules: [], ...VALIDATED, subjectRef: SUBJECT_REF }
     });
     await request(app).post("/api/audit/evaluate").send({
       transactionId: "EV-REVIEWED", riskScore: 90, confidence: 40, amount: 75000, transactionType: "LOAN_DISBURSEMENT", modelVersion: "m"

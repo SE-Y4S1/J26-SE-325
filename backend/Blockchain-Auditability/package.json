@@ -1,7 +1,7 @@
 {
   "name": "blockchain-auditability-backend",
   "version": "1.0.0",
-  "description": "Backend API for Privacy-Preserving AI-to-Smart-Contract Audit Bridge",
+  "description": "Component 3: AI Decision Assurance Engine and tamper-evident audit ledger",
   "main": "src/index.js",
   "engines": {
     "node": ">=20"

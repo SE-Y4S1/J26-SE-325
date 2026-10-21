@@ -141,7 +141,7 @@ The Postgres store keeps records as JSONB and needs no migration.
 
 | Suite | Command | Result (2026-10-21) |
 |---|---|---|
-| Service (Jest, 12 suites, incl. 400 Python↔JS golden vectors) | `npm test` | 152 passed |
+| Service (Jest, 13 suites, incl. 400 Python↔JS golden vectors and missing/garbage-input cases) | `npm test` | 175 passed |
 | Contract (Hardhat) | `cd blockchain && npx hardhat test` | 16 passing |
 | Research pipeline (pytest, code tests on a synthetic fixture) | `cd research && uv run pytest -q` | 23 passed |
 

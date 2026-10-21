@@ -86,8 +86,10 @@ describe("assurance engine over the API", () => {
   });
 
   test("full signals route a clean decision to AUTO and return the assurance object", async () => {
+    // Clearly safe under every P002 version (hand-set or tuned): low score, agreeing models.
     const res = await request(app).post("/api/audit/evaluate").send(payload("TX-AS-AUTO", {
-      signals: { modelScores: { lstm: 0.1, gnn: 0.12 }, rules: [], ...VALIDATED }
+      riskScore: 1,
+      signals: { modelScores: { lstm: 0.01, gnn: 0.02 }, rules: [], ...VALIDATED }
     }));
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("COMPLETED");
@@ -176,7 +178,13 @@ describe("assurance engine over the API", () => {
       expect(computePolicyHashForScheme(p.hashScheme, p.document)).toBe(p.policyHash);
       expect(p.onChain.active).toBe(true); // mock ledger accepts every policy
     }
-    expect(byId.P002).toMatchObject({ routesSignalRequests: true, status: "untuned", hashScheme: "v2" });
+    // Every P002 version is listed (records routed by an older one must resolve), but exactly
+    // one -- the version in force -- routes signal requests.
+    const routing = res.body.policies.filter((p) => p.routesSignalRequests);
+    expect(routing).toHaveLength(1);
+    expect(routing[0]).toMatchObject({ id: "P002", version: policyRegistry.getActive().version, hashScheme: "v2" });
+    expect(res.body.activePolicyVersion).toBe(policyRegistry.getActive().version);
+    expect(res.body.policies.find((p) => p.id === "P002" && p.version === "1.0")).toMatchObject({ status: "untuned" });
     expect(byId.P001).toMatchObject({ routesSignalRequests: false, baseline: true, hashScheme: "v1" });
   });
 });

@@ -19,6 +19,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+import joblib
 import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
 
@@ -32,13 +33,16 @@ from .routers import Fitted, _assurance_routes, assurance_score, fit_all
 from .signals import ContextModel, compute, first_seen_flags
 
 CACHE_NAME = "signals-cache.npz"
+# The fitted preprocessor, calibrated models and context model, so assurance.replay can score
+# real transactions without refitting. Git-ignored with the rest of cache/ (trained on Kaggle data).
+MODELS_NAME = "models.joblib"
 EXPORTED_POLICY = config.POLICY_DIR / "P002-assurance-v1.1.json"
 BASELINES = ["risk_band", "confidence_only", "p001_retuned", "random_review", "learned_deferral"]
 
 
 # --- building signals ------------------------------------------------------------------------
 
-def build(data_dir: Path | None, max_rows: int | None, fast: bool) -> tuple[dict, dict]:
+def build(data_dir: Path | None, max_rows: int | None, fast: bool) -> tuple[dict, dict, dict]:
     frame = load_ieee_cis(data_dir, max_rows)
     splits = time_split(frame)
     parts = {name: splits.part(name) for name in splits.index}
@@ -71,7 +75,9 @@ def build(data_dir: Path | None, max_rows: int | None, fast: bool) -> tuple[dict
         "fast": fast,
         "max_rows": max_rows,
     }
-    return signals, meta
+    models = {"preprocessor": pre, "ensemble": ensemble, "context": context,
+              "threshold": config.DECISION_THRESHOLD, "trained_rows": meta["rows"]["train"]}
+    return signals, meta, models
 
 
 def save_cache(path: Path, signals: dict, meta: dict) -> None:
@@ -146,8 +152,9 @@ def stage_tune(args) -> None:
     results = Path(args.results_dir)
     cache = results / "cache" / CACHE_NAME
     cache.parent.mkdir(parents=True, exist_ok=True)
-    signals, meta = build(args.data, args.max_rows, args.fast)
+    signals, meta, models = build(args.data, args.max_rows, args.fast)
     save_cache(cache, signals, meta)
+    joblib.dump(models, cache.parent / MODELS_NAME, compress=3)
 
     tune = signals["tuning"]
     by_budget = {}

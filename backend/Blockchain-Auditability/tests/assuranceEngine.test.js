@@ -2,8 +2,12 @@ const { assess, applyUpstream, AUTOMATION_LEVEL } = require("../src/services/ass
 const { policyRegistry } = require("../src/services/policyRegistry");
 
 const P001 = policyRegistry.get("P001");
-const P002 = policyRegistry.get("P002");
+// Mechanics tests use P002 v1.0, whose hand-set numbers their inputs were chosen for. The
+// guarantees (property tests) are checked for every P002 version, including tuned ones.
+const P002_VERSIONS = policyRegistry.list().filter((p) => p.id === "P002");
+const P002 = P002_VERSIONS.find((p) => p.version === "1.0");
 const doc = P002.document;
+const EVERY_P002 = P002_VERSIONS.map((p) => [`P002 v${p.version}`, p]);
 
 const VALIDATED = { benchmarkModel: true, sourceModelVersion: "fraud-bundle-2026-10" };
 
@@ -131,15 +135,15 @@ describe("conservative degradation", () => {
     expect(a.route).not.toBe("AUTO");
   });
 
-  test("property: a DEGRADED assessment is never AUTO (2,000 random inputs)", () => {
+  test.each(EVERY_P002)("property (%s): a DEGRADED assessment is never AUTO (2,000 random inputs)", (_, policy) => {
     const r = rng(20261020);
     for (let i = 0; i < 2000; i++) {
-      const a = assess(randomInput(r), P002);
+      const a = assess(randomInput(r), policy);
       if (a.signalQuality === "DEGRADED") expect(a.route).not.toBe("AUTO");
     }
   });
 
-  test("property: removing a signal never makes the route more automated than any non-vetoed observation (2,000 random inputs)", () => {
+  test.each(EVERY_P002)("property (%s): removing a signal never makes the route more automated than any non-vetoed observation (2,000 random inputs)", (_, policy) => {
     const r = rng(42);
     const removals = {
       modelScores: (s) => { const c = { ...s }; delete c.modelScores; return c; },
@@ -150,9 +154,9 @@ describe("conservative degradation", () => {
     let compared = 0;
     for (let i = 0; i < 2000; i++) {
       const present = randomInput(r);
-      const full = assess(present, P002);
+      const full = assess(present, policy);
       for (const [name, remove] of Object.entries(removals)) {
-        const reduced = assess({ ...present, signals: remove(present.signals) }, P002);
+        const reduced = assess({ ...present, signals: remove(present.signals) }, policy);
         // The one documented exception: a disagreement veto is evidence observed only when the
         // scores are present. Dropping the scores cannot reproduce it, but the reduced
         // assessment is still DEGRADED and capped below AUTO.
@@ -166,19 +170,21 @@ describe("conservative degradation", () => {
         compared++;
       }
     }
-    expect(compared).toBeGreaterThan(6000);
+    // Coverage, not the guarantee: at least half of the 8,000 comparisons were not excused by a
+    // disagreement veto (a tuned policy with a tighter veto excuses more of them).
+    expect(compared).toBeGreaterThan(4000);
   });
 
-  test("property: more disagreement or more context risk never increases automation", () => {
+  test.each(EVERY_P002)("property (%s): more disagreement or more context risk never increases automation", (_, policy) => {
     const r = rng(7);
     for (let i = 0; i < 1000; i++) {
       const base = randomInput(r);
-      const a = assess(base, P002);
+      const a = assess(base, policy);
       const scores = Object.values(base.signals.modelScores);
       const wider = { ...base.signals.modelScores, extreme: scores.some((s) => s > 0.5) ? 0 : 1 };
-      const b = assess({ ...base, signals: { ...base.signals, modelScores: wider } }, P002);
+      const b = assess({ ...base, signals: { ...base.signals, modelScores: wider } }, policy);
       expect(level(b.route)).toBeLessThanOrEqual(level(a.route));
-      const c = assess({ ...base, signals: { ...base.signals, rules: [...base.signals.rules, "amount_hard_block"] } }, P002);
+      const c = assess({ ...base, signals: { ...base.signals, rules: [...base.signals.rules, "amount_hard_block"] } }, policy);
       expect(level(c.route)).toBeLessThanOrEqual(level(a.route));
     }
   });

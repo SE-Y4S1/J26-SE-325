@@ -12,6 +12,13 @@ const { authRequired, canSeeRecordContents } = require("../auth/auth");
 const PENDING = "PENDING_HUMAN_REVIEW";
 const SIGNAL_KEYS = new Set(["modelScores", "rules", "benchmarkModel", "sourceModelVersion", "subjectRef"]);
 const MODEL_NAME = /^[A-Za-z0-9_.-]{1,32}$/;
+// Identifiers are echoed into URLs, logs and the UI, so they are bounded and plain: the
+// platform's execution ids (EXE-<32 hex>) and every existing caller fit well inside these.
+const TRANSACTION_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const TRANSACTION_TYPE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const PRINTABLE = /^[\x20-\x7E]+$/;
+const MAX_MODEL_VERSION = 256;
+const MAX_UPSTREAM_SOURCE = 64;
 
 // Component 2's gateway actions mapped onto P001's. STEP_UP is a challenge the user must
 // pass before the transaction proceeds, so it holds the record for review like HUMAN_REVIEW.
@@ -26,8 +33,13 @@ class AuditController {
   validateInput(data) {
     const errors = [];
 
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      return ["Request body must be a JSON object."];
+    }
     if (!data.transactionId || typeof data.transactionId !== "string" || !data.transactionId.trim()) {
       errors.push("Transaction ID must exist and cannot be empty.");
+    } else if (!TRANSACTION_ID.test(data.transactionId)) {
+      errors.push("Transaction ID must be at most 128 characters of letters, digits, '-', '_', '.' or ':', starting with a letter or digit.");
     }
     if (typeof data.riskScore !== "number" || isNaN(data.riskScore) || data.riskScore < 0 || data.riskScore > 100) {
       errors.push("Risk score must be a number between 0 and 100.");
@@ -40,17 +52,26 @@ class AuditController {
     }
     if (!data.transactionType || typeof data.transactionType !== "string" || !data.transactionType.trim()) {
       errors.push("Transaction type must exist.");
+    } else if (!TRANSACTION_TYPE.test(data.transactionType)) {
+      errors.push("Transaction type must be at most 64 letters, digits or '_', starting with a letter (e.g. PORTFOLIO_WITHDRAWAL).");
     }
     if (!data.modelVersion || typeof data.modelVersion !== "string" || !data.modelVersion.trim()) {
       errors.push("Model version must exist.");
+    } else if (data.modelVersion.length > MAX_MODEL_VERSION || !PRINTABLE.test(data.modelVersion)) {
+      errors.push(`Model version must be at most ${MAX_MODEL_VERSION} printable characters.`);
     }
     if (data.upstreamDecision !== undefined && data.upstreamDecision !== null) {
       const upstream = data.upstreamDecision;
       if (typeof upstream !== "object" || !UPSTREAM_ACTIONS[upstream.decision]) {
         errors.push(`upstreamDecision.decision must be one of ${Object.keys(UPSTREAM_ACTIONS).join(", ")}.`);
       }
-      if (!upstream || typeof upstream.source !== "string" || !upstream.source.trim()) {
-        errors.push("upstreamDecision.source must name the component that enforced the decision.");
+      if (!upstream || typeof upstream.source !== "string" || !upstream.source.trim()
+          || upstream.source.length > MAX_UPSTREAM_SOURCE || !PRINTABLE.test(upstream.source)) {
+        errors.push(`upstreamDecision.source must name the component that enforced the decision (at most ${MAX_UPSTREAM_SOURCE} characters).`);
+      }
+      if (upstream && upstream.modelVersion !== undefined && upstream.modelVersion !== null
+          && (String(upstream.modelVersion).length > MAX_MODEL_VERSION || !PRINTABLE.test(String(upstream.modelVersion)))) {
+        errors.push(`upstreamDecision.modelVersion must be at most ${MAX_MODEL_VERSION} printable characters.`);
       }
     }
     if (data.planHash !== undefined && data.planHash !== null && !/^0x[0-9a-f]{64}$/.test(data.planHash)) {
@@ -292,9 +313,10 @@ class AuditController {
    */
   async submitHumanReview(req, res) {
     try {
-      const { transactionId, reviewerDecision } = req.body;
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const { transactionId, reviewerDecision } = body;
 
-      if (!transactionId || !["APPROVE", "REJECT"].includes(reviewerDecision)) {
+      if (!transactionId || typeof transactionId !== "string" || !["APPROVE", "REJECT"].includes(reviewerDecision)) {
         return res.status(400).json({
           success: false,
           message: "Invalid review decision. Must specify transactionId and decision (APPROVE or REJECT)."
@@ -315,7 +337,7 @@ class AuditController {
       if (existingRecord.reviewerDecision) {
         return res.status(409).json({ success: false, message: `Record ${transactionId} has already been reviewed.` });
       }
-      const reason = req.body.reason;
+      const reason = body.reason;
       if (reason !== undefined && reason !== null && (typeof reason !== "string" || reason.length > 500)) {
         return res.status(400).json({ success: false, message: "reason must be a string of at most 500 characters." });
       }
@@ -615,7 +637,8 @@ class AuditController {
    */
   async getPolicies(req, res) {
     try {
-      const activeId = policyRegistry.getActive().id;
+      const active = policyRegistry.getActive();
+      const activeId = active.id;
       const policies = await Promise.all(policyRegistry.list().map(async (p) => {
         let onChain = { active: null, error: null };
         try {
@@ -629,7 +652,8 @@ class AuditController {
           engine: p.engine,
           status: p.status,
           baseline: p.baseline,
-          routesSignalRequests: p.id === activeId,
+          // Exactly one version routes: older versions stay listed so records they routed resolve.
+          routesSignalRequests: p.id === activeId && p.version === active.version,
           hashScheme: p.hashScheme,
           policyHash: p.policyHash,
           description: p.description,
@@ -637,7 +661,7 @@ class AuditController {
           onChain
         };
       }));
-      return res.status(200).json({ success: true, activePolicyId: activeId, legacyPolicyId: "P001", policies });
+      return res.status(200).json({ success: true, activePolicyId: activeId, activePolicyVersion: active.version, legacyPolicyId: "P001", policies });
     } catch (err) {
       return res.status(500).json({ success: false, message: err.message });
     }

@@ -1,0 +1,89 @@
+{
+  "meta": {
+    "hashScheme": "v2",
+    "baseline": false,
+    "description": "AI Decision Assurance Policy, tuned on IEEE-CIS (see research/). Weights, thresholds and the disagreement veto come from the policy-tuning split; the online context sub-signals are unchanged from v1.0 because the offline context signals are not available online."
+  },
+  "document": {
+    "id": "P002",
+    "version": "1.1",
+    "name": "AI Decision Assurance Policy",
+    "engine": "assurance-engine/1.0",
+    "status": "tuned",
+    "decision": {
+      "rejectThreshold": 0.0909
+    },
+    "weights": {
+      "confidence": 0.6,
+      "disagreement": 0.35,
+      "context": 0.05
+    },
+    "routing": {
+      "autoMin": 0.6702,
+      "verifyMin": 0.4382,
+      "degradedCap": "VERIFY"
+    },
+    "unreliable": {
+      "confidenceFloor": 0.5,
+      "modelVersionPatterns": [
+        "heuristic",
+        "unregistered",
+        "untrained"
+      ]
+    },
+    "missing": {
+      "disagreement": 0.2
+    },
+    "vetoes": {
+      "maxDisagreement": 0.2,
+      "reviewAmount": 100000
+    },
+    "context": {
+      "weights": {
+        "amount": 0.35,
+        "upstreamRules": 0.35,
+        "modelValidation": 0.2,
+        "transactionType": 0.1
+      },
+      "amountScale": {
+        "low": 100,
+        "high": 1000000
+      },
+      "ruleSeverity": {
+        "amount_hard_block": 1,
+        "ip_reputation_block": 1,
+        "rate_limit_block": 1,
+        "score_above_block_threshold": 1,
+        "ip_reputation_step_up": 0.6,
+        "rate_limit_step_up": 0.6,
+        "concept_drift_step_up": 0.6,
+        "score_above_step_up_threshold": 0.6,
+        "score_below_step_up_threshold": 0
+      },
+      "unknownRuleSeverity": 0.3,
+      "transactionTypeRisk": {
+        "PORTFOLIO_WITHDRAWAL": 0.5,
+        "PORTFOLIO_REBALANCE": 0.2,
+        "WITHDRAWAL": 0.5,
+        "TRANSFER": 0.5,
+        "PAYMENT": 0.3,
+        "LOAN_DISBURSEMENT": 0.7
+      },
+      "defaultTransactionTypeRisk": 0.5
+    },
+    "tunedOn": {
+      "dataset": "IEEE-CIS Fraud Detection (Kaggle 2019), labelled train_transaction + train_identity",
+      "split": "time-ordered; tuned on the policy-tuning split only",
+      "rows": {
+        "train": 295270,
+        "calibration": 88581,
+        "tuning": 88581,
+        "test": 118108
+      },
+      "humanReviewBudget": 0.1,
+      "verifyBudget": 0.1,
+      "objective": "minimise incorrect automatic decisions (VERIFY counted as automatic)",
+      "offlineContext": "mean of amount percentile, IsolationForest novelty, first-seen card, missing identity"
+    }
+  }
+}

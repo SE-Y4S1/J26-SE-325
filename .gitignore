@@ -43,3 +43,6 @@ _extract_taf.py
 
 # Playwright MCP scratch output
 .playwright-mcp/
+
+# Private PP1 diagrams (Chenuli) -- local copy only, not committed
+/my-diagrams/

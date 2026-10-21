@@ -1,6 +1,11 @@
 # Privacy-Preserving AI-to-Smart-Contract Audit Bridge
 ## Component 03 — Technical Architecture, Formal Verification & Demonstration Report
 
+> **Superseded — kept as the record of the first (ledger-only) iteration.** The current design,
+> the AI Decision Assurance Engine (AUTO / VERIFY / HUMAN_REVIEW routing, policy P002, record v2
+> with linked review commitments) and current test results are in [README.md](README.md).
+> The hash formulas, contract and verification predicate below still hold for v1 records.
+
 **Author / Researcher:** Chenuli Abeysekara (IT23225442) · **Component Port:** 8002 (UI in the shared Nexa app) · **Status:** Operational
 
 ---

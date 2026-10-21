@@ -34,16 +34,38 @@ app.use("/api/audit", auditRoutes);
 app.get("/api/health", (req, res) => {
   res.json({
     status: "online",
-    component: "Component 03: Privacy-Preserving AI-to-Smart-Contract Audit Bridge",
+    component: "Component 03: AI Decision Assurance Engine and tamper-evident audit ledger",
     timestamp: new Date().toISOString()
   });
+});
+
+// Unknown routes answer in the service's JSON shape, like every other error.
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: `No route ${req.method} ${req.path}.` });
+});
+
+// Malformed or oversized bodies, and anything a route lets escape, are answered as JSON
+// rather than Express's default page, which carries a stack trace outside production.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  if (err.type === "entity.parse.failed") {
+    return res.status(400).json({ success: false, message: "Request body is not valid JSON." });
+  }
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({ success: false, message: "Request body is larger than the 100kb limit." });
+  }
+  if (err.status >= 400 && err.status < 500 && err.expose) {
+    return res.status(err.status).json({ success: false, message: err.message });
+  }
+  console.error("Unhandled error:", err);
+  return res.status(500).json({ success: false, message: "Internal server error." });
 });
 
 // Start Server when run directly
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`=============================================================`);
-    console.log(` Privacy-Preserving AI-to-Smart-Contract Audit Bridge Backend`);
+    console.log(` Component 03: AI Decision Assurance Engine + audit ledger`);
     console.log(` Server listening on http://localhost:${PORT}`);
     console.log(` API Endpoint: http://localhost:${PORT}/api/audit`);
     console.log(` Auth: ${authRequired() ? "enforced (AUTH_REQUIRED)" : "not enforced (set AUTH_REQUIRED=true in production)"}`);

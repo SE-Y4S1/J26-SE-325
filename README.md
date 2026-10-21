@@ -161,7 +161,8 @@ holdings that change:
  Component 2  ALLOW / STEP_UP / BLOCK, score, gateway rules, feature attributions
       |
       v   POST /api/audit/evaluate           riskScore, upstreamDecision, planHash, c1+c2 model versions
- Component 3  final decision = stricter of P001 and Component 2; canonical hash anchored on-chain
+ Component 3  assurance engine routes AUTO / VERIFY / HUMAN_REVIEW (never laxer than Component 2);
+              canonical hash anchored on-chain at decision time
       |
       v
  Platform     EXECUTED (holdings change) | PENDING_REVIEW | BLOCKED | HELD
@@ -175,8 +176,8 @@ holdings that change:
 |---|---|---|
 | `EXECUTED` | Component 2 ALLOW and Component 3 anchored APPROVE | change |
 | `BLOCKED` | Component 2 BLOCK (enforced even if Component 3 is down), or Component 3 REJECT | unchanged |
-| `PENDING_REVIEW` | Component 2 STEP_UP, or P001 requires human review; the account holder re-enters their password to approve or reject, and the review is anchored before anything moves | unchanged until approved |
-| `HELD` | Component 2 or 3 unreachable. Fail closed: nothing executes unscreened or unanchored. `POST /executions/{id}/retry` resumes without rescoring | unchanged |
+| `PENDING_REVIEW` | Component 2 STEP_UP, or Component 3's assurance engine routes VERIFY (or legacy P001 asks for review); the account holder re-enters their password to approve or reject, and the review is anchored before anything moves | unchanged until approved |
+| `HELD` | Component 3 routes HUMAN_REVIEW (waits for an analyst on `/audit/review`), or Component 2 or 3 is unreachable. Fail closed: nothing executes unscreened or unanchored. `POST /executions/{id}/retry` resumes without rescoring | unchanged |
 
 The execution id doubles as Component 2's `transaction_id` and Component 3's `transactionId`,
 so any component can join the three records without a lookup table.
@@ -588,30 +589,58 @@ and `experiments/EXPERIMENT_REPORT.md` there.
 > **Sub-objective (TAF):** Design a privacy-preserving, tamper-evident blockchain audit layer
 > that bridges continuous AI decisions to deterministic on-chain smart contract enforcement.
 
-**Flow:** an AI output (risk score, confidence, amount, type, model version) enters
-`POST /api/audit/evaluate`, is judged by a deterministic policy, canonicalised and hashed, and
-only the hash plus provenance metadata is committed on-chain.
+**Research contribution: an AI Decision Assurance Engine.** For every AI decision it decides
+how far that decision can be trusted to run unattended, and the blockchain makes that judgement
+tamper-evident. The question it answers: *can routing on confidence, model disagreement and
+context automate fewer incorrect decisions than simpler routing, at the same human-review
+workload?*
 
-1. **Policy engine** (`policyEngine.js`, policy P001 v1.0), deterministic and versioned:
-   `riskScore >= 80 and confidence >= 70` gives REJECT; `riskScore >= 80 and confidence < 70`
-   gives HUMAN_REVIEW; below 80 gives APPROVE. Low confidence on a high-risk decision escalates
-   to a human rather than acting automatically.
-2. **Canonical hashing** (`hashService.js`). The record fields are placed in a fixed set with
-   sorted keys and hashed with SHA-256, so identical inputs yield identical commitments across
-   time and environments.
-3. **Privacy-preserving anchoring.** `AuditRegistry.sol` stores only the hash, decision,
-   policy version, model version, timestamp and submitter. Amounts, customer information and
-   raw risk signals stay off-chain. This is a hash-commitment scheme; ZKP is not implemented.
-4. **Human-in-the-loop.** `POST /api/audit/review` records a reviewer's decision
-   (HUMAN_APPROVED / HUMAN_REJECTED) as a new canonical record and commitment.
-5. **Verification.** `GET /api/audit/:id/verify` recomputes the canonical hash from the stored
-   off-chain record and compares it with the on-chain commitment. `POST /:id/tamper` alters the
-   stored record on purpose so the UI can demonstrate tamper detection.
-6. **Ledger adapter** (`blockchainService.js`). Talks to a local Hardhat node when available
-   and falls back to an in-memory mock ledger otherwise, so the platform runs without a chain.
+**Flow:** the platform sends Component 2's decision and signals to `POST /api/audit/evaluate`.
+The engine assesses it, the record is canonicalised and hashed, and only the hash is committed
+on-chain *at decision time* -- including decisions held for review.
 
-Provenance of Component 1 models (`content_hash`, `data_fingerprint`, `git_commit`) is designed
-to anchor through the same registry via `modelVersion`.
+1. **Assurance engine** (`src/services/assuranceEngine.js`, policy P002). Three uncertainties in
+   [0,1]: **confidence** (distance of the score from the decision boundary, derived from the
+   score so a caller cannot claim certainty), **disagreement** (spread between independent
+   models, e.g. Component 2's LSTM and GNN) and **context** (amount, upstream rule hits, model
+   validation status, transaction type).
+   `assuranceScore = 1 - (w_c*u_conf + w_d*u_dis + w_r*u_ctx)` routes the decision to
+   **AUTO**, **VERIFY** (account holder's step-up) or **HUMAN_REVIEW** (an analyst).
+   Vetoes (large model disagreement, amounts at or above the review amount) force
+   HUMAN_REVIEW. **Conservative degradation:** a missing signal is scored at its worst
+   non-vetoed value and any degraded assessment is capped below AUTO, so missing or garbage
+   data can never make a decision more automatic.
+2. **Stricter action wins.** If Component 2 already enforced BLOCK or STEP_UP, the anchored
+   outcome is never more lenient than that, so the ledger cannot contradict enforcement.
+   Callers that send no signals keep the legacy threshold policy P001 (`riskScore >= 80`).
+3. **Policies are versioned, hashed and registered on-chain** (`src/policies/*.json`,
+   `policyRegistry.js`). Every record commits to the SHA-256 of the canonical policy document
+   that routed it, and the contract refuses records for an unregistered policy
+   (`PolicyNotActive`), so a silently edited policy cannot be used.
+4. **Privacy-preserving anchoring.** `AuditRegistry.sol` (write-once, role-protected) stores
+   only `recordHash`, `policyHash`, block timestamp and submitter under a pseudonymous
+   `auditId = sha256(transactionId:salt)`. Amounts, scores, decisions and identities stay
+   off-chain; the subject is a keyed HMAC pseudonym. This is a hash-commitment scheme; ZKP and
+   Merkle batching are not implemented.
+5. **Human-in-the-loop with linked commitments.** `POST /api/audit/review` anchors the review
+   as a second commitment that links to the decision's hash. A reviewer cannot review a
+   decision about themselves (separation of duties).
+6. **Verification and evidence.** `GET /api/audit/:id/verify` recomputes both hashes and
+   reports VERIFIED, MODIFIED (data changed), CHAIN_BROKEN (review link altered) or
+   ON_CHAIN_MISSING. `GET /api/audit/:id/evidence` exports a bundle that
+   `scripts/verify-evidence.js` checks without trusting the service.
+7. **Ledger adapter** (`blockchainService.js`). A Hardhat/EVM node when configured; with
+   `BLOCKCHAIN_MODE=mock`, a simulated ledger (persisted in Postgres when `DATABASE_URL` is set)
+   whose results are always labelled *simulated*.
+8. **Evaluation** (`research/`). Three fraud models (logistic regression, random forest,
+   gradient boosting) are trained on IEEE-CIS with time-ordered splits; the engine's few
+   parameters are tuned on a separate split, exported as policy P002 v1.1, and evaluated once on
+   a held-out test split against risk-only, confidence-only, P001, learned deferral and random
+   review at 5-20% human-review budgets, with bootstrap intervals. Golden vectors keep the
+   JavaScript and Python engines identical.
+
+Missing, zero and malformed input is refused with a JSON error that names the field, or routed
+conservatively; `tests/inputValidation.test.js` pins each case down.
 
 ---
 
@@ -794,9 +823,13 @@ decision), `GET /v1/decisions/summary`, `POST /v1/feedback`,
 
 ### Component 3 (:8002)
 
-`GET /api/health`, `POST /api/audit/evaluate` (optional `upstreamDecision` and `planHash`),
-`POST /api/audit/review`,
-`GET /api/audit/records`, `GET /api/audit/stats`, `GET /api/audit/:transactionId/verify`,
+`GET /api/health`; `POST /api/audit/evaluate` (optional `signals`, `upstreamDecision` and
+`planHash`), `POST /api/audit/review`, `GET /api/audit/queue`; `GET /api/audit/records`,
+`GET /api/audit/records/:transactionId`, `GET /api/audit/stats`,
+`GET /api/audit/:transactionId/evidence`; public: `GET /api/audit/policies`,
+`GET /api/audit/research/results`, `GET /api/audit/:transactionId/verify`,
+`GET /api/audit/by-audit-id/:auditId/verify`; `POST /api/audit/:transactionId/retry`;
+demonstration only (disabled in production unless `ALLOW_DEMO_TAMPER=true`):
 `POST /api/audit/:transactionId/tamper`, `POST /api/audit/reset`.
 
 ### Component 4 (:8003)
@@ -853,11 +886,12 @@ Next.js version differs from older guides.
 | Component 1 (pytest) | 636 collected | `cd backend/Portfolio-Optimization && uv run pytest -q` |
 | Platform (pytest) | 64 | `cd backend/Platform && uv run pytest -q` |
 | Component 2 (pytest) | 33 | `cd backend/Fraud-Detection && pytest -q` |
-| Component 3 backend (Jest) | 34 | `cd backend/Blockchain-Auditability && npm test` |
+| Component 3 backend (Jest) | 175 | `cd backend/Blockchain-Auditability && npm test` |
+| Component 3 research pipeline (pytest) | 23 | `cd backend/Blockchain-Auditability/research && uv run pytest -q` |
 | Component 4 (pytest) | 107 | `cd backend/Agentic-Assistance && pytest -q tests` |
 | Frontend unit (Jest) | 53 | `cd frontend && npm test` |
 | Frontend end-to-end (Playwright) | | `npm run test:e2e` |
-| Contract (Hardhat) | 12 | `cd backend/Blockchain-Auditability/blockchain && npx hardhat test` |
+| Contract (Hardhat) | 16 | `cd backend/Blockchain-Auditability/blockchain && npx hardhat test` |
 
 * Playwright runs against the **real** Platform and Component 1 services, which it starts
   itself; it does not use mocks.
@@ -918,8 +952,11 @@ Stated plainly because each is a deliberate trade-off.
    `heuristic-untrained` until `scripts/train_benchmark.py` writes `artifacts/fraud_bundle.joblib`.
    Every response says which one answered.
 2. **Component 3 anchors hashes, not zero-knowledge proofs.** It uses a SHA-256 commitment
-   scheme; Merkle trees and ZKPs are not implemented. Without a Hardhat node it uses an
-   in-memory mock ledger.
+   scheme; Merkle trees and ZKPs are not implemented. Without a Hardhat node it uses a
+   simulated ledger, and every result says so. A public testnet (Sepolia) is planned for PP2.
+   The assurance policy in force is P002 v1.0 (hand-set, marked *untuned*) until the IEEE-CIS
+   pipeline exports the tuned v1.1; how often step-up verification catches an error and how
+   accurate analysts are are not measured, and are reported as sensitivity sweeps.
 3. **Kafka is not on the execution path.** Component 1 publishes `portfolio.decisions` and
    Component 2 can consume `finance.transactions.raw`, but plans move through Components 2 and
    3 by synchronous HTTP from the platform service (see *Cross-component data flow*).

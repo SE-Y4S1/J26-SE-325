@@ -45,7 +45,30 @@ and the **Audit → Evaluation** page shows the results.
 
 Development runs: `--max-rows 100000 --fast` (results are not for reporting).
 
-## 3. Tests
+## 3. Replay real transactions through the live system
+
+`tune` also saves the trained models (`results/ieee-cis/cache/models.joblib`, git-ignored). The
+replay sends real IEEE-CIS transactions, scored by those models, into the running Component 3
+service. Each is routed under the policy in force, anchored on the configured ledger, and shown
+in the audit console (Decisions, Verify, Review queue).
+
+```bash
+uv run python -m assurance.replay --test-sample 20          # held-out test rows; labels printed beside each route
+uv run python -m assurance.replay --csv rows.csv --identity identity.csv   # any IEEE-format file, e.g. rows an examiner picks
+uv run python -m assurance.replay --test-sample 5 --dry-run # score and print only
+```
+
+- **What is sent:** the ensemble score as `riskScore`, the three model scores as `modelScores`,
+  the amount, and an id `IEEE-<TransactionID>-<tag>`.
+- **What stays local:** labels, and every other column.
+- **Gateway rules:** `rules` is `[]`, because a replayed transaction has not passed through
+  Component 2's gateway.
+- **Bad rows:** rows without a usable id or a positive amount are reported and skipped. Missing
+  columns are treated as missing values.
+- **It illustrates, it doesn't measure:** a handful of rows shows the process. The measured
+  result is `final`.
+
+## 4. Tests
 
 ```bash
 uv run pytest -q

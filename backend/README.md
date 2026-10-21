@@ -1,18 +1,18 @@
 # Backend Services
 
-Five FastAPI services: one per research component, plus a shared platform service that owns
-identity and portfolio data.
+Five services: one per research component, plus a shared platform service that owns identity
+and portfolio data. All are FastAPI except Component 3, which is Express (Node.js) with a
+Solidity contract.
 
 | Directory | Service | Port | Status |
 |---|---|---|---|
-| [`Platform`](Platform) | Auth (JWT), users, portfolios — shared by all components | 8100 | **built** |
+| [`Platform`](Platform) | Auth (JWT), users, portfolios— shared by all components | 8100 | **built** |
 | [`Portfolio-Optimization`](Portfolio-Optimization) | Component 1 — forecasting + liquidity-aware optimization | 8000 | **built** |
 | [`Fraud-Detection`](Fraud-Detection) | Component 2 — real-time fraud + security gateway | 8001 | not started |
-| [`Blockchain-Auditability`](Blockchain-Auditability) | Component 3 — ZKP/Merkle anchoring, provenance | 8002 | not started |
+| [`Blockchain-Auditability`](Blockchain-Auditability) | Component 3 — AI decision assurance engine + tamper-evident audit ledger | 8002 | **built** |
 | [`Agentic-Assistance`](Agentic-Assistance) | Component 4 — explainable agentic assistant | 8003 | not started |
 
-Ports follow `8000 + component number`, with the shared service on 8100. 8001–8003 are
-reserved by convention only — confirm before claiming one.
+Ports follow `8000 + component number`, with the shared service on 8100.
 
 ## Conventions
 
@@ -32,8 +32,10 @@ Services communicate two ways:
   fire-and-forget, so a consumer being down never blocks a user-facing request.
 
 Tokens are **issued** by the platform service and only **verified** by each component, using a
-shared `JWT_SECRET`. No service calls another on the request path, so one being slow or
-restarting cannot take the others down.
+shared `JWT_SECRET`. Services do not call each other on the request path, with one deliberate
+exception: executing a plan, where the platform service calls Component 2 (screen) and then
+Component 3 (assure and anchor) before holdings change, and fails closed (`HELD`) if either is
+unavailable. See the root README, *Cross-component data flow*.
 
 ## Running
 
