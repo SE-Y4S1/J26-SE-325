@@ -401,15 +401,18 @@ def _run_stages(execution: Execution, portfolio: Portfolio, user_id: int,
     if usable:
         audit = pipeline.anchor_decision(pipeline.audit_payload(
             execution.id, execution.kind, execution.amount, execution.source_model_version,
-            fraud.body, execution.plan_hash))
+            fraud.body, execution.plan_hash, user_id))
         if audit.status_code == 409:
             # Component 3 already holds this record (an earlier attempt saved it but could
-            # not reach the chain); publish that record rather than evaluating twice.
+            # not reach the chain, or it is held for review); publish that record rather than
+            # evaluating twice. Its status says whether it is still held; Component 3 versions
+            # that do not report one only ever held completed records here.
             retried = pipeline.retry_anchor(execution.id)
             if retried.reachable and retried.status_code == 200 and retried.body:
                 body = retried.body
                 audit = pipeline.Downstream(True, 200, {
-                    "status": "COMPLETED", "record": body.get("record"),
+                    "status": body.get("status") or "COMPLETED", "record": body.get("record"),
+                    "assurance": body.get("assurance"),
                     "blockchain": body.get("blockchain"), "message": body.get("message"),
                 })
             else:

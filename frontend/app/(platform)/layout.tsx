@@ -15,6 +15,7 @@ import { useEffect, type ReactNode } from "react";
 import { NexaLogo } from "@/components/NexaLogo";
 import { Spinner } from "@/components/ui";
 import { AuthProvider, useAuth } from "@/lib/auth/context";
+import { isNavActive } from "@/lib/nav";
 
 interface NavItem {
   href: string;
@@ -76,7 +77,7 @@ function Shell({ children }: { children: ReactNode }) {
 
         <nav className="mx-auto flex max-w-6xl gap-1 overflow-x-auto px-4 pb-2 text-sm">
           {NAV.map((item) => {
-            const active = pathname === item.href;
+            const active = isNavActive(pathname, item.href);
             return (
               <Link
                 key={item.href}

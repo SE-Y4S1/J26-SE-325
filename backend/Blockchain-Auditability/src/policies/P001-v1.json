@@ -1,0 +1,21 @@
+{
+  "meta": {
+    "hashScheme": "v1",
+    "engine": "threshold-router/1.0",
+    "baseline": true,
+    "description": "Legacy two-threshold router (risk and confidence). Kept as the comparison baseline and for callers that send no assurance signals. Its v1 hash is the value already registered on-chain; v1 does not commit to the nested thresholds object, which is why new policies use v2."
+  },
+  "document": {
+    "id": "P001",
+    "version": "1.0",
+    "thresholds": {
+      "riskThreshold": 80,
+      "confidenceThreshold": 70
+    },
+    "rules": [
+      "IF riskScore >= 80 AND confidence >= 70 THEN action = REJECT",
+      "IF riskScore >= 80 AND confidence < 70 THEN action = HUMAN_REVIEW",
+      "IF riskScore < 80 THEN action = APPROVE"
+    ]
+  }
+}

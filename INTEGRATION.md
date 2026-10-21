@@ -10,8 +10,8 @@ frontend  :3000   Next.js 16 — the browser calls each service DIRECTLY (CORS)
    |
    +--> platform    :8100   auth (JWT), users, portfolios   <-- shared by all components
    +--> component1  :8000   forecasting + portfolio optimization      [built]
-   +--> component2  :8001   fraud detection                           [reserved]
-   +--> component3  :8002   blockchain auditability                   [reserved]
+  +--> component2  :8001   fraud detection                            [reserved]
+   +--> component3  :8002   decision assurance + audit ledger         [built]
    +--> component4  :8003   agentic assistance                        [reserved]
 ```
 
@@ -146,11 +146,9 @@ Worth stating plainly, because it is a deliberate trade-off rather than an overs
 |---|---|---|
 | frontend | 3000 | built |
 | component1 — portfolio optimization | 8000 | built |
-| component2 — fraud detection | 8001 | reserved |
-| component3 — blockchain auditability | 8002 | reserved |
-| component4 — agentic assistance | 8003 | reserved |
+| component2 — fraud detection | 8001 | reserved  |
+| component3 — decision assurance + audit ledger | 8002 | built |
+| component4 — agentic assistance | 8003 | reserved  |
 | platform — auth and portfolios | 8100 | built |
 | mlflow | 5000 | built |
 | kafka (external listener) | 9094 | built |
-
-8001–8003 are reserved by convention only — confirm before claiming one.

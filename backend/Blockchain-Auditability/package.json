@@ -1,0 +1,35 @@
+{
+  "name": "blockchain-auditability-backend",
+  "version": "1.0.0",
+  "description": "Component 3: AI Decision Assurance Engine and tamper-evident audit ledger",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "cross-env PORT=8002 node src/index.js",
+    "dev": "cross-env PORT=8002 node src/index.js",
+    "test": "jest --runInBand --detectOpenHandles --forceExit"
+  },
+  "jest": {
+    "roots": ["<rootDir>/tests"],
+    "testEnvironment": "node"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "cross-env": "^7.0.3",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.11.1",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.23.1"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^9.6.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "pg-mem": "^3.0.14",
+    "supertest": "^6.3.4"
+  }
+}

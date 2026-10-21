@@ -94,7 +94,7 @@ services:
     name: nexa-audit
     runtime: node
     plan: free
-    rootDir: backend/Blockchain-Auditability/backend
+    rootDir: backend/Blockchain-Auditability
     buildCommand: npm ci --omit=dev
     startCommand: node src/index.js
     healthCheckPath: /api/health

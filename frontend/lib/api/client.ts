@@ -92,6 +92,13 @@ function messageFrom(status: number, body: unknown): string {
       if (parts.length) return parts.join("; ");
     }
   }
+  // Express services (Component 3) answer {success: false, message, errors?: string[]}.
+  if (body && typeof body === "object") {
+    const { message, errors } = body as { message?: unknown; errors?: unknown };
+    const list = Array.isArray(errors) ? errors.filter((e): e is string => typeof e === "string") : [];
+    if (list.length) return typeof message === "string" && message ? `${message}: ${list.join("; ")}` : list.join("; ");
+    if (typeof message === "string" && message) return message;
+  }
   return `Request failed (${status})`;
 }
 

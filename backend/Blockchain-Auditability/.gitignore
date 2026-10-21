@@ -31,12 +31,13 @@ blockchain/artifacts/
 blockchain/cache/
 blockchain/typechain/
 blockchain/typechain-types/
-backend/src/config/contractConfig.json
+src/config/contractConfig.json
 
 # Local Runtime Audit Data
-backend/data/*.json
-backend/data/*.sqlite*
-!backend/data/.gitkeep
+data/*.json
+data/*.sqlite*
+data/*.bak-*
+!data/.gitkeep
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
@@ -56,3 +57,8 @@ coverage/
 *.tmp
 *.temp
 .eslintcache
+# Research pipeline: environment and row-level caches stay local; aggregate results are committed.
+research/.venv/
+research/results/**/cache/
+research/**/__pycache__/
+research/.pytest_cache/
