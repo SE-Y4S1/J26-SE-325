@@ -22,6 +22,7 @@ router.get("/:transactionId/evidence", reviewer, auditController.getEvidence);
 
 // Public: policy documents and hashes, and verification (record contents redacted unless permitted)
 router.get("/policies", auditController.getPolicies);
+router.get("/research/results", auditController.getResearchResults);
 router.get("/:transactionId/verify", auditController.verifyAudit);
 router.get("/by-audit-id/:auditId/verify", auditController.verifyByAuditId);
 

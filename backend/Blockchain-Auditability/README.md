@@ -106,6 +106,7 @@ contract directly, without the service.
 | GET | `/api/audit/:tx/evidence` | analyst |
 | POST | `/api/audit/:tx/retry` | platform service, analyst |
 | GET | `/api/audit/policies`, `/api/audit/:tx/verify`, `/api/audit/by-audit-id/:id/verify` | public (contents redacted) |
+| GET | `/api/audit/research/results` | public (aggregate evaluation results, or `NOT_RUN`) |
 | POST | `/api/audit/:tx/tamper`, `/api/audit/reset`; DELETE `/api/audit/records` | analyst; demo only (`ALLOW_DEMO_TAMPER` in production) |
 | GET | `/api/health` | public |
 
@@ -138,10 +139,14 @@ The Postgres store keeps records as JSONB and needs no migration.
 
 ## 8. Tests and measurements
 
-| Suite | Command | Result (2026-10-20) |
+| Suite | Command | Result (2026-10-21) |
 |---|---|---|
-| Service (Jest, 11 suites) | `npm test` | 147 passed |
+| Service (Jest, 12 suites, incl. 400 Python↔JS golden vectors) | `npm test` | 152 passed |
 | Contract (Hardhat) | `cd blockchain && npx hardhat test` | 16 passing |
+| Research pipeline (pytest, code tests on a synthetic fixture) | `cd research && uv run pytest -q` | 23 passed |
+
+The IEEE-CIS evaluation itself (`research/`, see its README and METHODS.md) has **not been run
+yet**: it needs the Kaggle data. Until then the Audit → Evaluation page says "Not run yet".
 
 Gas on the Hardhat network (solc 0.8.20, optimizer 200 runs), from `blockchain/test/gas.test.js`:
 

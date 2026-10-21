@@ -181,6 +181,37 @@ describe("assurance engine over the API", () => {
   });
 });
 
+describe("research results endpoint", () => {
+  afterEach(() => { delete process.env.RESEARCH_RESULTS_PATH; });
+
+  test("reports NOT_RUN until the IEEE-CIS evaluation has produced metrics", async () => {
+    process.env.RESEARCH_RESULTS_PATH = path.join(__dirname, "does-not-exist.json");
+    const res = await request(app).get("/api/audit/research/results");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("NOT_RUN");
+  });
+
+  test("serves aggregates only, never row-level data", async () => {
+    const file = path.join(__dirname, "test_research_metrics.json");
+    const method = { incorrect_automatic_rate: 0.01, human_review_rate: 0.1, verify_rate: 0.05, fraud_auto_approved: 3,
+      legit_auto_rejected: 4, aurc: 0.02, ci95: { incorrect_automatic_rate: [0.009, 0.011] }, params: { secret: "not served" } };
+    fs.writeFileSync(file, JSON.stringify({
+      status: "FINAL", generated_at: "2026-10-21T00:00:00Z", policy: { id: "P002", version: "1.1", hash: "0x1" }, policy_budget: 0.1,
+      meta: { rows: { test: 10 }, fraud_rate: { test: 0.03 }, test_index_digest: "sha256:x", calibration_split_model_quality: {} },
+      assumptions: {}, results: { "0.1": { methods: { assurance: method }, paired_vs_assurance: {} } }, curves_at_policy_budget: {}
+    }));
+    process.env.RESEARCH_RESULTS_PATH = file;
+    try {
+      const res = await request(app).get("/api/audit/research/results");
+      expect(res.body.status).toBe("FINAL");
+      expect(res.body.results["0.1"].methods.assurance.incorrect_automatic_rate).toBe(0.01);
+      expect(JSON.stringify(res.body)).not.toContain("not served");
+    } finally {
+      fs.unlinkSync(file);
+    }
+  });
+});
+
 describe("API contract captured before the engine existed", () => {
   const captured = require("./fixtures/api-contract-v1.json");
   const base = { amount: 1500, transactionType: "TRANSFER", modelVersion: "fraud-v1" };

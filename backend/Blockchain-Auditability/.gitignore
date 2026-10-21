@@ -57,3 +57,8 @@ coverage/
 *.tmp
 *.temp
 .eslintcache
+# Research pipeline: environment and row-level caches stay local; aggregate results are committed.
+research/.venv/
+research/results/**/cache/
+research/**/__pycache__/
+research/.pytest_cache/

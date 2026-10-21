@@ -14,14 +14,23 @@ Failure policy, in one place:
                               until the decision is provably recorded.
 * STEP_UP or HUMAN_REVIEW  -> PENDING_REVIEW until the account holder re-authenticates.
 * ALLOW + anchored APPROVE -> EXECUTED; holdings change.
+
+When Component 3 returns an assurance route (its assurance engine, fed the signals below):
+
+* VERIFY                   -> PENDING_REVIEW: the account holder's step-up re-authentication.
+* HUMAN_REVIEW             -> HELD until an authorised analyst decides in Component 3; a retry
+                              then executes an analyst approval or rejects on an analyst rejection.
+* no route (older C3)      -> the mapping above, unchanged.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -163,6 +172,37 @@ def account_key(user_id: int) -> str:
     return "acct-" + hashlib.sha256(f"platform-user:{user_id}".encode()).hexdigest()[:24]
 
 
+def _hkdf_sha256(key: bytes, info: bytes, length: int = 32) -> bytes:
+    """RFC 5869 HKDF with an empty salt (the standard library has no HKDF)."""
+    prk = hmac.new(b"\x00" * 32, key, hashlib.sha256).digest()
+    okm, block, counter = b"", b"", 1
+    while len(okm) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        okm += block
+        counter += 1
+    return okm[:length]
+
+
+def subject_ref(user_id: int) -> str | None:
+    """Keyed pseudonym of the account holder, for Component 3's separation-of-duties check.
+
+    HMAC-SHA256 under a key derived from JWT_SECRET (HKDF, label "c3-subject-ref"), so
+    Component 3 derives the same key from the same shared secret and can tell whether a
+    reviewer is the transaction's own subject. Unlike account_key -- an unkeyed hash of a small
+    integer, reversible by enumeration -- it cannot be linked to a user id without the key.
+    AUDIT_PSEUDONYM_KEY overrides the derived key (set it on both services).
+    """
+    override = os.getenv("AUDIT_PSEUDONYM_KEY", "").strip()
+    secret = os.getenv("JWT_SECRET", "").strip()
+    if override:
+        key = override.encode("utf-8")
+    elif secret:
+        key = _hkdf_sha256(secret.encode("utf-8"), b"c3-subject-ref")
+    else:
+        return None
+    return hmac.new(key, f"c3-subject:{user_id}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def apply_orders(holdings: dict[str, Any], orders: list[dict]) -> list[str]:
     """Apply orders to ORM holdings in place. Returns symbols whose position closed out.
 
@@ -200,12 +240,27 @@ class Downstream:
     error: str | None = None
 
 
-def _post_json(url: str, payload: dict, timeout: float) -> Downstream:
+def service_token() -> str | None:
+    """A short-lived token naming this service ("service:platform") for Component 3.
+
+    Component 3 accepts it for anchoring decisions and recording step-up verifications when it
+    enforces AUTH_REQUIRED; it is not a user, so every user-facing service (this one included)
+    rejects its non-numeric subject.
+    """
+    try:
+        from auth.security import create_access_token
+        return create_access_token(subject="service:platform", expires_minutes=5)
+    except RuntimeError as exc:  # JWT_SECRET missing or a placeholder
+        logger.warning("no service token for Component 3: %s", exc)
+        return None
+
+
+def _post_json(url: str, payload: dict, timeout: float, token: str | None = None) -> Downstream:
     data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-    )
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=data, method="POST", headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return Downstream(True, response.status, json.loads(response.read().decode("utf-8")))
@@ -225,7 +280,8 @@ def score_transaction(payload: dict) -> Downstream:
 
 
 def anchor_decision(payload: dict) -> Downstream:
-    return _post_json(f"{audit_service_url()}/api/audit/evaluate", payload, downstream_timeout())
+    return _post_json(f"{audit_service_url()}/api/audit/evaluate", payload, downstream_timeout(),
+                      service_token())
 
 
 def submit_review(transaction_id: str, approve: bool) -> Downstream:
@@ -233,12 +289,14 @@ def submit_review(transaction_id: str, approve: bool) -> Downstream:
         f"{audit_service_url()}/api/audit/review",
         {"transactionId": transaction_id, "reviewerDecision": "APPROVE" if approve else "REJECT"},
         downstream_timeout(),
+        service_token(),
     )
 
 
 def retry_anchor(transaction_id: str) -> Downstream:
     quoted = urllib.parse.quote(transaction_id, safe="")
-    return _post_json(f"{audit_service_url()}/api/audit/{quoted}/retry", {}, downstream_timeout())
+    return _post_json(f"{audit_service_url()}/api/audit/{quoted}/retry", {}, downstream_timeout(),
+                      service_token())
 
 
 # --------------------------------------------------------------------------------------
@@ -259,14 +317,50 @@ def fraud_payload(execution_id: str, kind: str, amount: float, currency: str,
     return payload
 
 
+_MODEL_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+# Streams that are not independent models: "fused" is derived from the others, and the
+# heuristic is a single rule-of-thumb score, so neither may count as a second opinion.
+_NOT_INDEPENDENT = {"fused", "heuristic"}
+
+
+def assurance_signals(fraud: dict, user_id: int | None = None) -> dict:
+    """The signals Component 3's assurance engine routes on, taken from Component 2's response.
+
+    Only what Component 2 actually reported is sent; nothing is invented. In heuristic mode
+    there is no second model, so `modelScores` is empty and Component 3 marks disagreement as
+    a degraded signal -- which can never make the decision more automatic.
+    """
+    explanation = fraud.get("explanation") or {}
+    streams = explanation.get("streams") or {}
+    model_scores = {
+        name: float(score) for name, score in streams.items()
+        if name not in _NOT_INDEPENDENT and _MODEL_NAME.match(str(name))
+        and isinstance(score, (int, float)) and not isinstance(score, bool) and 0.0 <= float(score) <= 1.0
+    }
+    rules = [r for r in (explanation.get("rules") or []) if isinstance(r, str) and 0 < len(r) <= 64][:50]
+    signals: dict[str, Any] = {
+        "modelScores": model_scores,
+        "rules": rules,
+        "benchmarkModel": bool(fraud.get("benchmark_model")),
+        "sourceModelVersion": str(fraud.get("model_version", "unknown"))[:128],
+    }
+    ref = subject_ref(user_id) if user_id is not None else None
+    if ref:
+        signals["subjectRef"] = ref
+    return signals
+
+
 def audit_payload(execution_id: str, kind: str, amount: float, source_model_version: str,
-                  fraud: dict, plan_digest: str) -> dict:
+                  fraud: dict, plan_digest: str, user_id: int | None = None) -> dict:
     """Component 3's evaluate request for a decision Component 2 already enforced.
 
-    `confidence` is not something Component 2 reports. It is set from whether the score came
-    from a benchmark-validated model (90) or from the untrained heuristic or an unvalidated
-    bundle (50), so P001 routes a high heuristic score to human review instead of treating
-    it as a confident automated rejection.
+    `signals` carries what Component 2 measured (per-model scores, rule hits, validation
+    status) for Component 3's assurance engine.
+
+    `confidence` is kept for Component 3 versions that predate the engine: it is not something
+    Component 2 reports, so it is set from whether the score came from a benchmark-validated
+    model (90) or from the untrained heuristic or an unvalidated bundle (50). The engine does
+    not use it -- it derives confidence from the score itself.
     """
     return {
         "transactionId": execution_id,
@@ -281,6 +375,7 @@ def audit_payload(execution_id: str, kind: str, amount: float, source_model_vers
             "modelVersion": str(fraud.get("model_version", "unknown")),
         },
         "planHash": plan_digest,
+        "signals": assurance_signals(fraud, user_id),
     }
 
 
@@ -293,9 +388,23 @@ def audit_record(result: Downstream) -> dict:
         "status": body.get("status") or ("UNREACHABLE" if not result.reachable else "ERROR"),
         "message": body.get("message") or result.error,
         "policy": body.get("policyResult"),
+        "assurance": body.get("assurance"),
         "record": body.get("record"),
         "blockchain": body.get("blockchain"),
     }
+
+
+def assurance_route(audit_body: dict) -> str | None:
+    """The route Component 3's assurance engine chose, or None when it reported none.
+
+    LEGACY assessments come from its P001 baseline (a request it could not route on signals);
+    those keep the original mapping, so behaviour only changes where the engine decided.
+    """
+    assurance = audit_body.get("assurance")
+    if not isinstance(assurance, dict) or assurance.get("signalQuality") not in ("FULL", "DEGRADED"):
+        return None
+    route = assurance.get("route")
+    return route if route in ("AUTO", "VERIFY", "HUMAN_REVIEW") else None
 
 
 def decide(fraud: Downstream, audit: Downstream | None) -> tuple[str, str]:
@@ -316,10 +425,24 @@ def decide(fraud: Downstream, audit: Downstream | None) -> tuple[str, str]:
 
     outcome = audit.body.get("status")
     final = (audit.body.get("record") or {}).get("finalDecision")
+    route = assurance_route(audit.body)
+    if outcome == "HUMAN_REVIEW_REQUIRED" and route == "HUMAN_REVIEW":
+        return "HELD", ("Component 3's assurance engine routed this decision to an analyst. Nothing has "
+                        "moved; it executes only if an analyst approves it (retry after the review).")
+    if outcome == "HUMAN_REVIEW_REQUIRED" and route == "VERIFY":
+        why = "Component 2 asked for step-up verification" if decision == "STEP_UP" \
+            else "Component 3's assurance engine requires step-up verification"
+        return "PENDING_REVIEW", f"{why}. Re-authenticate to approve or reject."
     if outcome == "HUMAN_REVIEW_REQUIRED":
         why = "Component 2 asked for step-up verification" if decision == "STEP_UP" \
             else "Component 3's policy requires human review"
         return "PENDING_REVIEW", f"{why}. Re-authenticate to approve or reject."
+    # An analyst's decision on a held execution, picked up by a retry. Analyst review is the
+    # stricter check, so an approval executes even where Component 2 had asked for step-up.
+    if outcome == "COMPLETED" and final == "HUMAN_APPROVED":
+        return "EXECUTED", "Approved by an analyst in Component 3's review; the review is anchored."
+    if outcome == "COMPLETED" and final == "HUMAN_REJECTED":
+        return "REJECTED", "Rejected by an analyst in Component 3's review; the review is anchored."
     if outcome == "COMPLETED" and final == "REJECT":
         return "BLOCKED", "Component 3's policy rejected this transaction."
     if outcome == "COMPLETED" and final == "APPROVE" and decision == "ALLOW":

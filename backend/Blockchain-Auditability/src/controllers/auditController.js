@@ -1,3 +1,5 @@
+const fs = require("fs");
+const path = require("path");
 const hashService = require("../services/hashService");
 const { blockchainService, BlockchainUnavailableError, BlockchainTransactionError } = require("../services/blockchainService");
 const auditService = require("../services/auditService");
@@ -642,6 +644,45 @@ class AuditController {
   }
 
   /**
+   * GET /api/audit/research/results
+   * The IEEE-CIS evaluation's aggregate results (research/results/ieee-cis/metrics.json), or
+   * NOT_RUN until that evaluation exists. Aggregates only: no transaction-level data.
+   */
+  async getResearchResults(req, res) {
+    try {
+      const file = process.env.RESEARCH_RESULTS_PATH
+        || path.join(__dirname, "../../research/results/ieee-cis/metrics.json");
+      if (!fs.existsSync(file)) {
+        return res.status(200).json({ success: true, status: "NOT_RUN" });
+      }
+      const metrics = JSON.parse(fs.readFileSync(file, "utf8"));
+      const keep = ["incorrect_automatic_rate", "human_review_rate", "verify_rate", "fraud_auto_approved",
+        "legit_auto_rejected", "aurc", "ci95", "verify_effectiveness_sweep", "analyst_accuracy_sweep", "drift"];
+      const results = {};
+      for (const [budget, block] of Object.entries(metrics.results || {})) {
+        results[budget] = {
+          methods: Object.fromEntries(Object.entries(block.methods).map(([name, m]) =>
+            [name, Object.fromEntries(keep.filter((k) => k in m).map((k) => [k, m[k]]))])),
+          paired: block.paired_vs_assurance
+        };
+      }
+      return res.status(200).json({
+        success: true,
+        status: metrics.status,
+        generatedAt: metrics.generated_at,
+        policy: metrics.policy,
+        policyBudget: metrics.policy_budget,
+        data: { rows: metrics.meta.rows, fraudRate: metrics.meta.fraud_rate, testIndexDigest: metrics.meta.test_index_digest },
+        assumptions: metrics.assumptions,
+        results,
+        curves: metrics.curves_at_policy_budget || {}
+      });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  /**
    * GET /api/audit/stats
    */
   async getStats(req, res) {
@@ -716,5 +757,6 @@ module.exports = {
   getPolicies: controller.getPolicies.bind(controller),
   getQueue: controller.getQueue.bind(controller),
   getRecordDetail: controller.getRecordDetail.bind(controller),
-  getEvidence: controller.getEvidence.bind(controller)
+  getEvidence: controller.getEvidence.bind(controller),
+  getResearchResults: controller.getResearchResults.bind(controller)
 };
