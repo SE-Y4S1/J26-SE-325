@@ -13,6 +13,7 @@
 
 import { useState } from "react";
 
+import { ROUTE_LABEL, routeOf } from "@/components/audit/badges";
 import { Button, Card, Notice, Stat } from "@/components/ui";
 import {
   evaluateDecision,
@@ -54,14 +55,22 @@ export function TamperDemo({ onChanged }: { onChanged?: () => void }) {
   const anchorDecision = () =>
     guard(async () => {
       const id = `tx_demo_${Date.now()}`;
-      // confidence is 0-100 here, not 0-1: his validator rejects anything else.
+      // riskScore and confidence are 0-100, not 0-1: the validator rejects anything else.
+      // Two agreeing, validated models make this a decision the assurance engine automates,
+      // so what is anchored is a final decision together with its assurance result.
       const result = await evaluateDecision({
         transactionId: id,
-        riskScore: 0.91,
+        riskScore: 12,
         confidence: 93,
-        amount: 250_000,
-        transactionType: "withdrawal",
-        modelVersion: "fraud-v1",
+        amount: 2_500,
+        transactionType: "PAYMENT",
+        modelVersion: "fraud-demo",
+        signals: {
+          modelScores: { lstm: 0.1, gnn: 0.14 },
+          rules: ["score_below_step_up_threshold"],
+          benchmarkModel: true,
+          sourceModelVersion: "fraud-demo",
+        },
       });
       setTxId(id);
       setAnchor(result);
@@ -139,8 +148,13 @@ export function TamperDemo({ onChanged }: { onChanged?: () => void }) {
       )}
 
       {anchor?.blockchain && (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
           <Stat label="Policy action" value={anchor.policyResult?.action ?? "—"} />
+          <Stat
+            label="Route"
+            value={anchor.assurance ? ROUTE_LABEL[routeOf(anchor.assurance)] : "—"}
+            hint={anchor.assurance?.assuranceScore != null ? `assurance ${anchor.assurance.assuranceScore.toFixed(2)}` : undefined}
+          />
           <Stat label="Block" value={anchor.blockchain.blockNumber} />
           <Stat
             label="Network"

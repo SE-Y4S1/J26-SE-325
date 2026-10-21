@@ -11,6 +11,7 @@
 
 import { useState } from "react";
 
+import { RouteBadge, routeOf } from "@/components/audit/badges";
 import { Button, Card, Field, Input, Notice, money } from "@/components/ui";
 import {
   confirmExecution,
@@ -226,9 +227,17 @@ function AuditStageCard({ execution }: { execution: Execution }) {
       </Stage>
     );
   }
+  const assurance = audit.assurance;
   return (
     <Stage step={3} title="Audit anchor · Component 3">
       <p className="font-medium">{record?.finalDecision ?? audit.status}</p>
+      {assurance?.route && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <RouteBadge route={routeOf({ route: assurance.route, signalQuality: assurance.signalQuality ?? "FULL" })} />
+          {assurance.assuranceScore != null && <span className="tabular-nums text-neutral-500">assurance {assurance.assuranceScore.toFixed(2)}</span>}
+          {assurance.signalQuality === "DEGRADED" && <span className="text-neutral-500">degraded signals</span>}
+        </div>
+      )}
       {record?.recordHash && record.recordHash.startsWith("0x") && (
         <p className="break-all text-xs">
           hash <code>{record.recordHash.slice(0, 18)}…</code>

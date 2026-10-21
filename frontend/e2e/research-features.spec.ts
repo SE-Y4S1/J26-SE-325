@@ -55,7 +55,8 @@ test("tamper-evidence: anchor, verify, tamper, detect", async ({ page }) => {
   await register(page, newUser());
   await seedPortfolio(page);
   await page.getByRole("link", { name: "Audit" }).click();
-  await page.getByRole("button", { name: "Tamper-evidence" }).click();
+  // The walkthrough lives on the audit section's Verify sub-page.
+  await page.getByRole("navigation", { name: "Audit sections" }).getByRole("link", { name: "Verify", exact: true }).click();
 
   await page.getByRole("button", { name: "1 · Anchor a decision" }).click();
   await expect(page.getByText("Policy action")).toBeVisible({ timeout: 60_000 });
@@ -70,6 +71,38 @@ test("tamper-evidence: anchor, verify, tamper, detect", async ({ page }) => {
   // comparison catches it anyway.
   await page.getByRole("button", { name: "4 · Verify again" }).click();
   await expect(page.getByText("Tampering detected")).toBeVisible({ timeout: 60_000 });
+});
+
+test("assurance engine: a decision is routed, held for review, reviewed and verified", async ({ page }) => {
+  test.skip(!(await reachable("http://localhost:8002/api/health")), "Component 3 is not running");
+  test.setTimeout(180_000);
+
+  await register(page, newUser());
+  await seedPortfolio(page);
+  await page.getByRole("link", { name: "Audit" }).click();
+  const sections = page.getByRole("navigation", { name: "Audit sections" });
+
+  // Two models that disagree: the engine vetoes automation and holds it for an analyst.
+  await sections.getByRole("link", { name: "Decisions", exact: true }).click();
+  await page.getByRole("button", { name: "Try a decision" }).click();
+  await page.getByRole("button", { name: "Models disagree" }).click();
+  await page.getByRole("button", { name: "Route and anchor" }).click();
+  await expect(page.getByText("Human review").first()).toBeVisible({ timeout: 60_000 });
+
+  await page.getByRole("link", { name: "Why?" }).click();
+  await expect(page.getByText("MODEL_DISAGREEMENT", { exact: true })).toBeVisible({ timeout: 60_000 });
+  const transactionId = (await page.locator("h2.font-mono").textContent())!.trim();
+
+  await sections.getByRole("link", { name: "Review queue", exact: true }).click();
+  await page.getByLabel(`Reason for ${transactionId}`).fill("e2e: disagreement checked");
+  const item = page.getByRole("listitem").filter({ hasText: transactionId });
+  await item.getByRole("button", { name: "Approve" }).click();
+  await expect(page.getByText("Review anchored")).toBeVisible({ timeout: 60_000 });
+
+  await sections.getByRole("link", { name: "Verify", exact: true }).click();
+  await page.getByLabel("Transaction id or audit id").fill(transactionId);
+  await page.getByRole("button", { name: "Check" }).click();
+  await expect(page.getByText("review commitment · matches the chain")).toBeVisible({ timeout: 60_000 });
 });
 
 

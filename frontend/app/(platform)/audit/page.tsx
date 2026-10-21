@@ -1,182 +1,116 @@
 "use client";
 
 /**
- * Component 3 — Privacy-Preserving AI-to-Smart-Contract Audit Bridge (Abeysekara W C S M).
- *
- * Anchoring, hashing and verification all happen in his Express service against the Solidity
- * registry; this screen displays what it reports and drives it.
- *
- * The records table is rendered from whatever keys the service returns rather than a fixed
- * column list, because the record shape is his to change and this page should not break when
- * it does.
+ * Audit overview: how decisions are being routed, whether the ledger and the policy in force
+ * are what they should be, and the latest anchored decisions.
  */
 
-import { useEffect, useState } from "react";
+import Link from "next/link";
 
-import { Button, Card, Notice, Spinner, Stat } from "@/components/ui";
-import { auditRecords, auditStats, type AuditRecord } from "@/lib/api/audit";
-import { ApiError } from "@/lib/api/client";
+import { AuditLoadNotice } from "@/components/audit/AuditLoadNotice";
+import { DecisionTable } from "@/components/audit/DecisionTable";
+import { RouteDistribution } from "@/components/audit/RouteDistribution";
+import { shortHash } from "@/components/audit/badges";
+import { useAuditLoad } from "@/components/audit/useAuditLoad";
+import { Button, Card, Stat } from "@/components/ui";
+import { auditPolicies, auditRecords, auditStats } from "@/lib/api/audit";
 
-import { TamperDemo } from "./TamperDemo";
+const pct = (part: number, whole: number) => (whole ? `${Math.round((part / whole) * 100)}%` : "—");
 
-export default function AuditPage() {
-  const [tab, setTab] = useState<"records" | "tamper">("records");
-  const [records, setRecords] = useState<AuditRecord[]>([]);
-  const [stats, setStats] = useState<Record<string, unknown> | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [unavailable, setUnavailable] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // The same counter pattern usePortfolio uses. Bumping it re-runs the effect, which is how
-  // a refresh happens without the effect depending on a function identity that changes every
-  // render -- and, with the loader declared inside the effect, without any setState the
-  // React 19 lint can see as synchronous in an effect body.
-  const [refreshToken, setRefreshToken] = useState(0);
+export default function AuditOverviewPage() {
+  const state = useAuditLoad(async () => {
+    const [stats, records, policies] = await Promise.all([auditStats(), auditRecords(), auditPolicies()]);
+    return { stats, records, policies };
+  });
 
-  useEffect(() => {
-    // Guards against a slow response arriving after the user has moved on.
-    let cancelled = false;
-
-    async function run() {
-      try {
-        const [rows, summary] = await Promise.all([auditRecords(), auditStats()]);
-        if (cancelled) return;
-        setRecords(Array.isArray(rows) ? rows : []);
-        setStats(summary);
-        setError(null);
-        setUnavailable(false);
-      } catch (cause) {
-        if (cancelled) return;
-        // Same treatment the Forecast screen gives a 503: a service that is not running is a
-        // state to explain, not an error to alarm anyone with.
-        if (cause instanceof ApiError && (cause.isUnavailable || cause.status === 0)) {
-          setUnavailable(true);
-        } else {
-          setError(cause instanceof Error ? cause.message : "Could not load the audit trail");
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    void run();
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshToken]);
-
-  const refresh = () => setRefreshToken((token) => token + 1);
-  const columns = records.length > 0 ? Object.keys(records[0]).slice(0, 5) : [];
+  const notice = <AuditLoadNotice state={state} what="the audit trail" />;
+  if (!state.data) return notice;
+  const { stats, records, policies } = state.data;
+  const active = policies.policies.find((p) => p.routesSignalRequests);
+  const routes = stats.routes ?? { AUTO: 0, VERIFY: 0, HUMAN_REVIEW: 0, LEGACY: stats.totalDecisions };
+  const routed = routes.AUTO + routes.VERIFY + routes.HUMAN_REVIEW;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-semibold">Audit trail</h1>
-          <p className="mt-1 text-sm text-neutral-500">
-            Tamper-evident record of AI decisions anchored on-chain. Component 3 · Abeysekara
-            W C S M.
-          </p>
-        </div>
-        <Button variant="secondary" onClick={refresh} disabled={loading}>
-          Refresh
+      {notice}
+      <div className="flex justify-end">
+        <Button variant="secondary" onClick={state.refresh} disabled={state.loading}>
+          {state.loading ? "Refreshing…" : "Refresh"}
         </Button>
       </div>
 
-      <div className="flex gap-2 border-b border-neutral-200">
-        {([["records", "Anchored decisions"], ["tamper", "Tamper-evidence"]] as const).map(
-          ([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setTab(key)}
-              className={
-                tab === key
-                  ? "border-b-2 border-neutral-900 px-3 py-2 text-sm font-medium"
-                  : "px-3 py-2 text-sm text-neutral-500 hover:text-neutral-900"
-              }
-            >
-              {label}
-            </button>
-          ),
-        )}
+      <Card>
+        <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
+          <Stat label="Decisions" value={stats.totalDecisions} hint={`${routed} routed by the assurance engine`} />
+          <Stat label="Automated" value={pct(routes.AUTO, routed)} hint={`${routes.AUTO} of ${routed} routed`} />
+          <Stat label="Held for review" value={stats.pendingReview ?? 0} hint="verification or analyst" />
+          <Stat
+            label="Integrity"
+            value={stats.integrityFailures ? `${stats.integrityFailures} failed` : "intact"}
+            hint={`${stats.verified} verified on last check`}
+          />
+        </div>
+      </Card>
+
+      <div className="grid gap-6 lg:grid-cols-3">
+        <Card title="How decisions were routed" subtitle="Share of all anchored decisions" className="lg:col-span-2">
+          <RouteDistribution routes={routes} />
+          {stats.signalQuality && stats.signalQuality.DEGRADED > 0 && (
+            <p className="mt-4 text-xs text-neutral-500">
+              {stats.signalQuality.DEGRADED} decision{stats.signalQuality.DEGRADED === 1 ? "" : "s"} had missing or
+              unvalidated signals and were kept away from automatic processing.
+            </p>
+          )}
+        </Card>
+
+        <Card title="Ledger and policy">
+          <dl className="space-y-3 text-sm">
+            <div>
+              <dt className="text-xs uppercase tracking-wide text-neutral-500">Ledger</dt>
+              <dd>
+                {stats.blockchainStatus.isMock
+                  ? "Simulated ledger (no chain connected)"
+                  : `EVM chain ${stats.blockchainStatus.chainId ?? ""}`}
+              </dd>
+              {stats.blockchainStatus.contractAddress && (
+                <dd className="font-mono text-xs text-neutral-500">{shortHash(stats.blockchainStatus.contractAddress, 12)}</dd>
+              )}
+            </div>
+            {active && (
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-neutral-500">Policy in force</dt>
+                <dd>
+                  {active.id} v{active.version}
+                  {active.status === "untuned" && <span className="ml-2 text-xs text-amber-700 dark:text-amber-400">untuned</span>}
+                </dd>
+                <dd className="font-mono text-xs text-neutral-500">{shortHash(active.policyHash, 12)}</dd>
+                <dd className="text-xs text-neutral-500">
+                  {active.onChain.active === true ? "Registered on-chain ✓" : active.onChain.active === false ? "Not registered on-chain" : "On-chain status unknown"}
+                </dd>
+              </div>
+            )}
+            <Link href="/audit/policies" className="inline-block text-sm underline underline-offset-2">
+              Inspect policies
+            </Link>
+          </dl>
+        </Card>
       </div>
 
-      {/* Refreshing the record list after each step keeps the two tabs consistent. */}
-      {tab === "tamper" && <TamperDemo onChanged={refresh} />}
-
-      {tab === "records" && (
-        <>
-          {loading && <Spinner label="Loading audit records" />}
-
-          {unavailable && (
-            <Notice tone="info" title="Audit bridge is not running">
-              Start it with <code>docker compose up component3</code>, or{" "}
-              <code>node src/index.js</code> from{" "}
-              <code>backend/Blockchain-Auditability</code>. Every other screen works without
-              it.
-            </Notice>
-          )}
-
-          {error && (
-            <Notice tone="error" title="Could not load">
-              {error}
-            </Notice>
-          )}
-
-          {!loading && !unavailable && !error && (
-            <>
-              {stats && Object.keys(stats).length > 0 && (
-                <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                  {Object.entries(stats)
-                    .filter(
-                      ([, value]) => typeof value === "number" || typeof value === "string",
-                    )
-                    .slice(0, 4)
-                    .map(([key, value]) => (
-                      <Stat key={key} label={key.replace(/_/g, " ")} value={String(value)} />
-                    ))}
-                </div>
-              )}
-
-              <Card
-                title="Anchored decisions"
-                subtitle="Each row is a decision committed to the registry with its model version."
-              >
-                {records.length === 0 ? (
-                  <p className="text-sm text-neutral-500">
-                    No decisions anchored yet. Use the tamper-evidence tab to anchor one, or
-                    let the platform&apos;s engines emit decisions.
-                  </p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead className="text-left text-xs uppercase tracking-wide text-neutral-500">
-                        <tr>
-                          {columns.map((column) => (
-                            <th key={column} className="pb-2">
-                              {column.replace(/_/g, " ")}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {records.slice(0, 25).map((row, index) => (
-                          <tr key={index} className="border-t border-neutral-200/60">
-                            {columns.map((column) => (
-                              <td key={column} className="py-2 font-mono text-xs">
-                                {String(row[column] ?? "—").slice(0, 48)}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </Card>
-            </>
-          )}
-        </>
-      )}
+      <Card title="Anchored decisions" subtitle="The five most recent">
+        {records.length === 0 ? (
+          <p className="text-sm text-neutral-500">
+            No decisions anchored yet. Execute a withdrawal, try one on the Decisions tab, or run
+            the tamper-evidence walkthrough on the Verify tab.
+          </p>
+        ) : (
+          <>
+            <DecisionTable records={records.slice(0, 5)} />
+            <Link href="/audit/decisions" className="mt-4 inline-block text-sm underline underline-offset-2">
+              All decisions
+            </Link>
+          </>
+        )}
+      </Card>
     </div>
   );
 }

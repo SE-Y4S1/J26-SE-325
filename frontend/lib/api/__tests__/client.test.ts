@@ -70,6 +70,24 @@ describe("error messages", () => {
     );
   });
 
+  it("surfaces an Express service's message", async () => {
+    // Component 3 is Express, not FastAPI: before this, every one of its errors read
+    // "Request failed (409)" however specific the service had been.
+    fetchMock.mockResolvedValue(
+      jsonResponse(403, { success: false, message: "Separation of duties: a reviewer cannot review a decision about themselves." }),
+    );
+    await expect(request("audit", "/api/audit/review")).rejects.toThrow(/Separation of duties/);
+  });
+
+  it("joins an Express service's validation errors onto its message", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(400, { success: false, message: "Input validation failed", errors: ["Amount must be a positive number greater than 0.", "Model version must exist."] }),
+    );
+    await expect(request("audit", "/api/audit/evaluate")).rejects.toThrow(
+      "Input validation failed: Amount must be a positive number greater than 0.; Model version must exist.",
+    );
+  });
+
   it("falls back to the status when there is no detail", async () => {
     fetchMock.mockResolvedValue(jsonResponse(500, { oops: true }));
     await expect(request("portfolio", "/x")).rejects.toThrow("Request failed (500)");

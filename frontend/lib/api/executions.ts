@@ -53,6 +53,12 @@ export interface AuditStage {
     blockNumber?: number | null;
   } | null;
   blockchain?: { isMock?: boolean; blockchainTxId?: string; blockNumber?: number } | null;
+  /** Component 3's assurance engine result (absent from older Component 3 versions). */
+  assurance?: {
+    route?: "AUTO" | "VERIFY" | "HUMAN_REVIEW";
+    assuranceScore?: number | null;
+    signalQuality?: "FULL" | "DEGRADED" | "LEGACY";
+  } | null;
   review?: AuditStage;
 }
 
