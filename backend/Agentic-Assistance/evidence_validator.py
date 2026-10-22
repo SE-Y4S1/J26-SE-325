@@ -306,7 +306,27 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
                 )
         else:
             parts = []
-            if "get_fraud_analysis" in tool_names:
+            answer_lower = (answer or "").lower()
+            wants_fraud = (
+                "get_fraud_analysis" in tool_names
+                and (
+                    "get_blockchain_audit" not in tool_names
+                    or bool(re.search(r"\b(?:fraud|score|blocked|flagged|gateway|decision)\b", answer_lower))
+                )
+            )
+            wants_audit = (
+                "get_blockchain_audit" in tool_names
+                and (
+                    "get_fraud_analysis" not in tool_names
+                    or bool(re.search(r"\b(?:audit|blockchain|ledger|hash|block\s*number|commitment)\b", answer_lower))
+                )
+            )
+            # Fallback: if neither matched keyword, include tools that were actually run
+            if not wants_fraud and not wants_audit:
+                wants_fraud = "get_fraud_analysis" in tool_names
+                wants_audit = "get_blockchain_audit" in tool_names
+
+            if wants_fraud:
                 fraud_item = next((item for item in evidence if item.get("tool") == "get_fraud_analysis"), None)
                 fraud_text = str(fraud_item.get("result", "")) if fraud_item else ""
                 tx_match = re.search(r"Transaction ID:\s*([^\n\r]+)", fraud_text)
@@ -358,7 +378,7 @@ def validate_evidence_claims(answer: str, evidence: list[dict]) -> dict:
                         "The SHAP values explain the local synthetic prototype, not the production fraud model. Whether the models share "
                         "training data is not established by the available evidence."
                     )
-            if "get_blockchain_audit" in tool_names:
+            if wants_audit:
                 audit_item = next((item for item in evidence if item.get("tool") == "get_blockchain_audit"), None)
                 audit_text = str(audit_item.get("result", "")) if audit_item else ""
                 tx_match = re.search(r"Transaction ID:\s*([^\n\r]+)", audit_text)

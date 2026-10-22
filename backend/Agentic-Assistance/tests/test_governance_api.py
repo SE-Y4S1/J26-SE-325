@@ -27,8 +27,14 @@ class TestGovernanceAPI(unittest.TestCase):
         self.original_file_path = default_governance_store.file_path
         default_governance_store.file_path = self.test_store_file
         default_governance_store._ensure_directory()
+        self._orig_auth_req = os.environ.get("AUTH_REQUIRED")
+        os.environ["AUTH_REQUIRED"] = "false"
 
     def tearDown(self):
+        if self._orig_auth_req is None:
+            os.environ.pop("AUTH_REQUIRED", None)
+        else:
+            os.environ["AUTH_REQUIRED"] = self._orig_auth_req
         default_governance_store.file_path = self.original_file_path
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 

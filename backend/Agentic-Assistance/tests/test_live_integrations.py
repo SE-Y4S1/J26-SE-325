@@ -106,10 +106,15 @@ class TestLiveIntegrations(unittest.TestCase):
             "rationale": "Automated integration test confirmation",
         }).encode("utf-8")
 
+        from tools.portfolio_tools import get_auth_header
+        auth_hdr = get_auth_header("1")
+        req_headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        req_headers.update(auth_hdr)
+
         req = urllib.request.Request(
             f"{self.c4_url}/assistant/governance/decision",
             data=post_data,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            headers=req_headers,
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -124,7 +129,8 @@ class TestLiveIntegrations(unittest.TestCase):
 
         # GET by reference_id to verify immediate persistence
         get_url = f"{self.c4_url}/assistant/governance/decision/{unique_ref}"
-        with urllib.request.urlopen(get_url, timeout=5) as get_resp:
+        get_req = urllib.request.Request(get_url, headers=req_headers)
+        with urllib.request.urlopen(get_req, timeout=5) as get_resp:
             self.assertEqual(get_resp.status, 200)
             get_body = json.loads(get_resp.read().decode("utf-8"))
             self.assertTrue(get_body["found"])
@@ -132,7 +138,8 @@ class TestLiveIntegrations(unittest.TestCase):
 
         # GET list to verify presence in audit log
         list_url = f"{self.c4_url}/assistant/governance/decisions?limit=10"
-        with urllib.request.urlopen(list_url, timeout=5) as list_resp:
+        list_req = urllib.request.Request(list_url, headers=req_headers)
+        with urllib.request.urlopen(list_req, timeout=5) as list_resp:
             self.assertEqual(list_resp.status, 200)
             list_body = json.loads(list_resp.read().decode("utf-8"))
             decisions = list_body.get("decisions", [])

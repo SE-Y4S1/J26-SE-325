@@ -35,8 +35,15 @@ def query_live_audit_service(transaction_id: str, base_url: str = AUDIT_SERVICE_
     clean_id = (
         str(transaction_id).strip().strip("'\"")
         if transaction_id and str(transaction_id).strip().lower() not in ("none", "null", "")
-        else (req_tx.strip() if req_tx and req_tx.strip() else "TX1001")
+        else (req_tx.strip() if req_tx and req_tx.strip() else "")
     )
+    if not clean_id:
+        return {
+            "available": False,
+            "status_code": None,
+            "data": None,
+            "error": "No transaction ID provided",
+        }
     quoted_id = urllib.parse.quote(clean_id, safe="")
     url = f"{base_url}/api/audit/{quoted_id}/verify"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -90,21 +97,28 @@ def query_live_audit_service(transaction_id: str, base_url: str = AUDIT_SERVICE_
 
 
 @tool
-def get_blockchain_audit(transaction_id: str = "TX1001") -> str:
+def get_blockchain_audit(transaction_id: str = "") -> str:
     """
     Retrieve and verify blockchain audit information for a financial transaction.
 
     Parameters:
     - transaction_id: Transaction identifier to verify on the blockchain audit bridge
       (e.g., 'PP1-DEMO-001', 'TX1001'). If the user mentions a specific transaction ID in their
-      message, pass that exact transaction ID. If no transaction ID is mentioned, use 'TX1001'.
+      message, pass that exact transaction ID. Never invent or assume a default transaction ID.
     """
     req_tx = get_request_transaction_id()
     target_id = (
         str(transaction_id).strip().strip("'\"")
         if transaction_id and str(transaction_id).strip().lower() not in ("none", "null", "")
-        else (req_tx.strip() if req_tx and req_tx.strip() else "TX1001")
+        else (req_tx.strip() if req_tx and req_tx.strip() else "")
     )
+
+    if not target_id:
+        return (
+            "TRANSACTION ID REQUIRED:\n"
+            "No specific transaction ID was provided. Please specify the transaction ID "
+            "(for example, a TX... or execution ID) to inspect blockchain audit records."
+        )
 
     mock_data = load_data()
     mock_audit = mock_data.get("audit", {}).get(target_id)
@@ -324,7 +338,7 @@ Block Number:
 {mock_audit.get("block_number", 0)}
 
 Record Status:
-{mock_audit.get("status", "VERIFIED")}
+NOT_FOUND_ON_LIVE_BRIDGE
 
 FALLBACK NOTICE:
 This record is local mock baseline data because the live audit service was unreachable ({reason}).
