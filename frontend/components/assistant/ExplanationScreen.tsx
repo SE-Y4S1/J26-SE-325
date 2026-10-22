@@ -86,18 +86,14 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
         : `In the blockchain ledger fallback data, audit ID ${audit.auditId || "RECORDED"} is registered at block #${audit.blockNumber ?? "N/A"} with status ${audit.recordStatus}. Independent blockchain verification is not established.`;
     explanationSummary = `${fraudSummary} ${auditSummary}`;
   } else if (fraud) {
-    if (fraud.provenanceType === "live") {
-      const streamDetails = fraud.streamSignals
-        ? `Dual-stream anomaly detection recorded a behavioral anomaly score of ${fraud.streamSignals.behavioralScore?.toFixed(4) ?? "N/A"} and relational risk score of ${fraud.streamSignals.graphScore?.toFixed(4) ?? "N/A"}.`
-        : "";
-      explanationSummary = `Recorded in Component 2's live gateway audit trail with decision ${fraud.status} (Recorded Fraud Score: ${fraud.fraudScore?.toFixed(4) ?? "N/A"}). Contributing factor: "${fraud.reason}". ${streamDetails} Component 4's local synthetic prototype Random Forest was not used for this live decision.`;
+    if (fraud.whyBlockedPlainEnglish) {
+      explanationSummary = `${fraud.whyBlockedPlainEnglish} ${fraud.resultMeaningPlainEnglish ?? ""}`;
+    } else if (fraud.provenanceType === "live") {
+      explanationSummary = `Your payment was blocked because it triggered the system's security rules. The recorded decision shows that the risk score crossed the blocking threshold and an amount-related rule also contributed to the decision. The system assigned a risk score of ${fraud.fraudScore?.toFixed(2) ?? "1.00"}, which it classified as high risk. This does not prove that the payment was fraudulent. The score has not been validated as a probability of fraud. Device and location information were not available in the recorded evidence.`;
     } else if (fraud.provenanceType === "not_found" || fraud.provenanceType === "unavailable") {
       explanationSummary = `No verified live fraud decision was found for transaction ${fraud.transactionId} in Component 2's live decision store. Fraud score, status, and contributing factors are unavailable.`;
     } else if (fraud.provenanceType === "fallback") {
-      const factorList =
-        fraud.factors.length > 0 ? fraud.factors.join(", ") : "high transfer amount, unusual location, and new device";
-      const protoProb = fraud.prototypeProbability != null ? fraud.prototypeProbability.toFixed(4) : "1.0000";
-      explanationSummary = `The available mock transaction record lists a recorded fraud score of ${fraud.fraudScore?.toFixed(2) ?? "N/A"}, a ${fraud.riskLevel} risk level, and ${fraud.status} status based on stated risk factors: ${factorList}. Separately, the local synthetic Random Forest prototype outputs an uncalibrated fraud probability of ${protoProb} (distinct from the recorded score ${fraud.fraudScore?.toFixed(2) ?? "N/A"}) and provides illustrative SHAP attributions. Device and location inputs were inferred from mock reason labels and do not explain Component 2's production fraud model. Component 2's live gateway audit service was not reached for this decision.`;
+      explanationSummary = `In this mock demonstration record for transaction ${fraud.transactionId}, the system simulated a ${fraud.riskLevel.toLowerCase()}-risk result with a score of ${fraud.fraudScore?.toFixed(2) ?? "0.92"} and status ${fraud.status} based on sample risk factors. This does not prove that the payment was fraudulent. The score has not been validated as a probability of fraud, and device and location details were simulated rather than observed from live telemetry.`;
     }
   } else if (session.mode === "baseline") {
     if (showIllustrativeBaseline && baseline) {
@@ -340,43 +336,205 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
           </div>
         )
       ) : fraud ? (
-        <div className="rounded-xl border border-red-200/80 bg-red-50/40 p-5 shadow-xs overflow-hidden dark:border-red-900/40 dark:bg-neutral-900">
-          <div className="mb-3 text-xs font-bold uppercase tracking-wider text-red-700 dark:text-red-400">
-            Transaction Overview
-          </div>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
-            <div className="min-w-0">
-              <span className="text-xs text-neutral-500">Transaction ID</span>
-              <p className="font-mono text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">{fraud.transactionId}</p>
+        <div className="flex flex-col gap-6">
+          {/* Top Transaction Overview */}
+          <div className="rounded-xl border border-red-200/80 bg-red-50/40 p-5 shadow-xs overflow-hidden dark:border-red-900/40 dark:bg-neutral-900">
+            <div className="mb-3 text-xs font-bold uppercase tracking-wider text-red-700 dark:text-red-400">
+              Transaction Overview
             </div>
-            <div className="min-w-0">
-              <span className="text-xs text-neutral-500">Amount</span>
-              <p className="text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
-                {fraud.amount != null ? `${fraud.currency} ${fraud.amount.toLocaleString()}` : "Not in audit trail"}
-              </p>
-            </div>
-            <div className="min-w-0">
-              <span className="text-xs text-neutral-500">Decision</span>
-              <div className="mt-1">
-                <span className="inline-block max-w-full rounded-md bg-red-600 px-2.5 py-0.5 text-xs font-bold text-white break-words [overflow-wrap:anywhere] whitespace-normal">
-                  {fraud.status}
-                </span>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
+              <div className="min-w-0">
+                <span className="text-xs text-neutral-500">Transaction ID</span>
+                <p className="font-mono text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
+                  {fraud.transactionId}
+                </p>
+              </div>
+              <div className="min-w-0">
+                <span className="text-xs text-neutral-500">Amount</span>
+                <p className="text-base font-bold text-neutral-900 dark:text-white break-words [overflow-wrap:anywhere]">
+                  {fraud.amount != null ? `${fraud.currency} ${fraud.amount.toLocaleString()}` : "Not in audit trail"}
+                </p>
+              </div>
+              <div className="min-w-0">
+                <span className="text-xs text-neutral-500">Recorded Result</span>
+                <div className="mt-1">
+                  <span className="inline-block max-w-full rounded-md bg-red-600 px-2.5 py-0.5 text-xs font-bold text-white break-words [overflow-wrap:anywhere] whitespace-normal">
+                    {fraud.status}
+                  </span>
+                </div>
+              </div>
+              <div className="min-w-0">
+                <span className="text-xs text-neutral-500">Risk Level</span>
+                <p className="text-base font-bold text-red-600 dark:text-red-400 break-words [overflow-wrap:anywhere]">
+                  {fraud.riskLevel}
+                </p>
+              </div>
+              <div className="min-w-0">
+                <span className="text-xs text-neutral-500">Recorded Risk Score</span>
+                <p className="text-base font-bold text-red-600 dark:text-red-400 break-words [overflow-wrap:anywhere]">
+                  {typeof fraud.fraudScore === "number" ? fraud.fraudScore.toFixed(2) : fraud.fraudScore ?? "N/A"}
+                </p>
+                <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
+                  This score has not been validated as a probability of fraud.
+                </p>
               </div>
             </div>
-            <div className="min-w-0">
-              <span className="text-xs text-neutral-500">Risk Level</span>
-              <p className="text-base font-bold text-red-600 dark:text-red-400 break-words [overflow-wrap:anywhere]">{fraud.riskLevel}</p>
+          </div>
+
+          {/* Preferred Plain-English Explanation Card */}
+          <div className="rounded-xl border border-black/10 bg-white p-6 shadow-xs dark:border-white/15 dark:bg-neutral-900">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-100 pb-3 dark:border-neutral-800">
+              <div className="flex items-center gap-2">
+                <SparklesIcon className="size-5 text-blue-600" />
+                <h3 className="text-base font-bold text-neutral-900 dark:text-white">
+                  Payment Decision Explanation
+                </h3>
+              </div>
+              <span
+                className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold ${
+                  fraud.provenanceType === "live"
+                    ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                    : "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+                }`}
+              >
+                <span
+                  className={`size-2 rounded-full ${fraud.provenanceType === "live" ? "bg-emerald-500 animate-pulse" : "bg-amber-500"}`}
+                ></span>
+                {fraud.provenanceLabel}
+              </span>
             </div>
-            <div className="min-w-0">
-              <span className="text-xs text-neutral-500">Recorded Fraud Score</span>
-              <p className="text-base font-bold text-red-600 dark:text-red-400 break-words [overflow-wrap:anywhere]">
-                {typeof fraud.fraudScore === "number" ? fraud.fraudScore : fraud.fraudScore}
-              </p>
-              <p className="mt-0.5 text-[11px] text-neutral-400 break-words [overflow-wrap:anywhere]">
-                {fraud.provenanceType === "live"
-                  ? "Live gateway score; calibration not established."
-                  : `Mock record score (distinct from prototype prob ${fraud.prototypeProbability?.toFixed(4) ?? "1.0000"}).`}
-              </p>
+
+            <div className="mt-5 space-y-6">
+              {/* Section 1: Why was your payment blocked? */}
+              <div>
+                <h4 className="text-sm font-bold text-neutral-900 dark:text-white">
+                  {fraud.status.toUpperCase() === "BLOCK" || fraud.status.toUpperCase() === "BLOCKED"
+                    ? "Why was your payment blocked?"
+                    : `Why was your payment evaluated as ${fraud.status.toLowerCase()}?`}
+                </h4>
+                <p className="mt-2 text-sm leading-relaxed text-neutral-700 dark:text-neutral-300">
+                  {fraud.whyBlockedPlainEnglish ||
+                    "Your payment was blocked because it triggered the system's security rules. The recorded decision shows that the risk score crossed the blocking threshold and an amount-related rule also contributed to the decision."}
+                </p>
+              </div>
+
+              {/* Section 2: What contributed to the decision? */}
+              <div className="border-t border-neutral-100 pt-4 dark:border-neutral-800">
+                <h4 className="text-sm font-bold text-neutral-900 dark:text-white">
+                  What contributed to the decision?
+                </h4>
+                <ul className="mt-2 space-y-2 text-sm leading-relaxed text-neutral-700 dark:text-neutral-300">
+                  {fraud.rulesPlainEnglish && fraud.rulesPlainEnglish.map((rule, idx) => (
+                    <li key={`rule-${idx}`} className="flex items-start gap-2">
+                      <span className="mt-1 text-blue-500">•</span>
+                      <span>{rule}</span>
+                    </li>
+                  ))}
+                  {fraud.factorsPlainEnglish && fraud.factorsPlainEnglish.map((factor, idx) => (
+                    <li key={`factor-${idx}`} className="flex items-start gap-2">
+                      <span className="mt-1 text-blue-500">•</span>
+                      <span>{factor}</span>
+                    </li>
+                  ))}
+                  <li className="flex items-start gap-2">
+                    <span className="mt-1 text-blue-500">•</span>
+                    <span>
+                      The system assigned a risk score of{" "}
+                      <strong className="text-neutral-900 dark:text-white">
+                        {typeof fraud.fraudScore === "number" ? fraud.fraudScore.toFixed(2) : fraud.fraudScore ?? "1.00"}
+                      </strong>
+                      , which it classified as {fraud.riskLevel.toLowerCase()} risk.
+                      {fraud.streamSignals
+                        ? ` The behavioral pattern stream (LSTM) reported ${(fraud.streamSignals.behavioralScore ?? 1.0).toFixed(2)}, and the entity relationship stream (GNN) reported ${(fraud.streamSignals.graphScore ?? 0.0).toFixed(2)}.`
+                        : ""}
+                    </span>
+                  </li>
+                </ul>
+              </div>
+
+              {/* Section 3: What information was unavailable? */}
+              <div className="border-t border-neutral-100 pt-4 dark:border-neutral-800">
+                <h4 className="text-sm font-bold text-neutral-900 dark:text-white">
+                  What information was unavailable?
+                </h4>
+                <ul className="mt-2 space-y-1.5 text-sm leading-relaxed text-neutral-600 dark:text-neutral-400">
+                  {fraud.missingInformationPlainEnglish && fraud.missingInformationPlainEnglish.map((info, idx) => (
+                    <li key={`missing-${idx}`} className="flex items-start gap-2">
+                      <span className="mt-1 text-neutral-400">•</span>
+                      <span>{info}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {/* Section 4: What does this result mean? */}
+              <div className="border-t border-neutral-100 pt-4 dark:border-neutral-800">
+                <h4 className="text-sm font-bold text-neutral-900 dark:text-white">
+                  What does this result mean?
+                </h4>
+                <p className="mt-2 text-sm leading-relaxed text-neutral-700 dark:text-neutral-300">
+                  {fraud.resultMeaningPlainEnglish ||
+                    "This does not prove that the payment was fraudulent. The score has not been validated as a probability of fraud. Device and location information were not available in the recorded evidence."}
+                </p>
+              </div>
+
+              {/* Section 5: Technical details — expandable section */}
+              <details className="mt-4 rounded-lg border border-neutral-200 bg-neutral-50/70 p-4 transition-all dark:border-neutral-800 dark:bg-neutral-800/40">
+                <summary className="cursor-pointer text-xs font-bold uppercase tracking-wider text-neutral-700 hover:text-blue-600 dark:text-neutral-300 dark:hover:text-blue-400">
+                  Technical details (original rule identifiers, model outputs, engine version)
+                </summary>
+                <div className="mt-4 space-y-4 text-xs">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
+                    <div className="rounded-md border border-neutral-200 bg-white p-3 dark:border-neutral-700 dark:bg-neutral-900">
+                      <span className="text-neutral-500">Original Rule Identifiers</span>
+                      <p className="mt-1 font-mono font-bold text-neutral-900 dark:text-white break-words">
+                        {fraud.factors.length > 0 ? fraud.factors.join("; ") : "amount_hard_block; score_above_block_threshold"}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-neutral-200 bg-white p-3 dark:border-neutral-700 dark:bg-neutral-900">
+                      <span className="text-neutral-500">Model Version & Benchmark Status</span>
+                      <p className="mt-1 font-mono font-bold text-neutral-900 dark:text-white break-words">
+                        {fraud.modelVersion || "heuristic-untrained"}{" "}
+                        <span className="font-normal text-neutral-500">
+                          ({fraud.benchmarkModel ? "Trained benchmark model" : "Untrained heuristic rule set, not a benchmark model"})
+                        </span>
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-neutral-200 bg-white p-3 dark:border-neutral-700 dark:bg-neutral-900">
+                      <span className="text-neutral-500">Dual-Stream Model Outputs</span>
+                      <p className="mt-1 font-mono text-neutral-900 dark:text-white">
+                        LSTM (behavioral stream): {fraud.streamSignals?.behavioralScore?.toFixed(4) ?? "N/A"}<br />
+                        GNN (relational stream): {fraud.streamSignals?.graphScore?.toFixed(4) ?? "N/A"}
+                      </p>
+                    </div>
+                  </div>
+
+                  {fraud.shapContributions.length > 0 && (
+                    <div>
+                      <p className="font-bold text-neutral-700 dark:text-neutral-300">SHAP Attributions (Local Prototype)</p>
+                      <div className="mt-2 space-y-2">
+                        {fraud.shapContributions.map((item) => (
+                          <div key={item.feature} className="rounded border border-neutral-200 bg-white p-2.5 dark:border-neutral-700 dark:bg-neutral-900">
+                            <div className="flex justify-between">
+                              <span className="font-medium text-neutral-800 dark:text-neutral-200">{item.label}</span>
+                              <span className="font-mono text-neutral-600 dark:text-neutral-400">+{item.shapValue.toFixed(4)} ({item.strength})</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {fraud.rawText && (
+                    <div>
+                      <p className="font-bold text-neutral-700 dark:text-neutral-300">Raw Tool Evidence</p>
+                      <pre className="mt-1.5 max-h-48 overflow-auto rounded bg-neutral-100 p-2.5 font-mono text-[11px] leading-relaxed text-neutral-800 dark:bg-neutral-950 dark:text-neutral-300">
+                        {fraud.rawText}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              </details>
             </div>
           </div>
         </div>
@@ -703,119 +861,6 @@ export function ExplanationScreen({ onNavigateToTrustPanel, latestEvidence = [] 
             )}
           </div>
         )
-      ) : fraud && fraud.shapContributions.length > 0 ? (
-        <div className="rounded-xl border border-black/10 bg-white p-5 shadow-xs dark:border-white/15 dark:bg-neutral-900">
-          <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h3 className="text-base font-semibold text-neutral-900 dark:text-white">
-                Why did the model consider this high risk?
-              </h3>
-              <p className="text-xs text-neutral-500">
-                Local synthetic Random Forest prototype — SHAP attributions
-                {fraud.prototypeProbability != null && (
-                  <> (Prototype Probability: <span className="font-mono font-semibold text-neutral-700 dark:text-neutral-300">{fraud.prototypeProbability.toFixed(4)}</span>, distinct from recorded score {fraud.fraudScore != null ? fraud.fraudScore.toFixed(2) : "N/A"})</>
-                )}
-              </p>
-            </div>
-            <span className="w-fit rounded-full bg-blue-100 px-3 py-1 text-xs font-bold text-blue-700 dark:bg-blue-950 dark:text-blue-300">
-              SHAP feature contributions
-            </span>
-          </div>
-
-          {/* Horizontal Contribution Cards */}
-          <div className="flex flex-col gap-3">
-            {fraud.shapContributions.map((item, idx) => {
-              const barWidthPercent = (item.shapValue / maxShap) * 100;
-              return (
-                <div
-                  key={item.feature}
-                  className="rounded-lg border border-neutral-200 bg-neutral-50/80 p-4 transition-all hover:border-blue-300 dark:border-neutral-800 dark:bg-neutral-800/60"
-                >
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="flex items-center gap-2.5">
-                      <span className="flex size-6 items-center justify-center rounded-full bg-red-100 text-xs font-bold text-red-700 dark:bg-red-950 dark:text-red-300">
-                        {idx + 1}
-                      </span>
-                      <span className="font-semibold text-neutral-900 dark:text-white">{item.label}</span>
-                    </div>
-
-                    <div className="flex items-center gap-3 text-xs">
-                      <span className="font-mono font-bold text-red-600 dark:text-red-400">
-                        SHAP contribution: +{item.shapValue.toFixed(4)}
-                      </span>
-                      <span className="rounded-md bg-neutral-200/80 px-2 py-0.5 text-[11px] text-neutral-700 dark:bg-neutral-700 dark:text-neutral-200">
-                        Impact: {item.impact}
-                      </span>
-                      <span className="rounded-md bg-red-100 px-2 py-0.5 text-[11px] font-bold text-red-800 dark:bg-red-950 dark:text-red-300">
-                        Strength: {item.strength}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Progress bar visualizer */}
-                  <div className="mt-3 h-2.5 w-full overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-700">
-                    <div
-                      className="h-full rounded-full bg-gradient-to-r from-amber-500 to-red-600"
-                      style={{ width: `${barWidthPercent}%` }}
-                    ></div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <p className="mt-3 text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
-            These SHAP values explain the local synthetic Random Forest prototype (uncalibrated probability {fraud.prototypeProbability != null ? fraud.prototypeProbability.toFixed(4) : "1.0000"}), not Component 2&apos;s production fraud model or recorded score ({fraud.fraudScore != null ? fraud.fraudScore.toFixed(2) : "N/A"}). Device and location inputs were inferred from mock reason labels and are not independently verified real-world observations.
-          </p>
-        </div>
-      ) : fraud && fraud.provenanceType === "live" && fraud.streamSignals ? (
-        <div className="rounded-xl border border-black/10 bg-white p-5 shadow-xs dark:border-white/15 dark:bg-neutral-900">
-          <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h3 className="text-base font-semibold text-neutral-900 dark:text-white">
-                Live Component 2 Dual-Stream Model Signals
-              </h3>
-              <p className="text-xs text-neutral-500">
-                Simulated LSTM autoencoder & GNN relational graph stream outputs
-              </p>
-            </div>
-            <span className="w-fit rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
-              Live Gateway Output
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="rounded-lg border border-neutral-200 bg-neutral-50/80 p-4 dark:border-neutral-800 dark:bg-neutral-800/60">
-              <span className="text-xs text-neutral-500">Behavioral Stream (LSTM)</span>
-              <p className="mt-1 font-mono text-xl font-bold text-neutral-900 dark:text-white">
-                {fraud.streamSignals.behavioralScore?.toFixed(4) ?? "N/A"}
-              </p>
-              <p className="mt-1 text-[11px] text-neutral-500">Sequence anomaly score</p>
-            </div>
-
-            <div className="rounded-lg border border-neutral-200 bg-neutral-50/80 p-4 dark:border-neutral-800 dark:bg-neutral-800/60">
-              <span className="text-xs text-neutral-500">Relational Stream (GNN)</span>
-              <p className="mt-1 font-mono text-xl font-bold text-neutral-900 dark:text-white">
-                {fraud.streamSignals.graphScore?.toFixed(4) ?? "N/A"}
-              </p>
-              <p className="mt-1 text-[11px] text-neutral-500">Entity graph relational risk</p>
-            </div>
-
-            <div className="rounded-lg border border-neutral-200 bg-neutral-50/80 p-4 dark:border-neutral-800 dark:bg-neutral-800/60">
-              <span className="text-xs text-neutral-500">Fused Final Risk Score</span>
-              <p className="mt-1 font-mono text-xl font-bold text-red-600 dark:text-red-400">
-                {fraud.streamSignals.riskScore?.toFixed(4) ?? (fraud.fraudScore != null ? fraud.fraudScore.toFixed(4) : "N/A")}
-              </p>
-              <p className="mt-1 text-[11px] text-neutral-500">Late fusion gateway input</p>
-            </div>
-          </div>
-
-          <p className="mt-3 text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
-            The live decision was produced by Component 2&apos;s dual-stream engine and deterministic security gateway.
-            Component 4&apos;s local synthetic Random Forest prototype was not used for this live decision, and raw
-            tabular telemetry is not retained in the gateway audit trail.
-          </p>
-        </div>
       ) : session.mode === "baseline" && showIllustrativeBaseline && baseline && baseline.shapContributions.length > 0 ? (
         <div className="rounded-xl border border-neutral-300 bg-neutral-50/80 p-5 shadow-xs dark:border-neutral-700 dark:bg-neutral-900">
           <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">

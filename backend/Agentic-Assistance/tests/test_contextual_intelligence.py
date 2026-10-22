@@ -39,6 +39,7 @@ from agent import (
     synthesize_portfolio_response,
     render_hypothetical_calc,
     resolve_transaction_id,
+    handle_why_blocked_query,
     OUT_OF_DOMAIN_RESPONSE,
 )
 from evidence_validator import validate_evidence_claims
@@ -234,9 +235,10 @@ GENUINE SIGNALS & TELEMETRY STATUS:
             tool_content,
             user_query="Why was my transaction blocked?"
         )
-        self.assertIn("Transaction Block Analysis (TX999):", focused_reply)
-        self.assertIn("BLOCKED", focused_reply)
-        self.assertIn("amount_hard_block", focused_reply)
+        self.assertIn("Your payment was blocked because it triggered the system's security rules", focused_reply)
+        self.assertIn("amount-related rule", focused_reply)
+        self.assertIn("0.85", focused_reply)
+        self.assertIn("does not prove that the payment was fraudulent", focused_reply)
         # Should NOT dump the generic full report header
         self.assertNotIn("Here is the verified fraud analysis for transaction", focused_reply)
 
@@ -425,6 +427,196 @@ RECORDED HOLDINGS:
         self.assertTrue(len(result["issues"]) > 0)
         self.assertIn("Missing required opening notice that no live portfolio was retrieved", result["issues"])
 
+    # ---------------------------------------------------------
+    # Category 5: Plain-English Explanations & Trust (Cases 23 - 30)
+    # ---------------------------------------------------------
+
+    def test_23_score_1_0000_not_described_as_100_percent_probability(self):
+        """23. A score of 1.0000 is explained as 1.00 high risk, NOT 100% probability of fraud."""
+        tool_content = """
+FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD
+Transaction ID: ui-mvjutmyf
+Recorded Fraud Score: 1.0000
+Recorded Risk Level: HIGH
+Recorded Status: BLOCK
+Model Version: heuristic-untrained
+Behavioral Stream Anomaly Score (LSTM): 1.0000
+Relational Stream Risk Score (GNN): 0.0000
+DECISION RULES & REASONING:
+- score_above_block_threshold; amount_hard_block
+FEATURE ATTRIBUTIONS & CONTRIBUTING FACTORS:
+- amount: contribution +1.0000
+GENUINE SIGNALS & TELEMETRY STATUS:
+- Device Signals: Unavailable
+- Location Signals: Unavailable
+"""
+        reply = synthesize_fraud_response(tool_content, user_query="Why was my payment blocked?")
+        self.assertIn("Your payment was blocked because it triggered the system's security rules", reply)
+        self.assertIn("risk score of 1.00", reply)
+        self.assertIn("high risk", reply)
+        self.assertIn("does not prove that the payment was fraudulent", reply)
+        self.assertIn("has not been validated as a probability of fraud", reply)
+        self.assertNotIn("100% probability", reply)
+        self.assertNotIn("100% likelihood", reply)
+        self.assertNotIn("definitely fraud", reply.lower())
+
+    def test_24_untrained_heuristic_not_described_as_validated_model(self):
+        """24. heuristic-untrained model version is accurately identified as unvalidated."""
+        tool_content = """
+FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD
+Transaction ID: ui-mvjutmyf
+Recorded Fraud Score: 1.0000
+Recorded Risk Level: HIGH
+Recorded Status: BLOCK
+Model Version: heuristic-untrained
+Behavioral Stream Anomaly Score (LSTM): 1.0000
+Relational Stream Risk Score (GNN): 0.0000
+DECISION RULES & REASONING:
+- score_above_block_threshold
+"""
+        reply = synthesize_fraud_response(tool_content, user_query="")
+        self.assertIn("unvalidated heuristic rule set (heuristic-untrained)", reply)
+        self.assertIn("rather than a validated benchmark model", reply)
+        self.assertNotIn("evaluated by a trained model bundle", reply)
+
+    def test_25_technical_rule_identifiers_translated_to_readable_text(self):
+        """25. Technical rule identifiers like score_above_block_threshold and amount_hard_block are translated."""
+        tool_content = """
+FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD
+Transaction ID: TX-RULE-1
+Recorded Fraud Score: 0.9000
+Recorded Risk Level: HIGH
+Recorded Status: BLOCK
+Model Version: v1.0.0 (trained benchmark)
+Behavioral Stream Anomaly Score (LSTM): 0.9000
+Relational Stream Risk Score (GNN): 0.8000
+DECISION RULES & REASONING:
+- score_above_block_threshold; amount_hard_block
+FEATURE ATTRIBUTIONS & CONTRIBUTING FACTORS:
+- TransactionAmt: +0.7000
+"""
+        reply = synthesize_fraud_response(tool_content, user_query="Why was my payment blocked?")
+        self.assertIn("risk score crossed the blocking threshold", reply)
+        self.assertIn("amount-related rule", reply)
+        self.assertIn("transaction amount as a factor", reply)
+
+    def test_26_definitely_fraud_followup_clarifies_not_proof_of_fraud(self):
+        """26. 'Does this mean the transaction was definitely fraud?' returns clear 'No' with explanation."""
+        tool_content = """
+FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD
+Transaction ID: TX999
+Recorded Fraud Score: 1.0000
+Recorded Risk Level: HIGH
+Recorded Status: BLOCK
+Model Version: heuristic-untrained
+Behavioral Stream Anomaly Score (LSTM): 1.0000
+Relational Stream Risk Score (GNN): 0.0000
+DECISION RULES & REASONING:
+- score_above_block_threshold
+"""
+        reply = synthesize_fraud_response(tool_content, user_query="Does this mean the transaction was definitely fraud?")
+        self.assertTrue(reply.startswith("No."))
+        self.assertIn("does not prove that the payment was fraudulent", reply)
+        self.assertIn("nor does it mean you committed fraud", reply)
+        self.assertIn("has not been validated as a probability of fraud", reply)
+
+    def test_27_contributing_factors_followup_plain_english(self):
+        """27. 'What caused the high-risk result?' returns plain-English contributing factors."""
+        tool_content = """
+FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD
+Transaction ID: TX999
+Recorded Fraud Score: 0.8800
+Recorded Risk Level: HIGH
+Recorded Status: BLOCK
+Model Version: v1.0.0 (trained benchmark)
+Behavioral Stream Anomaly Score (LSTM): 0.8500
+Relational Stream Risk Score (GNN): 0.9000
+DECISION RULES & REASONING:
+- amount_hard_block
+FEATURE ATTRIBUTIONS & CONTRIBUTING FACTORS:
+- TransactionAmt: +0.6500
+GENUINE SIGNALS & TELEMETRY STATUS:
+- Device Signals: Unavailable
+- Location Signals: Unavailable
+"""
+        reply = synthesize_fraud_response(tool_content, user_query="What caused the high-risk result?")
+        self.assertIn("high-risk result was caused by the following recorded factors", reply)
+        self.assertIn("Security rules:", reply)
+        self.assertIn("amount-related rule", reply)
+        self.assertIn("behavioral pattern stream (LSTM) reported 0.85", reply)
+        self.assertIn("relational stream (GNN) reported 0.90", reply)
+        self.assertIn("Device and location information were not available", reply)
+
+    def test_28_unavailable_telemetry_disclosed_accurately(self):
+        """28. 'What information was unavailable?' explicitly describes missing device and location telemetry."""
+        tool_content = """
+FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD
+Transaction ID: TX999
+Recorded Fraud Score: 0.8800
+Recorded Risk Level: HIGH
+Recorded Status: BLOCK
+Model Version: v1.0.0 (trained benchmark)
+Behavioral Stream Anomaly Score (LSTM): 0.8500
+Relational Stream Risk Score (GNN): 0.9000
+DECISION RULES & REASONING:
+- amount_hard_block
+"""
+        reply = synthesize_fraud_response(tool_content, user_query="What information was unavailable?")
+        self.assertIn("Unavailable Telemetry Signals for Transaction TX999:", reply)
+        self.assertIn("Device information: Hardware identifiers, device fingerprints", reply)
+        self.assertIn("Location information: Geographic location coordinates", reply)
+        self.assertIn("Biometric signals:", reply)
+
+    def test_29_shap_not_falsely_claimed_for_live_decision(self):
+        """29. 'Was SHAP used to explain this decision?' accurately discloses that SHAP was not computed."""
+        tool_content = """
+FRAUD ANALYSIS — LIVE COMPONENT 2 AUDIT RECORD
+Transaction ID: TX999
+Recorded Fraud Score: 0.8800
+Recorded Risk Level: HIGH
+Recorded Status: BLOCK
+Model Version: v1.0.0 (trained benchmark)
+Behavioral Stream Anomaly Score (LSTM): 0.8500
+Relational Stream Risk Score (GNN): 0.9000
+DECISION RULES & REASONING:
+- amount_hard_block
+"""
+        reply = synthesize_fraud_response(tool_content, user_query="Was SHAP used to explain this decision?")
+        self.assertIn("No, a SHAP explanation was not generated for this live decision", reply)
+        self.assertIn("does not retain the raw tabular data required to compute SHAP values", reply)
+
+    def test_30_deterministic_fast_paths_plain_english(self):
+        """30. Deterministic fast path responses are user-friendly and avoid ML jargon."""
+        definitely_fraud = get_deterministic_fast_path("Does this mean the transaction was definitely fraud?")
+        self.assertIsNotNone(definitely_fraud)
+        self.assertTrue(definitely_fraud.startswith("No."))
+        self.assertIn("does not prove that the payment was fraudulent", definitely_fraud)
+
+        factors = get_deterministic_fast_path("What caused the high-risk result?")
+        self.assertIsNotNone(factors)
+        self.assertIn("Security rules:", factors)
+        self.assertIn("Risk factors:", factors)
+        self.assertIn("behavioral stream (analyzing activity patterns)", factors)
+        self.assertIn("relational stream (analyzing entity relationships)", factors)
+
+        # When transaction ID is not provided, assistant asks for it rather than fabricating one
+        why_blocked = get_deterministic_fast_path("Why was my payment blocked?")
+        self.assertIsNotNone(why_blocked)
+        self.assertIn("Could you please provide the transaction ID", why_blocked)
+
+        # General why-blocked explanation explains security rules in plain English
+        why_blocked_direct = handle_why_blocked_query()
+        self.assertIn("was blocked because it triggered the system's security rules", why_blocked_direct)
+        self.assertIn("does not prove that the payment was fraudulent", why_blocked_direct)
+
+        score_meaning = get_deterministic_fast_path("What does my risk score mean?")
+        self.assertIsNotNone(score_meaning)
+        self.assertIn("not an established empirical calibrated probability", score_meaning)
+        self.assertIn("internal anomaly risk rating", score_meaning)
+        self.assertIn("behavioral LSTM analyzing activity patterns", score_meaning)
+        self.assertIn("relational GNN analyzing entity connections", score_meaning)
+
 
 if __name__ == "__main__":
     unittest.main()
+
