@@ -33,6 +33,13 @@ export interface ParsedFraudEvidence {
   benchmarkModel?: boolean;
   unavailableSignals?: string[];
   retrievalTimestamp?: string;
+  // Plain-English Explanation fields (Section 4)
+  whyBlockedPlainEnglish?: string;
+  rulesPlainEnglish?: string[];
+  factorsPlainEnglish?: string[];
+  missingInformationPlainEnglish?: string[];
+  resultMeaningPlainEnglish?: string;
+  rawText?: string;
 }
 
 export interface ParsedAuditEvidence {
@@ -258,6 +265,33 @@ export function parseFraudResult(text: string): ParsedFraudEvidence {
   const timeMatch = text.match(/(?:Audit Timestamp|Decision Timestamp):\s*([^\n\r]+)/i);
   const retrievalTimestamp = timeMatch ? timeMatch[1].trim() : new Date().toISOString();
 
+  const rulesPlainEnglish = translateSecurityRulesToEnglish(factors);
+  const factorsPlainEnglish = translateContributingFactorsToEnglish(factors);
+
+  const missingInformationPlainEnglish: string[] = [
+    "Device information: Hardware identifiers and device fingerprints were not collected or retained.",
+    "Location information: Geographic location coordinates and IP location telemetry were not collected or retained.",
+    "Biometric telemetry: Behavioral biometrics (such as keystroke dynamics) were not collected.",
+  ];
+
+  let whyBlockedPlainEnglish = "";
+  const upperStatus = status.toUpperCase();
+  if (upperStatus === "BLOCK" || upperStatus === "BLOCKED") {
+    whyBlockedPlainEnglish =
+      "Your payment was blocked because it triggered the system's security rules. The recorded decision shows that the risk score crossed the blocking threshold and an amount-related rule also contributed to the decision.";
+  } else if (upperStatus === "ALLOW" || upperStatus === "APPROVED") {
+    whyBlockedPlainEnglish =
+      "Your payment was approved because it satisfied the system's standard security checks without triggering risk blocking rules.";
+  } else if (upperStatus.includes("STEP")) {
+    whyBlockedPlainEnglish =
+      "Your payment was flagged for step-up verification because it exceeded standard risk thresholds.";
+  } else {
+    whyBlockedPlainEnglish = `Your payment received a recorded status of ${status} based on automated security rule evaluation.`;
+  }
+
+  const resultMeaningPlainEnglish =
+    "A high-risk classification or block decision means the transaction triggered automated security rules and risk thresholds. It does not prove that the payment was fraudulent, nor does it mean you committed fraud. This score has not been validated as a statistical probability of fraud.";
+
   return {
     hasEvidence: true,
     provenanceType,
@@ -278,7 +312,66 @@ export function parseFraudResult(text: string): ParsedFraudEvidence {
     benchmarkModel,
     unavailableSignals,
     retrievalTimestamp,
+    whyBlockedPlainEnglish,
+    rulesPlainEnglish,
+    factorsPlainEnglish,
+    missingInformationPlainEnglish,
+    resultMeaningPlainEnglish,
+    rawText: text,
   };
+}
+
+export function translateSecurityRulesToEnglish(rules: string[] | string): string[] {
+  const text = Array.isArray(rules) ? rules.join("\n") : rules;
+  const translated: string[] = [];
+  if (/score_above_block_threshold/i.test(text)) {
+    translated.push("The risk score crossed the system's automated blocking threshold.");
+  }
+  if (/amount_hard_block/i.test(text)) {
+    translated.push("An amount-related security rule was triggered because the transfer amount met or exceeded a configured limit.");
+  }
+  if (/score_above_step_up_threshold/i.test(text)) {
+    translated.push("The risk score exceeded standard thresholds, triggering step-up verification.");
+  }
+  if (/score_below_step_up_threshold/i.test(text)) {
+    translated.push("The risk score was within the standard acceptable risk threshold.");
+  }
+  if (/Passed standard thresholds/i.test(text)) {
+    translated.push("The transaction passed standard security verification rules.");
+  }
+  if (translated.length === 0) {
+    if (text && text.trim()) {
+      const clean = text
+        .split("\n")
+        .map((l) => l.replace(/^[-*]\s*/, "").replace(/_/g, " ").trim())
+        .filter((l) => l.length > 0 && !l.toLowerCase().includes("none returned"));
+      if (clean.length > 0) {
+        translated.push(...clean);
+      } else {
+        translated.push("The transaction was evaluated against automated gateway security rules.");
+      }
+    } else {
+      translated.push("The transaction was evaluated against automated gateway security rules.");
+    }
+  }
+  return translated;
+}
+
+export function translateContributingFactorsToEnglish(factors: string[]): string[] {
+  const result: string[] = [];
+  for (const factor of factors) {
+    if (/amount/i.test(factor) || /TransactionAmt/i.test(factor)) {
+      result.push("The transaction amount was identified as a factor that increased the risk score.");
+    } else if (/unusual_location|unusual location/i.test(factor)) {
+      result.push("An unusual location indicator contributed to the risk score.");
+    } else if (/new_device|new device/i.test(factor)) {
+      result.push("A new device indicator contributed to the risk score.");
+    } else if (!/score_above_block_threshold|amount_hard_block|none returned|passed standard/i.test(factor)) {
+      const cleaned = factor.replace(/^[-*]\s*/, "").replace(/_/g, " ").trim();
+      if (cleaned) result.push(cleaned);
+    }
+  }
+  return result;
 }
 
 export function parseAuditResult(text: string): ParsedAuditEvidence {

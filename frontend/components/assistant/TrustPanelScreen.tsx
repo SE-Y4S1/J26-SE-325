@@ -9,6 +9,7 @@ import {
   getGovernanceDecision,
   type GovernanceDecisionRecord,
 } from "@/lib/api/assistant";
+import { translateSecurityRulesToEnglish } from "./explanationParser";
 
 interface TrustPanelScreenProps {
   latestEvidence?: Array<{ tool: string; result: string }>;
@@ -440,7 +441,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <h3 className="text-base font-semibold text-neutral-900 dark:text-white">
-              AI Decision Summary
+              What the system decided <span className="text-xs font-normal text-neutral-500">(AI Decision Summary)</span>
             </h3>
             {hasLiveEvidence ? (
               <span
@@ -501,7 +502,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
               </p>
             </div>
             <div className="text-right">
-              <span className="text-xs text-neutral-500">Status</span>
+              <span className="text-xs text-neutral-500">Recorded result</span>
               <p
                 className={`text-base font-bold ${
                   actionState === "rejected"
@@ -531,7 +532,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
           </div>
 
           <p className="mt-3 text-sm text-neutral-700 dark:text-neutral-300">
-            <span className="font-semibold text-neutral-900 dark:text-white">Explanation:</span>{" "}
+            <span className="font-semibold text-neutral-900 dark:text-white">What the system recorded:</span>{" "}
             {hasLiveEvidence ? (
               isPortfolio ? (
                 parsed.portfolioStatusType === "service_error" ? (
@@ -552,11 +553,11 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
                   </>
                 ) : parsed.provenanceType === "live" ? (
                   <>
-                    Component 2 live decision store reports status <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> with verified fraud score <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore?.toFixed(4) ?? "N/A"}</span> ({parsed.riskLevel || "HIGH"} risk) for transaction <span className="font-semibold text-neutral-900 dark:text-white">{displayTxId}</span>. Decision reasoning: {parsed.factors?.[0] || "dual-stream anomaly evaluation"}. Component 4&apos;s local Random Forest prototype is NOT used for this live transaction.
+                    The system recorded a decision of <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> with a risk score of <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore?.toFixed(2) ?? "1.00"}</span> ({parsed.riskLevel || "HIGH"} risk) for transaction <span className="font-semibold text-neutral-900 dark:text-white">{displayTxId}</span>. What contributed to the result: {parsed.factors && parsed.factors.length > 0 ? translateSecurityRulesToEnglish(parsed.factors)[0] : "automated security gateway rules"}. This score has not been validated as a probability of fraud, and device and location information were not collected in the recorded evidence.
                   </>
                 ) : (
                   <>
-                    The available mock transaction record lists a recorded fraud score of <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"}</span>, <span className="font-semibold text-neutral-900 dark:text-white">{parsed.riskLevel || "HIGH"}</span> risk level, and <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> status based on stated risk factors ({parsed.factors?.join(", ") || "high transfer amount, unusual location, and new device"}). Separately, the local synthetic Random Forest prototype provides illustrative SHAP attributions (uncalibrated probability {parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}, distinct from recorded score {parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"}). Device and location features were inferred from mock labels and do not explain Component 2&apos;s production model.
+                    In this mock demonstration record for transaction <span className="font-semibold text-neutral-900 dark:text-white">{displayTxId}</span>, the system recorded a simulated score of <span className="font-semibold text-neutral-900 dark:text-white">{parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"}</span>, <span className="font-semibold text-neutral-900 dark:text-white">{parsed.riskLevel || "HIGH"}</span> risk level, and <span className="font-semibold text-neutral-900 dark:text-white">{parsed.status || "BLOCKED"}</span> status based on sample risk factors ({parsed.factors?.join(", ") || "high transfer amount, unusual location, and new device"}). This score has not been validated as a probability of fraud, and device and location details were simulated rather than observed from live telemetry.
                   </>
                 )
               ) : (
@@ -569,7 +570,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
 
           <div className="mt-4 flex flex-col gap-2 border-t border-neutral-200/80 pt-3 dark:border-neutral-700">
             <p className="text-xs font-bold uppercase tracking-wider text-neutral-500">
-              Available Evidence Checklist
+              Evidence Checklist (Available vs. Missing Information)
             </p>
             <div className="flex flex-col gap-1.5 text-xs text-neutral-800 dark:text-neutral-200">
               {isPortfolio ? (
@@ -670,18 +671,22 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
                           <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
                           <span>
                             {parsed.provenanceType === "live"
-                              ? `Live Component 2 fraud decision: ${parsed.status || "UNKNOWN"} (Score: ${parsed.fraudScore?.toFixed(4) ?? "N/A"}, Risk: ${parsed.riskLevel || "N/A"})`
+                              ? `Live Component 2 recorded result: ${parsed.status || "UNKNOWN"} (Risk score: ${parsed.fraudScore?.toFixed(2) ?? "1.00"}, ${parsed.riskLevel || "N/A"} risk)`
                               : `Recorded mock fraud score: ${parsed.fraudScore != null ? parsed.fraudScore.toFixed(2) : "0.92"} (Synthetic Demo Mode)`}
                           </span>
                         </div>
                         {parsed.modelVersion && (
                           <div className="ml-6 text-[11px] text-neutral-600 dark:text-neutral-400">
-                            Model Version: {parsed.modelVersion} ({parsed.benchmarkModel ? "Public benchmark model" : "Untrained heuristic"})
+                            Model Version: {parsed.modelVersion} (
+                            {parsed.benchmarkModel
+                              ? "Validated benchmark model"
+                              : "Untrained heuristic rule set, not a validated benchmark model"}
+                            )
                           </div>
                         )}
                         {parsed.unavailableSignals && parsed.unavailableSignals.length > 0 && (
                           <div className="ml-6 text-[11px] text-amber-700 dark:text-amber-400">
-                            Unavailable telemetry: {parsed.unavailableSignals.join(", ")}
+                            Information the system did not collect: {parsed.unavailableSignals.join(", ")}
                           </div>
                         )}
                       </div>
@@ -690,7 +695,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
                         <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                           <circle cx="12" cy="12" r="8" />
                         </svg>
-                        <span>Recorded fraud score: Not evaluated in this response</span>
+                        <span>Recorded risk score: Not evaluated in this response</span>
                       </div>
                     )
                   ) : (
@@ -698,7 +703,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
                       <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <circle cx="12" cy="12" r="8" />
                       </svg>
-                      <span>Mock baseline fraud score: {tx.fraudScore} (verification and probability calibration not established)</span>
+                      <span>Mock baseline risk score: {tx.fraudScore} (this score has not been validated as a probability of fraud)</span>
                     </div>
                   )}
 
@@ -714,7 +719,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
                           </code>
                           {parsed.blockNumber != null && `, Block: #${parsed.blockNumber}`}
                           {parsed.recordStatus && `, Status: ${parsed.recordStatus}`}
-                          {parsed.auditIsMockLedger && " — simulated ledger"}
+                          {parsed.auditIsMockLedger && " — simulated ledger (independent blockchain verification not established)"}
                           )
                         </span>
                       </div>
@@ -724,7 +729,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
                           <circle cx="12" cy="12" r="8" />
                         </svg>
                         <span>
-                          Blockchain audit record: Not requested or provided in this response (audit status unverified)
+                          Blockchain audit record: Not requested or evaluated in this response (remains unverified)
                         </span>
                       </div>
                     )
@@ -750,7 +755,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
                         <CheckCircleIcon className="size-4 shrink-0 text-emerald-500" />
                         <span>
                           {parsed.provenanceType === "live"
-                            ? "SHAP explanation: Not computed for live Component 2 gateway decision (telemetry not retained)"
+                            ? "A SHAP explanation was not generated for this transaction (raw telemetry not retained in gateway)"
                             : `SHAP explanation available (local synthetic Random Forest prototype, prob ${parsed.prototypeProbability != null ? parsed.prototypeProbability.toFixed(4) : "1.0000"}; does not explain production model)`}
                         </span>
                       </div>
@@ -759,7 +764,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
                         <svg className="size-4 shrink-0 text-neutral-400 dark:text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                           <circle cx="12" cy="12" r="8" />
                         </svg>
-                        <span>SHAP explanation: Not computed for live Component 2 gateway decision (telemetry not retained)</span>
+                        <span>A SHAP explanation was not generated for this transaction (raw telemetry not retained in gateway)</span>
                       </div>
                     ) : (
                       <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
@@ -785,7 +790,7 @@ export function TrustPanelScreen({ latestEvidence = [], selectedTransactionId }:
           {hasLiveEvidence && latestEvidence.length > 0 && (
             <details className="mt-4 rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-700 dark:bg-neutral-900">
               <summary className="cursor-pointer text-xs font-semibold text-blue-700 dark:text-blue-300">
-                View raw backend tool evidence from chat session ({latestEvidence.length})
+                Technical details & raw tool evidence ({latestEvidence.length})
               </summary>
               <div className="mt-3 space-y-3">
                 {latestEvidence.map((item, index) => (
