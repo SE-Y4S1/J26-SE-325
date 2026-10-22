@@ -192,9 +192,18 @@ KNOWN_PLACEHOLDERS = {
 def resolve_user_id(candidate: str | None) -> str:
     """
     Resolve user identifier to a valid numeric user ID string.
-    If the candidate is missing, a known placeholder ('your_user_id', 'USER001'),
-    or non-numeric, falls back to the configured default user ID.
+    Checks the caller's verified JWT identity if candidate is unspecified or placeholder.
     """
+    try:
+        from request_auth import get_caller_authorization, decode_caller_identity
+        caller_auth = get_caller_authorization()
+        if caller_auth:
+            uid, _ = decode_caller_identity(caller_auth, enforce_auth=False)
+            if uid and str(uid).isdigit() and int(uid) > 0:
+                return str(uid)
+    except Exception:
+        pass
+
     if not candidate:
         return DEFAULT_USER_ID
     clean = str(candidate).strip()
@@ -230,10 +239,19 @@ def load_mock_data():
 def get_auth_header(user_id: str = "1") -> dict:
     """
     Resolve bearer authorization token for platform service.
-    Supports direct token override (PORTFOLIO_AUTH_TOKEN) or dynamically minted token
-    using the shared repository JWT_SECRET matching the platform's exact validation requirements.
+    Forwards incoming caller token if available, supports direct token override (PORTFOLIO_AUTH_TOKEN),
+    or dynamically mints token using the shared repository JWT_SECRET matching the platform's exact validation requirements.
     Never hardcodes or prints secrets.
     """
+    # 0. Forward verified caller authorization if present in request context
+    try:
+        from request_auth import get_caller_authorization
+        caller_auth = get_caller_authorization()
+        if caller_auth and caller_auth.strip():
+            return {"Authorization": caller_auth.strip()}
+    except Exception:
+        pass
+
     # 1. Direct token override if explicitly provided
     direct_token = os.getenv("PORTFOLIO_AUTH_TOKEN")
     if direct_token and direct_token.strip():
