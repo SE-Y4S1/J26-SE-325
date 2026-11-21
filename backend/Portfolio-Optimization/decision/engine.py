@@ -81,6 +81,12 @@ def _base_cached() -> bool:
 
 
 def _load() -> tuple[LayaEngine | None, str]:
+    import os
+
+    # Off switch: plan with the fuzzy rules alone until a head is good enough to be trusted
+    # with the request's inputs. Unset or anything else means enabled.
+    if os.environ.get("LAYA_ENABLED", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None, "the decision model is not enabled for planning (LAYA_ENABLED=0)"
     if find_spec("laya") is None:
         return None, "laya is not installed (uv sync --extra decision)"
     import laya
