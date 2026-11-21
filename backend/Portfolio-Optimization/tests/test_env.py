@@ -57,7 +57,7 @@ HARD_REQUIREMENTS = {
 
 # Optional: recorded, never fatal. RQ1 adapts to whatever is available.
 OPTIONAL_FORECASTERS = {
-    "timesfm": "timesfm[torch]==2.0.2",
+    "timesfm": "timesfm[torch]>=3.0.2",
     "chronos": "chronos-forecasting",
 }
 

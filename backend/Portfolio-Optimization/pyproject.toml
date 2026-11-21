@@ -56,7 +56,7 @@ dependencies = [
 # Foundation forecasters are optional extras so a failure in one never blocks the pipeline.
 # Phase 0's dependency gate records which of these actually import; RQ1 reports on whichever
 # succeed. See forecasting/base.py.
-timesfm = ["timesfm[torch]==2.0.2"]
+timesfm = ["timesfm[torch]>=3.0.2"]
 chronos = ["chronos-forecasting>=1.5.0"]
 social = [
     "yt-dlp>=2025.1",

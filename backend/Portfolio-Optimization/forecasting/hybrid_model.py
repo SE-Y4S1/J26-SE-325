@@ -60,6 +60,38 @@ class HybridConfig:
     base_batch_size: int = 32
 
 
+class BaseMismatchError(RuntimeError):
+    """A residual head was loaded over a different base model generation than it was trained on."""
+
+
+def check_base_compatibility(meta: dict, base) -> None:  # noqa: ANN001
+    """Raise unless `base` is the generation the head in `meta` was trained on.
+
+    Only generation-aware bases (TimesFM) are checked. A head built before TimesFM 3.0 recorded
+    no generation; those were all trained on 2.5, so a 3.0 base is refused for them too.
+    """
+    actual = getattr(base, "generation", None)
+    if actual is None:
+        return
+    trained = meta.get("base_generation")
+    if trained is None:
+        if meta.get("base_model") != "timesfm":
+            return
+        if str(actual) == "2.5":
+            return
+        raise BaseMismatchError(
+            f"this head was trained before TimesFM 3.0 was supported, so on a 2.5 base; the base is {actual}. "
+            "A head learns the residuals of one specific base, so serving it over another gives wrong "
+            "forecasts. Load the 2.5 base (TIMESFM_GENERATION=2.5) or retrain the head."
+        )
+    if str(trained) != str(actual):
+        raise BaseMismatchError(
+            f"this head was trained on a TimesFM {trained} base but the base is {actual}. A head learns the "
+            f"residuals of one specific base, so serving it over another gives wrong forecasts. Load the "
+            f"{trained} base (TIMESFM_GENERATION={trained}) or retrain the head."
+        )
+
+
 class HybridForecaster:
     """Frozen/LoRA foundation model + trained residual head, as one Forecaster."""
 
@@ -455,6 +487,10 @@ class HybridForecaster:
         torch.save(self.head.state_dict(), path / "head.pt")
         meta = {
             "base_model": self.base.name,
+            # The head learns the residuals of ONE specific base. Recording which generation
+            # (e.g. TimesFM 2.5 vs 3.0) lets serving build the matching base and refuse a
+            # mismatch instead of returning quietly wrong forecasts.
+            **({"base_generation": self.base.generation} if getattr(self.base, "generation", None) else {}),
             "horizon": self.horizon,
             "window": self.config.window,
             "quantiles": list(self.config.quantiles),
@@ -473,6 +509,7 @@ class HybridForecaster:
 
         path = Path(directory)
         meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
+        check_base_compatibility(meta, base)
         head_config = ResidualHeadConfig(**{**meta["head_config"], "quantiles": tuple(meta["quantiles"])})
         config = HybridConfig(base_model=meta["base_model"], head=head_config,
                               quantiles=tuple(meta["quantiles"]), window=int(meta["window"]), log_to_mlflow=False)

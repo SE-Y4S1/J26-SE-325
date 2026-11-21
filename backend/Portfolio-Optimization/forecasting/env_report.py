@@ -24,7 +24,9 @@ ENV_REPORT_PATH = ARTIFACTS / "env_report.json"
 
 # module name -> the pip distribution that provides it.
 OPTIONAL_FORECASTERS = {
-    "timesfm": "timesfm[torch]==2.0.2",
+    # PyPI timesfm 3.0.x provides BOTH modules: `timesfm` (the 2.5 model) and `timesfm3`.
+    "timesfm": "timesfm[torch]>=3.0.2",
+    "timesfm3": "timesfm[torch]>=3.0.2",
     "chronos": "chronos-forecasting",
 }
 
@@ -42,15 +44,26 @@ def probe_forecasters() -> dict[str, dict[str, object]]:
         try:
             mod = importlib.import_module(module)
             entry["available"] = True
-            entry["version"] = getattr(mod, "__version__", "unknown")
+            entry["version"] = getattr(mod, "__version__", None) or _distribution_version(module)
             if module == "timesfm":
-                # PyPI tops out at 2.0.2; "2.5" is the MODEL generation, exposed as this class.
+                # "2.5" is the MODEL generation, exposed as this class.
                 entry["has_timesfm_2p5_torch"] = hasattr(mod, "TimesFM_2p5_200M_torch")
         except Exception as exc:  # noqa: BLE001 - any failure means "unavailable"
             entry["available"] = False
             entry["error"] = f"{type(exc).__name__}: {exc}"
         results[module] = entry
     return results
+
+
+def _distribution_version(module: str) -> str:
+    """Installed distribution version for a module that carries no __version__ of its own
+    (`timesfm` and `timesfm3` both ship in the `timesfm` distribution)."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version({"timesfm3": "timesfm", "chronos": "chronos-forecasting"}.get(module, module))
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def _version_of(module: str) -> str:

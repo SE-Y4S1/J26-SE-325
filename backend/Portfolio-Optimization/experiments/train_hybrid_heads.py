@@ -57,7 +57,31 @@ def _binance_top(limit: int) -> list[str]:
     return [r["symbol"] for r in usdt[:limit]]
 
 
-def collect_bars(out: Path, *, cse_limit: int | None = None) -> pd.DataFrame:
+def _cse_bars(security: dict, history_dir: Path | None) -> pd.DataFrame:
+    """One CSE security's bars: the endpoint's one-year window merged into the accumulated store.
+
+    The endpoint never returns more than about a year, so training sees more than that only
+    through the store built by `python -m data.cse_history`. If the endpoint is down the stored
+    history is served; without a store the error stands.
+    """
+    from data.cse_history import load_accumulated, merge_history
+    from data.exchanges import cse
+
+    fresh, error = pd.DataFrame(), None
+    try:
+        fresh = cse.daily_bars(security["symbol"], security["provider_id"])
+    except Exception as exc:  # noqa: BLE001
+        error = exc
+
+    stored = load_accumulated(history_dir, security["symbol"])
+    if stored is None:
+        if error is not None:
+            raise error
+        return fresh
+    return merge_history(stored, fresh)
+
+
+def collect_bars(out: Path, *, cse_limit: int | None = None, cse_history: Path | None = None) -> pd.DataFrame:
     path = out / "bars.parquet"
     if path.exists():
         return pd.read_parquet(path)
@@ -74,7 +98,7 @@ def collect_bars(out: Path, *, cse_limit: int | None = None) -> pd.DataFrame:
     securities = [s for s in cse.list_securities() if ".N" in s["symbol"] or ".X" in s["symbol"]]
     for security in securities[:cse_limit] if cse_limit else securities:
         try:
-            bars = cse.daily_bars(security["symbol"], security["provider_id"])
+            bars = _cse_bars(security, cse_history)
         except Exception as exc:  # noqa: BLE001
             logger.info("CSE %s skipped: %s", security["symbol"], exc)
             continue
@@ -131,7 +155,8 @@ def _pinball(actual: np.ndarray, preds: np.ndarray, quantiles: tuple[float, ...]
     return float(np.mean(losses))
 
 
-def train_head(features: pd.DataFrame, horizon: int, out: Path, *, walk_forward_points: int, epochs: int) -> dict:
+def train_head(features: pd.DataFrame, horizon: int, out: Path, *, walk_forward_points: int, epochs: int,
+               generation: str | None = None) -> dict:
     target = out / f"h{horizon}"
     if (target / "head.pt").exists():
         logger.info("h=%d already trained; skipping", horizon)
@@ -145,7 +170,7 @@ def train_head(features: pd.DataFrame, horizon: int, out: Path, *, walk_forward_
     cutoff = pd.Timestamp(dates[int(len(dates) * (1 - HOLDOUT_FRACTION))])
     train = features[features["timestamp"] < cutoff]
 
-    model = HybridForecaster(get_forecaster("timesfm"), HybridConfig(
+    model = HybridForecaster(get_forecaster("timesfm", **({"generation": generation} if generation else {})), HybridConfig(
         head=ResidualHeadConfig(epochs=epochs), walk_forward_points=walk_forward_points, log_to_mlflow=False))
     model.fit(train, horizon=horizon)
 
@@ -213,16 +238,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backfill", type=Path, default=None, help="fundamentals_backfill.parquet from Part D")
     parser.add_argument("--horizons", type=int, nargs="+", default=list(HORIZONS))
     parser.add_argument("--cse-limit", type=int, default=None, help="smoke runs only")
+    parser.add_argument("--cse-history", type=Path, default=None,
+                        help="directory built by `python -m data.cse_history`: CSE history beyond the "
+                             "endpoint's one-year window")
     parser.add_argument("--walk-forward-points", type=int, default=120)
     parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--timesfm-generation", choices=["auto", "3.0", "2.5"], default="auto",
+                        help="TimesFM base: auto = 3.0 when installed (non-commercial weights), else 2.5")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    bars = collect_bars(args.out, cse_limit=args.cse_limit)
+    bars = collect_bars(args.out, cse_limit=args.cse_limit, cse_history=args.cse_history)
     for horizon in args.horizons:
         features = build_features(bars, horizon, args.out, args.backfill)
-        train_head(features, horizon, args.out, walk_forward_points=args.walk_forward_points, epochs=args.epochs)
+        train_head(features, horizon, args.out, walk_forward_points=args.walk_forward_points, epochs=args.epochs,
+                   generation=args.timesfm_generation)
     print("export:", export(args.out))
     return 0
 

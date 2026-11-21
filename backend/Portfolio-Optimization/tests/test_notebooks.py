@@ -136,3 +136,48 @@ def test_finetune_records_library_versions_with_the_adapters() -> None:
     code = _code("colab_finetune.ipynb")
     assert "library_versions" in code
     assert "'versions'" in code, "adapters_meta.json must carry the library versions the run used"
+
+
+# --------------------------------------------------------------------------------------
+# TimesFM 3.0 and CSE data
+# --------------------------------------------------------------------------------------
+
+TIMESFM_NOTEBOOKS = ["colab_finetune.ipynb", "colab_hybrid_heads.ipynb", "colab_pp1.ipynb"]
+HEAD_TRAINING_NOTEBOOKS = ["colab_hybrid_heads.ipynb", "colab_pp1.ipynb"]
+
+
+@pytest.mark.parametrize("name", NOTEBOOKS)
+def test_no_notebook_installs_the_superseded_timesfm_package(name: str) -> None:
+    assert "timesfm[torch]==2.0.2" not in _code(name)
+
+
+@pytest.mark.parametrize("name", TIMESFM_NOTEBOOKS)
+def test_timesfm_notebooks_install_the_release_that_ships_3_0(name: str) -> None:
+    assert "timesfm[torch]==3.0.2" in _code(name)
+
+
+@pytest.mark.parametrize("name", HEAD_TRAINING_NOTEBOOKS)
+def test_head_training_notebooks_choose_the_timesfm_generation_and_feed_cse_history(name: str) -> None:
+    code = _code(name)
+    assert '"--timesfm-generation"' in code
+    assert '"--cse-history"' in code
+    assert "TIMESFM_GENERATION" in code, "the generation is a named, visible choice"
+    assert "non-commercial" in (code + _markdown(name)).lower(), "the 3.0 licence must be stated"
+
+
+@pytest.mark.parametrize("name", HEAD_TRAINING_NOTEBOOKS)
+def test_head_training_notebooks_report_through_the_shared_holdout_table(name: str) -> None:
+    assert "holdout_table" in _code(name)
+
+
+def test_laya_notebook_reads_the_accumulated_cse_history() -> None:
+    code = _code("colab_laya_decision.ipynb")
+    assert "cse_history=" in code and "j26_cse_history" in code
+
+
+def test_finetune_scores_both_timesfm_generations_like_for_like() -> None:
+    code = _code("colab_finetune.ipynb")
+    assert "'timesfm3'" in code, "the latest generation needs its own zero-shot row"
+    assert "'hybrid_2p5'" in code, "hybrid_lora is on 2.5, so it needs a 2.5 hybrid to be compared with"
+    # `timesfm` and `timesfm_lora` must share a generation, or they no longer isolate fine-tuning.
+    assert "'timesfm': ('timesfm', {'generation': '2.5'})" in code

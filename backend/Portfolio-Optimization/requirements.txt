@@ -169,7 +169,7 @@ starlette==1.6.0
 statsmodels==0.14.6
 sympy==1.14.0
 threadpoolctl==3.6.0
-timesfm==2.0.2
+timesfm==3.0.2
 tokenizers==0.22.2
 torch==2.13.0+cpu
 tornado==6.5.8

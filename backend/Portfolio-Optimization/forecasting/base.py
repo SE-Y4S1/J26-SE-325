@@ -178,8 +178,30 @@ def usable_foundation_models() -> dict[str, bool]:
     available = available_foundation_models()
     return {
         name: bool(available.get(name)) and weights_cached(repo_id)
-        for name, repo_id in FOUNDATION_REPO_IDS.items()
+        for name, repo_id in _foundation_repo_ids().items()
     }
+
+
+def _foundation_repo_ids() -> dict[str, str]:
+    """FOUNDATION_REPO_IDS, with TimesFM's repo following the generation that will load.
+
+    A cached 2.5 checkpoint does not make a 3.0 load free (and the reverse), so "usable" must
+    ask about the generation get_forecaster("timesfm") would actually build.
+    """
+    import os
+
+    from forecasting import timesfm_adapter
+
+    repo_ids = dict(FOUNDATION_REPO_IDS)
+    try:
+        has_v3, has_v25 = timesfm_adapter._installed_generations()  # noqa: SLF001
+        generation = timesfm_adapter.resolve_generation(
+            None, has_v3=has_v3, has_v25=has_v25, env=os.environ.get(timesfm_adapter.ENV_VAR)
+        )
+        repo_ids["timesfm"] = timesfm_adapter.REPO_IDS[generation]
+    except (RuntimeError, ValueError):
+        pass          # not installed / bad setting: "available" is already False, keep the default
+    return repo_ids
 
 
 def registered_forecasters(*, require_weights: bool = False) -> list[str]:
@@ -272,7 +294,11 @@ def get_forecaster(name: str, **kwargs: object) -> Forecaster:
         # A LoRA adapter belongs to the BASE model. Without forwarding it the hybrid was
         # always built on the zero-shot base, so "hybrid on a tuned base" could not be run.
         adapter_path = kwargs.pop("adapter_path", None)
-        base_kwargs = {"adapter_path": adapter_path} if adapter_path else {}
+        generation = kwargs.pop("generation", None)
+        base_kwargs = {
+            **({"adapter_path": adapter_path} if adapter_path else {}),
+            **({"generation": generation} if generation else {}),
+        }
         from forecasting.hybrid_model import HybridForecaster
 
         return HybridForecaster(get_forecaster(base_name, **base_kwargs), **kwargs)  # type: ignore[arg-type]

@@ -647,7 +647,10 @@ def finetune(
     output_dir = Path(output_dir or (CHECKPOINT_ROOT / f"{base_model_name}-lora-h{horizon}"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    forecaster = get_forecaster(base_model_name)
+    # LoRA is implemented and verified for TimesFM 2.5 only: _timesfm_step mirrors the 2.5
+    # prefill line for line, and a train/serve mismatch would go unnoticed. 3.0 is a different,
+    # larger architecture; it is used zero-shot and in the hybrid, not fine-tuned here.
+    forecaster = get_forecaster(base_model_name, **({"generation": "2.5"} if base_model_name == "timesfm" else {}))
     forecaster._load()                       # noqa: SLF001 - adapters expose loading here
     inner = _resolve_inner_model(forecaster)
 

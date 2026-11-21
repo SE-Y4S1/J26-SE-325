@@ -81,7 +81,7 @@ def _ordered(records: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
 def process_cse_report(ref, *, company_name: str) -> dict[str, Any]:  # noqa: ANN001 - ReportRef
     """Download + extract + flags + tone for one CSE report. Never raises on a bad PDF:
     the record carries the reason and `usable: false`."""
-    from fundamentals.extract import extract_statements, is_scanned, pdf_pages
+    from fundamentals.extract import EXTRACTOR_VERSION, extract_statements, is_scanned, pdf_pages
     from fundamentals.redflags import commentary, flags, outlook_tone
     from fundamentals.reports import download_report
 
@@ -90,6 +90,7 @@ def process_cse_report(ref, *, company_name: str) -> dict[str, Any]:  # noqa: AN
         "available_from": ref.uploaded_at.isoformat(),
         "period_end": ref.period_end.isoformat() if ref.period_end else None,
         "source": "cse_pdf", "processed_at": datetime.now(timezone.utc).isoformat(),
+        "extractor_version": EXTRACTOR_VERSION,
     }
     pages = pdf_pages(download_report(ref))
     if is_scanned(pages):

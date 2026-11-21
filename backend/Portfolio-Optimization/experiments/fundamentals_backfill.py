@@ -33,6 +33,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from fundamentals.extract import EXTRACTOR_VERSION
+
 logger = logging.getLogger(__name__)
 
 SEC_TICKERS = "https://www.sec.gov/files/company_tickers.json"
@@ -78,6 +80,11 @@ _PER_SHARE_UNITS = ("USD/shares",)
 # Checkpoint
 # --------------------------------------------------------------------------------------
 
+def _row_version(row: dict[str, Any]) -> int:
+    """The extractor version that wrote a checkpoint row; rows from before versioning are 1."""
+    return int(row.get("extractor_version") or (row.get("record") or {}).get("extractor_version") or 1)
+
+
 class Checkpoint:
     def __init__(self, out: Path) -> None:
         out.mkdir(parents=True, exist_ok=True)
@@ -86,25 +93,33 @@ class Checkpoint:
         if self.path.exists():
             for line in self.path.read_text(encoding="utf-8").splitlines():
                 try:
-                    self.done.add(json.loads(line)["key"])
+                    row = json.loads(line)
+                    key = row["key"]
                 except (json.JSONDecodeError, KeyError):
                     continue  # a torn final line from a disconnect
+                # A CSE report extracted (or failed) under an OLDER extractor is not done: the
+                # extractor has improved since, and skipping it would keep the old output forever.
+                # US filings come from EDGAR's structured data, not the PDF extractor.
+                if key.startswith("cse:") and _row_version(row) < EXTRACTOR_VERSION:
+                    continue
+                self.done.add(key)
 
     def add(self, key: str, row: dict[str, Any]) -> None:
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"key": key, **row}, default=str) + "\n")
+            handle.write(json.dumps({"key": key, **row, "extractor_version": EXTRACTOR_VERSION}, default=str) + "\n")
         self.done.add(key)
 
     def rows(self) -> list[dict[str, Any]]:
-        out = []
+        """One row per report: a redone report appends a second row, and the newest wins."""
+        newest: dict[str, dict[str, Any]] = {}
         for line in self.path.read_text(encoding="utf-8").splitlines():
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
             if row.get("record"):
-                out.append(row)
-        return out
+                newest[row["key"]] = row
+        return list(newest.values())
 
 
 # --------------------------------------------------------------------------------------

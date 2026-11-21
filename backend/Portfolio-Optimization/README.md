@@ -153,13 +153,14 @@ above fails fast and was what actually worked on the development machine.
 Optional foundation models (either or both; ~821MB of weights each, downloaded on first use):
 
 ```bash
-uv pip install "timesfm[torch]==2.0.2"      # note: 2.0.2, NOT 2.5 — see deviations table
+uv pip install "timesfm[torch]==3.0.2"      # ships BOTH the 3.0 and 2.5 models — see "TimesFM 3.0" below
 uv pip install chronos-forecasting
 
 # Weights are NOT fetched automatically. Only run these if you need RQ1's foundation-model
 # comparison; each is ~821MB. See "Model policy" below.
 huggingface-cli download amazon/chronos-bolt-base
-huggingface-cli download google/timesfm-2.5-200m-pytorch
+huggingface-cli download google/timesfm-3.0-pytorch          # TimesFM 3.0, ~1.3 GB, non-commercial licence
+huggingface-cli download google/timesfm-2.5-200m-pytorch     # TimesFM 2.5, ~821 MB, Apache-2.0
 ```
 
 Without those weights the pipeline still runs end to end: `baseline_lstm` covers forecasting
@@ -202,7 +203,7 @@ failure if followed as written.
 | Brief said | Reality | What we do |
 |---|---|---|
 | Python 3.10, "required for timesfm" | timesfm is `>=3.10`; `pandas-ta` and `jax` are `>=3.12` | **Python 3.12** — the only version satisfying the whole stack |
-| `timesfm` v2.5 | PyPI tops out at **2.0.2**; "2.5" is the *model* generation | Pin `timesfm==2.0.2`, use `TimesFM_2p5_200M_torch` |
+| `timesfm` v2.5 (as of Aug 2026) | PyPI `timesfm` 3.0.x provides **both** the 2.5 model (`timesfm`) and the new 3.0 model (`timesfm3`); there is no package `2.5` | Pin `timesfm[torch]==3.0.2`; 3.0 is the default, 2.5 stays selectable (`TIMESFM_GENERATION=2.5`) |
 | Use TimesFM XReg for covariates | `timesfm[xreg]` → `jax[cuda]` → `jax-cuda12-plugin`, which is **manylinux-only** | Covariates go through the residual head — architecturally cleaner anyway |
 | `pandas-ta` | 0.3.14b0 was pulled from PyPI; current release hard-pins `numba==0.61.2` | `pandas-ta-openbb` (same import name, no numba pin) |
 | Alpha Vantage for forex | — | yfinance FX tickers: deeper history, no key, same code path as equities |
@@ -467,6 +468,90 @@ contributing factors, one fixed and one open:
    most-liquid-first. **This is a research decision, not a bug fix** — deliberately left for
    supervisor discussion rather than tuned until the proposed method wins.
 
+## TimesFM 3.0 (the default) and 2.5
+
+TimesFM 3.0 was released in August 2026 (PyPI `timesfm` 3.0.2, checkpoint `google/timesfm-3.0-pytorch`,
+330M parameters, 9 quantiles, native multivariate and covariate support). `forecasting/timesfm_adapter.py`
+serves both generations behind the one `timesfm` forecaster:
+
+| Setting | Effect |
+|---|---|
+| `TimesFMForecaster(generation="3.0" \| "2.5" \| "auto")` | an explicit choice wins |
+| `TIMESFM_GENERATION=3.0 \| 2.5 \| auto` | otherwise the environment decides |
+| default `auto` | 3.0 when `timesfm3` is installed, else 2.5 |
+
+**Licence — decide before deploying.** The 3.0 weights are under the `timesfm-non-commercial-license-v1.0`:
+non-commercial, **non-production** use only. Commercial or production use of self-hosted weights is not
+permitted; Google offers 3.0 for commercial use through BigQuery ML. The code is Apache-2.0 and the 2.5
+weights remain Apache-2.0. Research, the dissertation and Colab runs are fine on 3.0; a deployed Nexa
+service that loads the weights itself should set `TIMESFM_GENERATION=2.5`. The adapter logs this once on
+first 3.0 load, and each head's `meta.json` records the generation it was trained on.
+
+**What was verified, and what was not.** The adapter's calls match the real `timesfm3` 3.0.2 signatures,
+and a tiny random-weight `TimesFM3Forecaster` built from the package's own classes runs through the
+adapter at horizons 5, 21 and 70 (the last forces the package's output-patch stitching) and gives the same
+forecast for a series alone or in a batch (`tests/test_timesfm3.py`). The 1.3 GB real weights were **not**
+run locally (about 90 minutes on this link, and the disk was at 95%): the first real-weight run is the
+Colab notebook, so treat 3.0 forecasts as unverified until it has run.
+
+**Heads must meet their base.** A residual head learns the residuals of ONE specific base, so serving it
+over another gives quietly wrong forecasts. Heads record `base_generation`; `serving.base_kwargs_for`
+rebuilds the matching base (a head exported before 3.0, with no record, was trained on 2.5 and is served
+over 2.5), and `HybridForecaster.load` raises `BaseMismatchError` on a mismatch. This is why the existing
+`hybrid_h5` head keeps working after the upgrade.
+
+**LoRA stays on 2.5.** `finetune_lora._timesfm_step` mirrors the 2.5 prefill line for line, and a
+train/serve mismatch there would go unnoticed, so LoRA is implemented and verified for 2.5 only: an adapter
+implies 2.5 and asking for it on 3.0 is an error. 3.0 is used zero-shot and in the hybrid. RQ1 therefore
+scores `timesfm` and `timesfm_lora` on 2.5 (so the pair isolates fine-tuning), `timesfm3` on 3.0, and the
+hybrid over each (`hybrid`, `hybrid_2p5`).
+
+## CSE market data
+
+**Source.** The Colombo Stock Exchange publishes no official API. The cse.lk front end is a thin client over
+undocumented JSON endpoints at `https://www.cse.lk/api/` (unauthenticated form POSTs; `data/exchanges/cse.py`
+normalises them in one place): `tradeSummary` (the 282-security catalogue), `companyChartDataByStock`
+(daily bars), `chartData` (the ASPI index). Report PDFs come from `cdn.cse.lk`. Yahoo Finance carries no CSE
+tickers (seven variants probed, none found). Other vendors exist but are paid or licensed; none is wired in.
+
+**One year, at most.** Probed live on 2026-11-21: of `period` 1-10 only 5 returns daily bars, and it returns
+~243 sessions (2025-11-23 to 2026-11-19); 6-10 collapse to 5 points. There is no way to ask for longer.
+Bars carry no opening price, and only sessions with trades appear.
+
+**Accumulating more.** Because the endpoint forgets, history beyond a year exists only if each fetch is kept.
+`data/cse_history.py` fetches every listed equity and merges it into one parquet per security:
+
+```bash
+uv run python -m data.cse_history                   # artifacts/cse_history/, one request per security
+uv run python -m data.cse_history --limit 20        # smoke run
+```
+
+Each fetch overlaps the stored history, so any cadence shorter than a year works; **daily is the safe
+default**, and a session is lost only if a whole one-year window is missed. Scheduling it is a machine
+change, so it is not set up for you; on Windows:
+`schtasks /Create /SC DAILY /ST 18:30 /TN "CSE history" /TR "cmd /c cd /d <repo>\backend\Portfolio-Optimization && uv run python -m data.cse_history"`.
+The trainers use it through `--cse-history <dir>` (`train_hybrid_heads._cse_bars` merges the store into each
+fetch and falls back to it when the endpoint is down); on Colab, zip the folder to Drive as `j26_cse_history/`
+and the notebooks pick it up. Today it only starts a store: nothing earlier than the current window exists.
+
+**What CSE training looks like today.** `colab_hybrid_heads` (full) trains CSE as its own `cse_equity` class
+over every security with >= 200 sessions; `colab_laya_decision` takes 20 / 60 / all names for
+smoke / pp1 / full; `colab_pp1` takes 60. `colab_finetune` has **no CSE**: its LoRA and 3-year walk-forward
+windows need more history than exists. CSE results are one year long with a holdout of a few dozen sessions
+per name, and `evaluation/rq1_table.holdout_table` says so on the row.
+
+**CSE fundamentals.** Of 7,602 CSE report records in the local backfill, 66% were unusable. The balance-sheet
+identity passed 4,659 times and failed 27, so the extractor is accurate when it finds figures; it was not
+finding enough: "no income statement page found" on ~3,500 records and "reporting period not detected" on
+~4,700. Fixed in `fundamentals/extract.py`: the income heading now also matches the combined "Statement of
+Profit or Loss and Other Comprehensive Income", "Statement of Comprehensive Income", "Profit and Loss
+Account" and "Statement of Income"; period detection reads "3 months ended", "three months period ended",
+"half year ended" and "quarter ending"; unit detection reads LKR and spelled-out "in thousands" (a missed
+unit is silent, because the identities are scale-invariant). **The gain is not measured**: it is verified on
+synthetic pages and the real JKH and COMB fixtures still pass, but the true effect on the usable rate needs
+Part D re-run against the PDFs. Part D is resumable, which would have skipped every report already done; so
+records are now stamped `extractor_version` (2) and a report extracted by an older extractor is redone.
+
 ## Notebooks
 
 | Notebook | Runs where | Purpose |
@@ -593,8 +678,8 @@ proposal-named method and is preferred whenever its weights are present.
 
 ## Known risks
 
-- **The registered `hybrid_h5` head is a small run.** It was trained on the 26-symbol US
-  universe only (holdout classes equity and ETF, 220 rows), not the CSE + Binance + US coverage
+- **The registered `hybrid_h5` head is a small run.** It was trained on a 26-symbol set (16 US equities,
+  6 ETFs, 4 FX pairs; holdout classes equity and ETF, 220 rows) over a TimesFM 2.5 base, not the CSE + Binance + US coverage
   `colab_hybrid_heads.ipynb` describes, and no `hybrid_h21` exists. Its pinball improvement over
   the base (0.0094 vs 0.0112) rests on that one small holdout. Only a notebook run on Colab fixes
   this; nothing edited locally can. Until then, treat `/forecast` outputs as preliminary.
@@ -679,7 +764,7 @@ proposal-named method and is preferred whenever its weights are present.
 
 ## Status
 
-All eight phases are complete. **719 tests passing, 5 skipped** (full suite, 2026-11-21),
+All eight phases are complete. **827 tests passing, 5 skipped** (full suite, 2026-11-21),
 zero unimplemented functions.
 
 | Phase | Scope | State |
@@ -842,7 +927,7 @@ per asset class) travel in each head's `meta.json` into the model registry.
 
 ```bash
 python -m forecasting.serving --install hybrid_heads.zip      # registers hybrid_h5 / hybrid_h21
-huggingface-cli download google/timesfm-2.5-200m-pytorch      # once, ~821 MB
+huggingface-cli download google/timesfm-3.0-pytorch           # once, ~1.3 GB (a head trained on 2.5 needs timesfm-2.5-200m-pytorch, ~821 MB)
 ```
 
 `/forecast` then serves the model and stamps its real `model_version`. Without a head or

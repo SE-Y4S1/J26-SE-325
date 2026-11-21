@@ -30,11 +30,24 @@ from typing import Any
 
 MIN_CONFIDENCE = 0.5
 
+# Bump when extraction output can change for the same PDF. Records are stamped with it, and the
+# resumable backfill redoes any report extracted by an older version instead of skipping it.
+#   1  the original extractor (no stamp)
+#   2  combined / comprehensive-income headings, wider period phrasing, LKR and spelled-out units
+EXTRACTOR_VERSION = 2
+
 GENERAL, BANK, FINANCE, INSURANCE = "general", "bank", "finance", "insurance"
 
 # Statement headings. Searched over the whole page: COMB prints its headings at the foot.
 _HEADINGS = {
-    "income": re.compile(r"INCOME STATEMENT|STATEMENT OF PROFIT OR LOSS(?! AND OTHER COMPREHENSIVE)", re.I),
+    # Sri Lankan interims title the income statement many ways. A COMBINED statement ("Statement of
+    # Profit or Loss and Other Comprehensive Income") and "Statement of Comprehensive Income" were
+    # not recognised, which left ~3,500 of 7,602 CSE records without an income statement. An OCI-only
+    # page now matches too, but _best() keeps the page with the most parsed fields, so it cannot
+    # displace the real statement.
+    "income": re.compile(
+        r"INCOME STATEMENT|STATEMENT OF (?:PROFIT OR LOSS|PROFIT AND LOSS|COMPREHENSIVE INCOME|INCOME)\b"
+        r"|PROFIT AND LOSS ACCOUNT", re.I),
     "balance": re.compile(r"STATEMENT OF FINANCIAL POSITION|BALANCE SHEET", re.I),
     "cashflow": re.compile(r"STATEMENT OF CASH FLOWS?|CASH FLOW STATEMENT", re.I),
 }
@@ -141,7 +154,7 @@ class Statement:
             "template": self.template, "period_months": self.period_months, "unit": self.unit,
             "current": self.current, "comparative": self.comparative, "pages": self.pages,
             "checks": self.checks, "confidence": round(self.confidence, 3), "usable": self.usable,
-            "notes": self.notes,
+            "notes": self.notes, "extractor_version": EXTRACTOR_VERSION,
         }
 
 
@@ -184,22 +197,54 @@ def _clean_label(label: str) -> str:
 
 
 def detect_unit(text: str) -> float:
+    """The multiplier a statement's figures are printed in (1, thousands, millions, billions).
+
+    A missed unit is SILENT: the accounting identities are scale-invariant, so figures a thousand
+    times too small pass every check and then corrupt each ratio that mixes them with a price.
+    Hence the breadth: Rs / LKR, apostrophe or not, and spelled-out "in thousands".
+    """
     lowered = text.lower()
-    if re.search(r"rs\.?\s*'?\s*000|'000s?|rs\.?\s*thousands?", lowered):
+    if re.search(
+        r"\b(?:rs|lkr)\.?\s*'?\s*000|'000s?|\b(?:rs|lkr)\.?\s*(?:in\s+)?thousands?"
+        r"|\bin\s+(?:(?:rs|lkr)\.?\s*)?thousands?",
+        lowered,
+    ):
         return 1_000.0
-    if re.search(r"rs\.?\s*(mn|million)", lowered):
+    if re.search(
+        r"\b(?:rs|lkr)\.?\s*(?:in\s+)?(?:mn|million)|\bin\s+(?:(?:rs|lkr)\.?\s*)?(?:mn|million)",
+        lowered,
+    ):
         return 1_000_000.0
-    if re.search(r"rs\.?\s*(bn|billion)", lowered):
+    if re.search(r"\b(?:rs|lkr)\.?\s*(?:in\s+)?(?:bn|billion)", lowered):
         return 1_000_000_000.0
     return 1.0
 
 
+_PERIOD = re.compile(
+    r"\b(?:(?P<n>three|six|nine|twelve|3|6|9|12)[\s-]*months?(?:\s+period)?"
+    r"|(?P<q>quarter)|(?P<h>half[\s-]*year(?:ly)?)|(?P<y>(?:financial\s+)?year))\s+(?:ended|ending)",
+    re.I,
+)
+_PERIOD_WORDS = {"three": 3, "3": 3, "six": 6, "6": 6, "nine": 9, "9": 9, "twelve": 12, "12": 12}
+
+
 def detect_period_months(text: str) -> int | None:
-    match = re.search(r"(quarter|three months|six months|nine months|twelve months|year) ended", text, re.I)
+    """Months covered by the first period the text states ("three months ended", "3 months period
+    ended", "quarter ending", "half year ended", "year ended"), or None.
+
+    The FIRST statement wins: a quarterly report prints its own period before a year-end comparative.
+    A bare "period ended" says nothing about length, so it is not guessed at.
+    """
+    match = _PERIOD.search(text)
     if not match:
         return None
-    return {"quarter": 3, "three months": 3, "six months": 6, "nine months": 9,
-            "twelve months": 12, "year": 12}[match.group(1).lower()]
+    if match.group("n"):
+        return _PERIOD_WORDS[match.group("n").lower()]
+    if match.group("q"):
+        return 3
+    if match.group("h"):
+        return 6
+    return 12
 
 
 def detect_template(text: str, company_name: str = "") -> str:

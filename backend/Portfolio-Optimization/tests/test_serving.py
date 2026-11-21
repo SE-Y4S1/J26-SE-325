@@ -182,15 +182,30 @@ def test_service_without_head_serves_labelled_empirical(registry) -> None:
 
 def test_service_without_base_weights_says_so(registry, features, monkeypatch) -> None:
     serving.install(make_zip(registry, features))
-    monkeypatch.setattr("forecasting.base.usable_foundation_models", lambda: {"timesfm": False, "chronos": False})
+    monkeypatch.setattr("forecasting.base.available_foundation_models", lambda: {"timesfm": True, "chronos": True})
+    monkeypatch.setattr("forecasting.base.weights_cached", lambda repo: False)
     result = serving.get_service().forecast("JKH.N0000", bars(), 5)
     assert result["method"] == "empirical"
     assert "weights" in result["reason"]
 
 
+def test_a_head_is_gated_on_the_weights_of_the_generation_it_was_trained_on(registry, features, monkeypatch) -> None:
+    """The stub head carries no recorded generation, so it is a pre-3.0 head: trained on 2.5. Having
+    the 3.0 weights cached must not let it through (it would load 2.5 and start a download), and the
+    reason must name the repo it actually needs."""
+    serving.install(make_zip(registry, features))
+    monkeypatch.setattr("forecasting.base.available_foundation_models", lambda: {"timesfm": True, "chronos": True})
+    monkeypatch.setattr("forecasting.base.weights_cached", lambda repo: repo == "google/timesfm-3.0-pytorch")
+    result = serving.get_service().forecast("JKH.N0000", bars(), 5)
+
+    assert result["method"] == "empirical"
+    assert "google/timesfm-2.5-200m-pytorch" in result["reason"]
+
+
 def test_service_serves_hybrid_when_runnable(registry, features, monkeypatch) -> None:
     serving.install(make_zip(registry, features))
-    monkeypatch.setattr("forecasting.base.usable_foundation_models", lambda: {"timesfm": True, "chronos": False})
+    monkeypatch.setattr("forecasting.base.available_foundation_models", lambda: {"timesfm": True, "chronos": True})
+    monkeypatch.setattr("forecasting.base.weights_cached", lambda repo: True)
     monkeypatch.setattr("forecasting.base.get_forecaster", lambda name, **kw: StubBase())
     result = serving.get_service().forecast("JKH.N0000", bars(), 21)
     assert result["method"] == "hybrid"
@@ -227,7 +242,8 @@ def test_forecast_endpoint_serves_hybrid(registry, features, monkeypatch) -> Non
     from service.api import app
 
     serving.install(make_zip(registry, features))
-    monkeypatch.setattr("forecasting.base.usable_foundation_models", lambda: {"timesfm": True, "chronos": False})
+    monkeypatch.setattr("forecasting.base.available_foundation_models", lambda: {"timesfm": True, "chronos": True})
+    monkeypatch.setattr("forecasting.base.weights_cached", lambda repo: True)
     monkeypatch.setattr("forecasting.base.get_forecaster", lambda name, **kw: StubBase())
     monkeypatch.setattr(deps, "_model_cache", {})
     monkeypatch.setattr(active_set, "touch", lambda symbols: None)

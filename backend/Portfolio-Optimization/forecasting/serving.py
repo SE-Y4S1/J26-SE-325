@@ -138,6 +138,27 @@ def empirical_quantiles(close: pd.Series, horizon: int,
     return [float(v) for v in np.quantile(returns.to_numpy(), quantiles)]
 
 
+
+def base_kwargs_for(meta: dict) -> dict:
+    """Constructor arguments that rebuild the base a head was trained on.
+
+    A TimesFM head learns that generation's residuals, so it must be served over the same one.
+    Heads exported before TimesFM 3.0 recorded no generation; they were all trained on 2.5.
+    """
+    if meta.get("base_model") != "timesfm":
+        return {}
+    return {"generation": str(meta.get("base_generation") or "2.5")}
+
+
+def _weights_repo(base_name: str, base_kwargs: dict) -> str:
+    """The Hugging Face repo holding the weights the base needs."""
+    if base_name == "timesfm":
+        from forecasting.timesfm_adapter import REPO_IDS
+
+        return REPO_IDS[base_kwargs["generation"]]
+    return "amazon/chronos-bolt-base"
+
+
 class ForecastService:
     """Loads active heads lazily (one per horizon) and serves forecasts for held symbols."""
 
@@ -156,7 +177,7 @@ class ForecastService:
         return self._reasons.get(horizon)
 
     def _load(self, horizon: int):  # noqa: ANN202
-        from forecasting.base import get_forecaster, usable_foundation_models
+        from forecasting.base import available_foundation_models, get_forecaster, weights_cached
         from forecasting.hybrid_model import HybridForecaster
 
         located = active_head_dir(horizon)
@@ -167,12 +188,15 @@ class ForecastService:
         meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
         base_name = meta["base_model"]
         family = {"timesfm": "timesfm", "chronos_bolt": "chronos"}.get(base_name)
-        if family and not usable_foundation_models().get(family):
+        # A head is served over the base it was trained on, whatever the process default is.
+        base_kwargs = base_kwargs_for(meta)
+        needed = _weights_repo(base_name, base_kwargs)
+        if family and not (available_foundation_models().get(family) and weights_cached(needed)):
             self._reasons[horizon] = (f"{version} needs {base_name} weights, which are not cached locally "
-                                      "(huggingface-cli download google/timesfm-2.5-200m-pytorch)")
+                                      f"(huggingface-cli download {needed})")
             return None
         try:
-            model = HybridForecaster.load(directory, get_forecaster(base_name))
+            model = HybridForecaster.load(directory, get_forecaster(base_name, **base_kwargs))
         except Exception as exc:  # noqa: BLE001
             self._reasons[horizon] = f"{version} failed to load: {type(exc).__name__}: {exc}"
             logger.warning(self._reasons[horizon])
