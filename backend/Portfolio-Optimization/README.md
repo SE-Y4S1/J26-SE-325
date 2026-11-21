@@ -453,14 +453,41 @@ contributing factors, one fixed and one open:
 | Notebook | Runs where | Purpose |
 |---|---|---|
 | `experiments/rq_analysis.ipynb` | local | RQ1–RQ4 tables and plots; executes headlessly |
-| `experiments/colab_finetune.ipynb` | **Colab (T4)** | LoRA fine-tuning + agent SFT; produces adapters |
+| `experiments/colab_finetune.ipynb` | **Colab (T4)** | LoRA fine-tuning, hybrid head, RQ1 table, agent SFT |
+| `experiments/colab_hybrid_heads.ipynb` | **Colab (T4)** | Part A: hybrid TimesFM + residual heads (h5, h21) over CSE, Binance, US |
+| `experiments/colab_laya_decision.ipynb` | **Colab (T4)** | Part C: fine-tune Laya on liquidation decisions + the RQ5 analysis |
+| `experiments/colab_fundamentals_backfill.ipynb` | Colab (CPU) | Part D: CSE report archive + SEC EDGAR fundamentals parquet |
+| `experiments/colab_pp1.ipynb` | **Colab (T4)** | Reduced Part A + Part C in one 2-3 hour session; preliminary results |
+
+Every notebook clones branch `Nivakaran` from GitHub, so **it runs whatever is pushed**, not
+what is on the laptop: push before running. The data they read that is not in the repo goes on
+Drive: `fundamentals_backfill.parquet` at `MyDrive/j26_se_325_backfill/` (the hybrid-heads,
+Laya and PP1 notebooks all read it; without it the fundamentals inputs are zero-filled and the
+run says so). `tests/test_notebooks.py` checks the notebooks for syntax, for CLI flags no
+script defines, and for the specific mistakes an audit found.
 
 `colab_finetune.ipynb` is the bridge between this repo and the parts the dev machine cannot
 run. It clones the repo, fine-tunes TimesFM/Chronos-Bolt against the committed
-`resolved_universe.yaml`, trains the residual head, produces the full RQ1 table, then
+`resolved_universe.yaml`, trains the residual head, produces the RQ1 table, then
 SFT-trains the tool-calling agent on the generated trajectories. It downloads **adapters
 only** — a few MB against ~821MB of base weights, which is the whole reason LoRA is used
 here rather than full fine-tuning.
+
+**RQ1 evaluation protocol.** A LoRA-tuned model can only be compared with the zero-shot one if
+it never saw the period it is scored on. The adapters are therefore fine-tuned on the first 60%
+of the history (the cutoff is in each adapter's directory name, `...-pre<date>`), and every
+candidate -- LSTM, zero-shot, LoRA, hybrid, hybrid on the LoRA base -- is walk-forward scored
+on the same later folds (`run_walk_forward(..., min_test_start=cutoff)`). An earlier version
+fine-tuned on the whole history and then scored only zero-shot models, so the table had no
+valid LoRA row. `adapters_meta.json` records the real training period and travels with the
+adapters, so registration needs no hand-typed dates or metrics.
+
+**Agent SFT (Part B)** loads the base in 4-bit through `BitsAndBytesConfig`, trains in fp16
+on a T4 (bf16 only on Ampere and newer; `agent/sft.py::choose_precision`), and first proves
+the chat template keeps the `tool` turns. Run it once with `SFT_SMOKE = True` before the real
+run. **RQ5's** paired bootstrap resamples whole dates (`evaluation/stats.py`), not rows:
+rows on a date share that day's move and labels overlap, so a row-level interval is far too
+narrow.
 
 It also asserts, before training the agent, that every trajectory called
 `run_fuzzy_ga_withdrawal`. Training on even a handful of ungrounded transcripts would teach
@@ -472,10 +499,12 @@ exists to prevent.
 `artifacts/trajectories/withdrawal_sft_scripted_800.jsonl` — 767 trajectories from 800
 scenarios (4.1% rejected), 5.95 MB. This is what Colab consumes.
 
-The file itself is **gitignored**: 6 MB of deterministically regenerable output does not
-belong in version control. The generator is committed and seeded (`seed=42`), so
-`uv run python run_pipeline.py --stages 6` reproduces it byte-for-byte. Generate it locally,
-then upload it to the Colab session before running Part B of `colab_finetune.ipynb`.
+The file is **tracked in git**: `artifacts/` is ignored, but `.gitignore` un-ignores
+`artifacts/trajectories/*.jsonl` because the dataset is a result, not a cache -- and Colab has
+no Ollama to regenerate it with, so it has to arrive with the clone. Nothing needs uploading
+for Part B of `colab_finetune.ipynb`. The generator is committed and seeded (`seed=42`), so
+`uv run python run_pipeline.py --stages 6` reproduces it byte-for-byte if it ever needs
+rebuilding.
 
 | Property | Value |
 |---|---|
@@ -618,7 +647,7 @@ proposal-named method and is preferred whenever its weights are present.
 
 ## Status
 
-All eight phases are complete. **660 tests passing, 5 skipped** (full suite, 2026-11-21),
+All eight phases are complete. **707 tests passing, 5 skipped** (full suite, 2026-11-21),
 zero unimplemented functions.
 
 | Phase | Scope | State |

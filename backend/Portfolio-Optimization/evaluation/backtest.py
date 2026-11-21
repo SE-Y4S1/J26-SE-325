@@ -210,8 +210,16 @@ def run_walk_forward(
     checkpoint: Path | None = None,
     log_to_mlflow: bool = True,
     forecaster_kwargs: dict | None = None,
+    min_test_start: date | None = None,
 ) -> pd.DataFrame:
-    """Train-forecast-roll across folds. Returns per-fold predictions with actuals attached."""
+    """Train-forecast-roll across folds. Returns per-fold predictions with actuals attached.
+
+    `min_test_start` keeps only folds whose TEST window begins on or after that date. It is
+    how a LoRA adapter is scored honestly: the adapter is fine-tuned on data before the
+    cutoff and every model is then evaluated on the same later folds. Without it an adapter
+    fit on the whole history would be scored on periods it was trained on. Fold numbers keep
+    their original meaning, so a checkpoint written with a cutoff still resumes.
+    """
     from features.feature_store import add_targets
     from features.technical import warmup_periods
     from forecasting.base import get_forecaster
@@ -230,6 +238,12 @@ def run_walk_forward(
     folds = generate_folds(frame["timestamp"].min().date(), frame["timestamp"].max().date(), config)
     if not folds:
         raise ValueError("no folds could be generated for this data range")
+    if min_test_start is not None:
+        folds = [f for f in folds if f.test_start >= min_test_start]
+        if not folds:
+            raise ValueError(
+                f"min_test_start {min_test_start} leaves no fold: every test window starts earlier"
+            )
 
     predictions: list[pd.DataFrame] = []
     completed: set[int] = set()

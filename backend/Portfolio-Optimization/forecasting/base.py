@@ -269,9 +269,13 @@ def get_forecaster(name: str, **kwargs: object) -> Forecaster:
 
     if name == "hybrid":
         base_name = str(kwargs.pop("base_model", None) or _preferred_base(available))
+        # A LoRA adapter belongs to the BASE model. Without forwarding it the hybrid was
+        # always built on the zero-shot base, so "hybrid on a tuned base" could not be run.
+        adapter_path = kwargs.pop("adapter_path", None)
+        base_kwargs = {"adapter_path": adapter_path} if adapter_path else {}
         from forecasting.hybrid_model import HybridForecaster
 
-        return HybridForecaster(get_forecaster(base_name), **kwargs)  # type: ignore[arg-type]
+        return HybridForecaster(get_forecaster(base_name, **base_kwargs), **kwargs)  # type: ignore[arg-type]
 
     raise KeyError(
         f"unknown forecaster {name!r}. Available in this environment: {registered_forecasters()}"
