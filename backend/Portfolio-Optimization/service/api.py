@@ -278,6 +278,38 @@ def _rebalance_orders(state: dict[str, dict[str, float]], weights: dict[str, flo
     return orders
 
 
+def _joint_history(symbols: list[str], max_rows: int = 504) -> dict[str, list[float]] | None:
+    """Aligned daily returns for the holdings, from the stored history only.
+
+    Request-path safe: reads the active-set registry and the local parquet store, never an
+    exchange. None when any holding is untracked, has no stored bars, or the symbols share too
+    few dates -- the optimizer then uses an assumed correlation and says so. Returns are in
+    each instrument's native currency; FX moves are not folded in.
+    """
+    from data import active_set
+    from data.history import load_stored
+    from optimization.scenarios import returns_matrix
+
+    bars = {}
+    try:
+        for symbol in symbols:
+            instrument = active_set.get_instrument(symbol)
+            if instrument is None:
+                return None
+            stored = load_stored(instrument)
+            if stored.empty:
+                return None
+            bars[symbol] = stored
+        matrix = returns_matrix(bars)
+    except Exception:  # noqa: BLE001 - a history problem must degrade the answer, not fail it
+        logger.warning("joint history unavailable; using assumed correlation", exc_info=True)
+        return None
+    if matrix is None:
+        return None
+    matrix = matrix.tail(max_rows)
+    return {symbol: matrix[symbol].tolist() for symbol in symbols}
+
+
 @app.post("/portfolio/optimize", response_model=PortfolioResponse)
 def optimize_portfolio(
     request: PortfolioRequest,
@@ -298,6 +330,7 @@ def optimize_portfolio(
         risk_preference=request.risk_preference,
         selection_rule=request.selection_rule,
         max_weight=request.max_weight,
+        history_returns=_joint_history(list(state)),
     )
     if "error" in result:
         raise HTTPException(status_code=422, detail=result["error"])
@@ -314,6 +347,8 @@ def optimize_portfolio(
         generated_at=_now(),
         rebalance_orders=_rebalance_orders(state, result["recommended_weights"]),
         currency=currency,
+        warnings=result["warnings"],
+        scenario_source=result["scenario_source"],
     )
 
     publish_decision("optimize", request.model_dump(mode="json"),

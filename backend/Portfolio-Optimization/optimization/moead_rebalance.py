@@ -10,7 +10,10 @@ pressure thins as objective count grows.
 
     maximize  expected_return      (minimized internally as -return)
     minimize  CVaR
-    minimize  liquidity_cost
+    minimize  liquidity_cost       (total slippage / portfolio value)
+
+The solver works on objectives rescaled to a common range (`_objective_scales`); everything
+it returns is in real units.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from optimization.objectives import expected_return, liquidity_cost, risk_cvar
+from optimization.objectives import expected_return, liquidity_cost_total, risk_cvar
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +103,29 @@ def _normalize(weights: np.ndarray, min_weight: float, max_weight: float) -> np.
     return np.clip(w, 0.0, max_weight)
 
 
+def _objective_scales(
+    raw_objectives,
+    n_assets: int,
+    min_w: float,
+    max_w: float,
+    current: np.ndarray,
+    seed: int,
+    n_samples: int = 64,
+) -> np.ndarray:
+    """Per-objective range over a seeded sample of feasible portfolios.
+
+    The sample includes the current book (zero trading cost) and equal weights, so the cost
+    objective's range always spans "do nothing" to "rebuild everything". A degenerate
+    objective (e.g. every return forecast is zero) gets scale 1 instead of dividing by ~0.
+    """
+    rng = np.random.default_rng(seed)
+    genomes = [current, np.full(n_assets, 1.0 / n_assets)]
+    genomes += [rng.random(n_assets) for _ in range(n_samples)]
+    sample = np.vstack([raw_objectives(_normalize(g, min_w, max_w)) for g in genomes])
+    span = sample.max(axis=0) - sample.min(axis=0)
+    return np.where(span > 1e-15, span, 1.0)
+
+
 def optimize_allocation(
     expected_returns: np.ndarray,
     quantile_forecasts: np.ndarray,
@@ -135,19 +161,29 @@ def optimize_allocation(
     min_w = -config.max_weight if config.allow_shorting else config.min_weight
     max_w = config.max_weight
 
+    def raw_objectives(w: np.ndarray) -> np.ndarray:
+        trade_notional = np.abs(w - current) * portfolio_value
+        return np.array([
+            -expected_return(w, mu),
+            risk_cvar(w, quantiles),
+            # Total slippage as a fraction of the book. NOT the per-dollar average: that is
+            # lowered by padding a liquid trade, so an optimizer would learn to pad.
+            liquidity_cost_total(trade_notional, adv, volatility) / max(portfolio_value, 1e-12),
+        ])
+
+    scales = _objective_scales(raw_objectives, n_assets, min_w, max_w, current, config.seed)
+
     class AllocationProblem(Problem):
         def __init__(self) -> None:
             super().__init__(n_var=n_assets, n_obj=3, n_constr=0, xl=0.0, xu=1.0)
 
         def _evaluate(self, X, out, *args, **kwargs):  # noqa: N803 - pymoo's signature
-            results = np.empty((X.shape[0], 3))
-            for i, genome in enumerate(X):
-                w = _normalize(genome, min_w, max_w)
-                trade_notional = np.abs(w - current) * portfolio_value
-                results[i, 0] = -expected_return(w, mu)
-                results[i, 1] = risk_cvar(w, quantiles)
-                results[i, 2] = liquidity_cost(w, trade_notional, adv, volatility)
-            out["F"] = results
+            # The solver sees objectives on a common scale; return is ~1e-3, CVaR ~1e-2 and
+            # cost ~1e-5, and Tchebycheff decomposition does not normalize, so unscaled it
+            # chases whichever objective has the largest units.
+            out["F"] = np.vstack(
+                [raw_objectives(_normalize(genome, min_w, max_w)) / scales for genome in X]
+            )
 
     ref_dirs = get_reference_directions("uniform", 3, n_partitions=config.n_partitions)
     algorithm = MOEAD(
@@ -165,7 +201,8 @@ def optimize_allocation(
     )
 
     raw = np.atleast_2d(result.X)
-    objectives = np.atleast_2d(result.F)
+    # Back to real units: callers and the API report return/CVaR/cost, not solver scale.
+    objectives = np.atleast_2d(result.F) * scales
 
     # Return the PROJECTED weights, not the raw genomes -- the caller must receive weights
     # that actually satisfy the constraints they were promised.

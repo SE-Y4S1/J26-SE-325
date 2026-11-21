@@ -48,7 +48,9 @@ ingestion → features → forecasting → optimization → service
 Two **separate** optimizers, per the TAF's *"MOEA/D, fuzzy genetic algorithm"*:
 
 - **MOEA/D** (`optimization/moead_rebalance.py`) — long-term allocation over the weight
-  simplex. 3 objectives: maximize return, minimize CVaR, minimize liquidity cost.
+  simplex. 3 objectives: maximize return, minimize CVaR, minimize liquidity cost (total
+  slippage as a fraction of the book -- not a per-dollar average, which a padded trade could
+  dilute). CVaR is computed on joint scenarios, never independent per-asset draws.
 - **Fuzzy GA** (`optimization/fuzzy_withdrawal.py` + `ga_withdrawal.py`) — instant
   liquidation planning. A fuzzy inference system scores per-holding sell priority; a GA
   searches ordered (asset, fraction) schedules under a hard "raise $X within N days"
@@ -354,24 +356,76 @@ out-of-sample estimate; there is simply less of it. Widen `EVAL_YEARS` and raise
 count when running with a GPU. Report the fold count alongside the metrics -- five folds
 supports "the hybrid beats the baseline here", not a significance claim.
 
-**RQ2 — MOEA/D matches Markowitz's return at a fraction of the cost:**
+**RQ2 — re-measured 2026-11-21; the earlier "3.5x lower cost than Markowitz" is withdrawn.**
+That figure came from an evaluation that favoured MOEA/D four ways: independent per-asset
+scenarios (zero correlation, so CVaR saw diversification that is not there); a liquidity cost
+averaged per traded dollar (a padded liquid trade lowers it); a single opponent that was never
+told trading costs money; and one seed, scored only on the model's own predicted objectives.
+All four are fixed (`optimization/scenarios.py`, `liquidity_cost_total`,
+`cost_aware_mean_variance`, seed sweep, `evaluation/portfolio_backtest.py`).
 
-| Method | Expected return | Liquidity cost | THIN weight |
-|---|---|---|---|
-| Markowitz (max-Sharpe) | 0.000678 | 0.000083 | 0.0897 |
-| MOEA/D (knee) | 0.000650 | 0.000081 | 0.0836 |
-| **MOEA/D (max-Sharpe)** | **0.000678** | **0.000024** | 0.0969 |
-| MOEA/D (scalarized) | 0.000678 | 0.000024 | 0.0969 |
+*Mechanism check* -- predicted objectives, synthetic inputs (mu proportional to volatility),
+mean over 5 seeds (`run_rq_analysis.py --rq 2`). Cost is total slippage as a fraction of the book:
 
-Identical expected return at **3.5x lower liquidity cost** — precisely the "equal or lower
-realized transaction cost" RQ2 asks for. The mechanism is worth stating in the write-up
-because it is counter-intuitive: MOEA/D *holds more* of the illiquid name (0.0969 vs 0.0897)
-yet pays less, because liquidity cost is charged on the **trade**, not the holding. Starting
-from a 0.10 position, MOEA/D moves it 0.0031 while Markowitz moves it 0.0103. The optimizer
-learned to leave the illiquid position alone.
+| Method | Expected return | CVaR | Liquidity cost | THIN weight |
+|---|---|---|---|---|
+| Markowitz, cost-blind | 0.000699 | 0.0226 | 1.5e-4 | 0.098 |
+| **Markowitz, cost-aware** | 0.000694 | 0.0226 | **6e-6** | 0.100 |
+| MOEA/D (knee) | 0.000882 | 0.0308 | 1.1e-3 | 0.277 |
+| MOEA/D (return/CVaR) | 0.000731 | 0.0236 | 2.0e-4 | 0.114 |
+| MOEA/D (scalarized) | 0.000724 | 0.0236 | 1.7e-5 | 0.099 |
 
-The three selection rules are reported side by side as the documented sensitivity analysis;
-knee gives up ~4% of return for a marginally lower cost.
+Against the cost-BLIND baseline, MOEA/D (scalarized) is ~9x cheaper at slightly higher
+return. Against a Markowitz that is told what trading costs, that advantage is gone: the
+cost-aware baseline is cheaper than every MOEA/D rule at the same return. The mechanism is
+"price the trade", which any cost-aware method gets, not something specific to MOEA/D.
+The knee rule now selects a high-return, high-risk, high-cost point holding 28% of the thin
+name; see the note on the knee below.
+
+*Realized check* -- walk-forward on 22 real equity/ETF series (FX dropped: no volume), 30
+rebalances every 42 sessions, book of 5e8 so liquidity binds on the thinner names, every
+method seeing only bars up to each date and paying the modelled impact cost on the trade it
+made (`run_rq_analysis.py --rq 2 --rq2-backtest`):
+
+| Method | Net return | Sharpe | Sortino | Max drawdown | Total cost | Turnover |
+|---|---|---|---|---|---|---|
+| hold (equal-weight, no trading) | 161.7% | 1.19 | 1.73 | -20.8% | 0 | 0 |
+| equal-weight, rebalanced | 140.8% | 1.20 | 1.76 | -22.4% | 0.04% | 1.1 |
+| Markowitz, cost-blind | 67.2% | 0.85 | 1.21 | -16.0% | 1.14% | 7.8 |
+| Markowitz, cost-aware | 75.8% | 1.10 | 1.61 | -17.8% | 0.15% | 2.1 |
+| **MOEA/D (knee)** | 154.1% | **1.39** | **2.06** | -16.8% | 0.96% | 8.7 |
+
+MOEA/D has the best Sharpe and Sortino and beats both Markowitz variants on net return, but
+it pays about 6x the cost of the cost-aware baseline, and plain buy-and-hold has the highest
+net return. Treat this as suggestive, not a result:
+
+* one path, one period (a strong equity bull market), no confidence interval -- a Sharpe gap
+  of 1.39 vs 1.19 is within what one path can produce by chance
+* expected returns are a trailing mean shrunk halfway to the cross-sectional mean, a
+  forecast-free stand-in; the forecaster is not in this loop, and trailing-mean Markowitz is
+  known to be poor, so the baselines may be handicapped
+* the 22 symbols are US mega-caps; liquidity binds only because the book is 5e8. Nothing here
+  tests the thin Colombo-exchange names the component is meant for
+* cost is the same square-root impact model for every method with an uncalibrated 0.30
+  coefficient. The comparison is even-handed; the absolute level is an assumption
+* the synthetic check and the realized check disagree about MOEA/D against the cost-aware
+  baseline, which itself says the conclusion depends on the inputs
+
+**Solver status.** The allocation problem is convex under total-slippage cost, so
+`optimization/convex_reference.py` solves it exactly (Rockafellar-Uryasev CVaR + SLSQP) as a
+check. Objectives are now rescaled before MOEA/D (they differ by orders of magnitude and
+Tchebycheff decomposition does not normalize): on a 12-asset case that took front hypervolume
+from 0.18 to 0.52 of a shared box. At 8 partitions x 100 generations the front still stops
+short of the exact min-CVaR extreme (CVaR 0.0220 vs exact 0.0157), so the corners are
+under-converged; a denser or longer run, or seeding with exact solves, would close that.
+
+**Knee rule.** `knee_point` used a 2-D chord on a 3-objective front and picked an arbitrary
+corner (reproduced on a constructed front). It now measures distance from the hyperplane
+through the extreme points. That is the correct construction, but it moves the default: the
+knee now sits at a high-return, high-cost compromise. Whether `knee` should remain the API
+default for a liquidity-aware product, versus `scalarized`, is a product decision left open.
+The `max_sharpe` rule key is return/CVaR, not Sharpe (renamed in docs only, to keep the API
+stable).
 
 **RQ4 — an open problem, stated honestly.** The fuzzy GA has the *best* unstressed cost
 (1.96 vs 2.22) but degrades faster than most-liquid-first (degradation ratio 10.1 vs 4.5;
@@ -564,7 +618,8 @@ proposal-named method and is preferred whenever its weights are present.
 
 ## Status
 
-All eight phases are complete. **362 tests passing**, zero unimplemented functions.
+All eight phases are complete. **660 tests passing, 5 skipped** (full suite, 2026-11-21),
+zero unimplemented functions.
 
 | Phase | Scope | State |
 |-------|-------|-------|
@@ -611,6 +666,20 @@ configuration RQ2 was measured with — rather than the `MOEADConfig()` research
 component is a *"real-time, user-facing service"*. Profiling showed the cost is pymoo's own
 genetic operators, not the objective functions: objective evaluation accounts for under a
 second of it. Offline analysis should pass its own `MOEADConfig` for a denser front.
+
+**What the CVaR scenarios are built from.** `/portfolio/optimize` bootstraps joint scenarios
+from the holdings' own stored daily returns (`service/api.py::_joint_history`, local parquet
+only, no exchange call) and re-centres them on the forecast drift. With fewer than 60 aligned
+observations, or an untracked holding, it falls back to a multivariate normal with an
+ASSUMED constant correlation of 0.5. The response says which: `scenario_source` is
+`historical` or `assumed_correlation`. Returns are in each instrument's native currency; FX
+moves are not folded in.
+
+**Holdings with no forecast.** They count as zero expected return and are named in `warnings`.
+With no forecasts at all the return objective is constant, so the result minimizes CVaR and
+trading cost only and `expected_return` is 0 by assumption -- the response says so rather than
+presenting it as a return-seeking plan. `warnings` and `scenario_source` are additive fields;
+the generated OpenAPI/TS client under `frontend/lib/api/generated/` has not been regenerated.
 
 ## Market data and per-stock sentiment
 

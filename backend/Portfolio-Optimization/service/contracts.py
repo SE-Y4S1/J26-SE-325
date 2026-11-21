@@ -102,6 +102,12 @@ class PortfolioResponse(BaseModel):
     rebalance_orders: list[RebalanceOrder] = Field(default_factory=list)
     currency: dict | None = None
 
+    # Additive. `warnings` says when the answer rests on an assumption the user should see
+    # (e.g. no forecasts, so expected_return is 0 by assumption); `scenario_source` is
+    # "historical" when CVaR used the holdings' own joint returns, else "assumed_correlation".
+    warnings: list[str] = Field(default_factory=list)
+    scenario_source: str | None = None
+
 
 class WithdrawalRequest(BaseModel):
     holdings: list[Holding]

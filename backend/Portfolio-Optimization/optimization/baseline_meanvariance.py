@@ -151,6 +151,77 @@ def max_sharpe_portfolio(
     return _result(weights, mu, cov, risk_free_rate)
 
 
+def cost_aware_mean_variance(
+    expected_returns: np.ndarray,
+    covariance: np.ndarray,
+    current_weights: np.ndarray,
+    avg_daily_volume: np.ndarray,
+    portfolio_value: float,
+    *,
+    volatility: np.ndarray | None = None,
+    risk_free_rate: float = 0.0,
+    max_weight: float | None = None,
+) -> MeanVarianceResult:
+    """Mean-variance WITH a transaction-cost term: the fair RQ2 opponent.
+
+    Plain max-Sharpe ignores where the book starts, so it is charged for churn it was never
+    told about -- beating it on cost proves nothing about MOEA/D. A careful practitioner
+    would price the trade, so this does:
+
+        minimize  -w.mu + (lambda/2) w'Sw + total_slippage(|w - w0| * V) / V
+
+    lambda is set from the tangency portfolio (lambda = mu_p / var_p), so with zero trading
+    cost this reduces to the usual max-Sharpe answer and the only difference from the blind
+    baseline is the cost term. Convex, solved by SLSQP from the current book.
+
+    Still two risk/return objectives plus a cost penalty on one weighting; it has no CVaR
+    and no Pareto front -- what MOEA/D must justify itself against.
+    """
+    from optimization.objectives import liquidity_cost_total
+
+    mu = np.asarray(expected_returns, dtype=float)
+    cov = np.asarray(covariance, dtype=float)
+    current = np.asarray(current_weights, dtype=float)
+    adv = np.asarray(avg_daily_volume, dtype=float)
+    n = mu.size
+
+    tangency = max_sharpe_portfolio(mu, cov, risk_free_rate=risk_free_rate, max_weight=max_weight)
+    tangency_return = float(np.dot(tangency.weights, mu))
+    tangency_variance = float(tangency.weights @ cov @ tangency.weights)
+    if tangency_return > 0 and tangency_variance > 0:
+        risk_aversion = tangency_return / tangency_variance
+    else:
+        risk_aversion = abs(float(mu.mean())) / max(float(np.mean(np.diag(cov))), 1e-12) + 1e-9
+
+    # Rescale so the objective is O(1); SLSQP's ftol is absolute and daily returns are ~1e-3.
+    scale = 1.0 / max(abs(tangency_return), 1e-9)
+    value = max(float(portfolio_value), 1e-12)
+
+    def objective(w: np.ndarray) -> float:
+        slippage = liquidity_cost_total(np.abs(w - current) * value, adv, volatility) / value
+        return float(scale * (-np.dot(w, mu) + 0.5 * risk_aversion * (w @ cov @ w) + slippage))
+
+    cap = max_weight if max_weight is not None else 1.0
+    start = np.clip(current, 0.0, cap)
+    start = start / start.sum() if start.sum() > 0 else np.full(n, 1.0 / n)
+
+    result = minimize(
+        objective,
+        start,
+        method="SLSQP",
+        bounds=_bounds(n, False, max_weight),
+        constraints=[{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}],
+        options={"maxiter": 500, "ftol": 1e-12},
+    )
+    if not result.success:
+        logger.warning("cost-aware mean-variance did not converge (%s); returning tangency", result.message)
+        return tangency
+
+    weights = np.clip(np.asarray(result.x, dtype=float), 0.0, cap)
+    weights = weights / weights.sum()
+    return _result(weights, mu, cov, risk_free_rate)
+
+
 def min_variance_portfolio(
     covariance: np.ndarray,
     *,

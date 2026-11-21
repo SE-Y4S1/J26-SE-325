@@ -45,18 +45,48 @@ def _normalize_objectives(objectives: np.ndarray) -> np.ndarray:
     return (obj - obj.min(axis=0)) / span
 
 
-def knee_point(objectives: np.ndarray) -> int:
-    """Maximum-curvature point on the normalized front.
+def _extreme_points(normalized: np.ndarray) -> np.ndarray:
+    """One extreme point per objective axis (the NSGA-III achievement-scalarizing choice).
 
-    Implemented as maximum distance from the chord joining the front's two extreme points
-    (the "Menger curvature" / utopia-line construction). Parameter-free and preference-free:
-    the knee is where giving up more return stops buying a proportionate reduction in risk.
-    Standard in the MOO literature (Das 1999; Branke et al. 2004, "Finding knees in
-    multi-objective optimization"). Our default.
+    For axis k, the point minimizing max_j(f_j / w_j) with w_k = 1 and every other weight
+    ~0: it is best on all the other objectives and so sits at axis k's intercept. Unlike
+    argmin per objective this stays distinct when several points tie at an objective's minimum.
+    """
+    n_obj = normalized.shape[1]
+    rows = []
+    for k in range(n_obj):
+        weights = np.full(n_obj, 1e-6)
+        weights[k] = 1.0
+        rows.append(normalized[np.argmin((normalized / weights).max(axis=1))])
+    return np.vstack(rows)
+
+
+def knee_point(objectives: np.ndarray) -> int:
+    """Knee of the normalized front: the point that bulges furthest toward the utopia point.
+
+    Distance is measured from the hyperplane through the front's extreme points, on the
+    utopia side (Das 1999; Branke et al. 2004, "Finding knees in multi-objective
+    optimization"). With three objectives the front is a SURFACE, so a chord between two
+    points -- the 2-D construction -- measures distance from a line the front does not lie
+    near and picks an arbitrary corner; the hyperplane is the correct generalization.
+    Parameter-free and preference-free.
+
+    Falls back to the chord construction when the extreme points are not independent
+    (a degenerate or duplicated front).
     """
     normalized = _normalize_objectives(objectives)
     if normalized.shape[0] < 3:
         return 0
+
+    extremes = _extreme_points(normalized)
+    try:
+        # Plane a . x = 1 through the extreme points.
+        plane = np.linalg.solve(extremes, np.ones(extremes.shape[0]))
+    except np.linalg.LinAlgError:
+        plane = None
+    if plane is not None and np.isfinite(plane).all() and np.linalg.norm(plane) > 0:
+        toward_utopia = (1.0 - normalized @ plane) / np.linalg.norm(plane)
+        return int(np.argmax(toward_utopia))
 
     # The chord runs between the two most distant solutions on the front.
     distances = np.linalg.norm(normalized[:, None, :] - normalized[None, :, :], axis=-1)
@@ -77,11 +107,14 @@ def knee_point(objectives: np.ndarray) -> int:
 
 
 def max_sharpe_point(objectives: np.ndarray, risk_free_rate: float = 0.0) -> int:
-    """Best return-per-unit-risk on the front.
+    """Best expected return per unit of CVaR on the front.
 
-    Directly comparable to the mean-variance baseline's tangency portfolio, but note the
-    circularity: RQ2 also evaluates on Sharpe, so this rule optimizes the metric it is
-    scored on. Reported for completeness, not used as the headline.
+    The rule is keyed "max_sharpe" for API compatibility, but the ratio is return / CVaR, not
+    return / volatility, so it is NOT the Sharpe ratio and not the Markowitz tangency
+    portfolio. Compute Sharpe from realized returns (evaluation/portfolio_backtest.py) when
+    comparing against the baseline. RQ2 is also scored on risk-adjusted return, so this rule
+    optimizes close to the metric it is judged on: reported for completeness, never the
+    headline.
 
     Objective column 0 is NEGATIVE expected return (pymoo minimizes), column 1 is CVaR.
     """
@@ -145,8 +178,8 @@ def select(
     elif rule is SelectionRule.MAX_SHARPE:
         index = max_sharpe_point(obj)
         rationale = (
-            "Highest return-per-unit-CVaR on the front -- directly comparable to the "
-            "mean-variance tangency portfolio."
+            "Highest expected return per unit of CVaR on the front. A return/CVaR ratio, not "
+            "the Sharpe ratio, so it is not the mean-variance tangency portfolio."
         )
     else:
         preference = preference_weights or (1 / 3, 1 / 3, 1 / 3)

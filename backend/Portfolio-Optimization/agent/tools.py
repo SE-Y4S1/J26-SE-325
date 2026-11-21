@@ -161,16 +161,27 @@ def run_moead_rebalance(
     risk_preference: float = 0.5,
     selection_rule: str = "knee",
     max_weight: float = 0.25,
+    history_returns: dict[str, list[float]] | None = None,
 ) -> dict[str, Any]:
     """Long-term allocation. Wraps optimization.moead_rebalance + pareto_selection.
 
     `expected_return` per holding is the forecaster's daily drift when the symbol has a
-    hybrid forecast (service/api._build_portfolio), else 0.
+    hybrid forecast (service/api._build_portfolio). A holding without one is treated as zero
+    expected return AND reported in `holdings_without_forecast` / `warnings`: with no
+    forecasts at all the return objective is constant and the result is a pure
+    CVaR-and-cost minimizer, which the caller must not present as a return-seeking plan.
+
+    `history_returns` is symbol -> aligned daily returns (same length for every symbol).
+    When it covers every holding the CVaR scenarios are bootstrapped from it, preserving
+    cross-asset correlation; otherwise they come from an ASSUMED constant correlation and
+    `scenario_source` says so. Independent per-asset draws are never used: they imply zero
+    correlation and make a correlated book look diversified.
     """
     import numpy as np
 
     from optimization.moead_rebalance import MOEADConfig, optimize_allocation
     from optimization.pareto_selection import SelectionRule, select
+    from optimization.scenarios import joint_scenarios
 
     symbols = tuple(portfolio_state)
     if not symbols:
@@ -184,10 +195,26 @@ def run_moead_rebalance(
     adv = np.array([float(portfolio_state[s].get("adv_usd", 0.0)) for s in symbols])
     volatility = np.array([float(portfolio_state[s].get("daily_volatility", 0.0126)) for s in symbols])
 
-    # Scenario matrix from a normal approximation around each asset's forecast. A crude but
-    # transparent stand-in when no full quantile forecast was supplied by the caller.
-    rng = np.random.default_rng(42)
-    scenarios = rng.normal(expected_returns, volatility, size=(200, len(symbols)))
+    without_forecast = [s for s in symbols if "expected_return" not in portfolio_state[s]]
+    warnings: list[str] = []
+    if len(without_forecast) == len(symbols):
+        warnings.append(
+            "No holding has a forecast, so the return objective is inactive: these weights "
+            "minimize CVaR and trading cost only, and expected_return is 0 by assumption."
+        )
+    elif without_forecast:
+        warnings.append(
+            f"{len(without_forecast)} of {len(symbols)} holdings have no forecast and are treated "
+            f"as zero expected return: {', '.join(without_forecast)}."
+        )
+
+    history = None
+    if history_returns and all(s in history_returns for s in symbols):
+        columns = [np.asarray(history_returns[s], dtype=float) for s in symbols]
+        if len({c.size for c in columns}) == 1:
+            history = np.column_stack(columns)
+
+    scenarios, scenario_source = joint_scenarios(expected_returns, volatility, history=history, seed=42)
 
     # Lighter than MOEADConfig()'s research defaults (12 partitions x 200 generations,
     # ~18k evaluations, ~30s). This is an INTERACTIVE endpoint and the TAF's claim for it is
@@ -217,6 +244,9 @@ def run_moead_rebalance(
         "pareto_front_size": len(front),
         "selection_rule": chosen.rule.value,
         "selection_rationale": chosen.rationale,
+        "scenario_source": scenario_source,
+        "holdings_without_forecast": without_forecast,
+        "warnings": warnings,
     }
 
 

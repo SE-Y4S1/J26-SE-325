@@ -103,68 +103,135 @@ def rq4_stress_degradation(
     return results, summarize_degradation(results)
 
 
-def rq2_allocation_comparison(portfolio: dict | None = None) -> pd.DataFrame:
-    """RQ2: MOEA/D versus Markowitz, across all three Pareto selection rules.
+RQ2_SEEDS = (0, 1, 2, 3, 4)
 
-    Uses the portfolio's own volatility/ADV as inputs rather than a trained forecaster, so
-    this runs without Phase 4. With real forecasts the expected returns improve, but the
-    LIQUIDITY comparison -- which is what RQ2 actually turns on -- is unaffected.
+
+def rq2_allocation_comparison(portfolio: dict | None = None, *, seeds: tuple[int, ...] = RQ2_SEEDS) -> pd.DataFrame:
+    """RQ2 mechanism check: MOEA/D vs a fair Markowitz and the exact convex solve.
+
+    PREDICTED objectives on synthetic inputs -- it shows WHY the methods differ, and is not
+    evidence that either wins in a market (that is `rq2_realized_backtest`). Changes from the
+    first version, each of which had inflated the headline:
+
+      * scenarios are joint (one common market factor), not independent per asset
+      * liquidity cost is TOTAL slippage as a fraction of the book, not a per-dollar average
+        that a padded trade can dilute
+      * the opponent set includes Markowitz WITH a trading-cost term, so MOEA/D is no longer
+        beating a method that was never told trading costs money
+      * a convex-reference row (exact solve, one fixed preference) shows what an exact
+        method reaches on the same objectives
+      * every number is the mean and std over `seeds` (scenario draw and MOEA/D seed)
+
+    Expected returns are proportional to volatility (a crude risk premium), so the thin,
+    high-vol name looks attractive on return alone -- the trap a liquidity-blind optimizer
+    walks into. That is an assumption of the setup, not a market fact.
     """
     import numpy as np
 
-    from optimization.baseline_meanvariance import max_sharpe_portfolio
+    from optimization.baseline_meanvariance import cost_aware_mean_variance, max_sharpe_portfolio
+    from optimization.convex_reference import solve_weighted_sum
     from optimization.moead_rebalance import MOEADConfig, optimize_allocation
-    from optimization.objectives import liquidity_cost
+    from optimization.objectives import liquidity_cost_total, risk_cvar
     from optimization.pareto_selection import compare_rules
 
     portfolio = portfolio or DEMO_PORTFOLIO
     symbols = tuple(portfolio)
     n = len(symbols)
+    thin = symbols.index("THIN")
 
     values = np.array([portfolio[s]["value"] for s in symbols])
-    total = values.sum()
+    total = float(values.sum())
     current = values / total
     vol = np.array([portfolio[s]["daily_volatility"] for s in symbols])
     adv = np.array([portfolio[s]["adv_usd"] for s in symbols])
-
-    # Expected returns proportional to volatility (a crude risk-premium proxy), so the
-    # illiquid, high-vol name looks ATTRACTIVE on return alone -- exactly the trap a
-    # liquidity-blind optimizer walks into.
     mu = vol * 0.05
-    rng = np.random.default_rng(42)
-    scenarios = rng.normal(mu, vol, size=(500, n))
-    cov = np.cov(scenarios, rowvar=False)
+    cap = 0.4
 
-    front = optimize_allocation(
-        mu, scenarios, adv, current, float(total), symbols,
-        volatility=vol, config=MOEADConfig(n_partitions=8, n_generations=100, max_weight=0.4),
-    )
-    selections = compare_rules(front.objectives, front.weights)
+    rows = []
+    for seed in seeds:
+        rng = np.random.default_rng(seed)
+        # One market factor: every asset loads on it, so scenarios are jointly distributed.
+        loadings = rng.uniform(0.6, 1.0, n)
+        factor = rng.normal(0.0, 1.0, (500, 1))
+        idio = rng.normal(0.0, 1.0, (500, n)) * np.sqrt(1.0 - loadings ** 2)
+        scenarios = mu + vol * (factor * loadings + idio)
+        cov = np.cov(scenarios, rowvar=False)
 
-    mv = max_sharpe_portfolio(mu, cov, max_weight=0.4)
-    rows = [
-        {
-            "method": "markowitz_max_sharpe",
-            "selection_rule": "n/a",
-            "expected_return": mv.expected_return,
-            "liquidity_cost": liquidity_cost(mv.weights, np.abs(mv.weights - current) * total, adv, vol),
-            "thin_weight": float(mv.weights[symbols.index("THIN")]),
-            **{f"w_{s}": round(float(w), 4) for s, w in zip(symbols, mv.weights, strict=True)},
-        }
-    ]
-    for rule, point in selections.items():
-        rows.append(
-            {
-                "method": "moead_liquidity_aware",
-                "selection_rule": rule,
-                "expected_return": float(-point.objectives[0]),
-                "liquidity_cost": float(point.objectives[2]),
-                "thin_weight": float(point.weights[symbols.index("THIN")]),
-                **{f"w_{s}": round(float(w), 4) for s, w in zip(symbols, point.weights, strict=True)},
-            }
+        def score(label, rule, w, _scenarios=scenarios, _seed=seed):
+            trade = np.abs(w - current) * total
+            rows.append({
+                "seed": _seed, "method": label, "selection_rule": rule,
+                "expected_return": float(w @ mu),
+                "cvar": risk_cvar(w, _scenarios),
+                "liquidity_cost": liquidity_cost_total(trade, adv, vol) / total,
+                "turnover": float(np.abs(w - current).sum() / 2),
+                "thin_weight": float(w[thin]),
+            })
+
+        score("markowitz_blind", "n/a", max_sharpe_portfolio(mu, cov, max_weight=cap).weights)
+        score("markowitz_cost_aware", "n/a",
+              cost_aware_mean_variance(mu, cov, current, adv, total, volatility=vol, max_weight=cap).weights)
+
+        front = optimize_allocation(
+            mu, scenarios, adv, current, total, symbols, volatility=vol,
+            config=MOEADConfig(n_partitions=8, n_generations=100, max_weight=cap, seed=seed),
         )
+        for rule, point in compare_rules(front.objectives, front.weights).items():
+            score("moead", rule, point.weights)
 
-    return pd.DataFrame(rows)
+        # One exact solve for one fixed raw-unit preference. It is a reference point, not a
+        # claim about which preference a user holds.
+        score("convex_reference", "fixed_preference", solve_weighted_sum(
+            mu, scenarios, adv, current, total, coefficients=(1.0, 1.0, 5.0),
+            volatility=vol, max_weight=cap))
+
+    frame = pd.DataFrame(rows)
+    metrics = ["expected_return", "cvar", "liquidity_cost", "turnover", "thin_weight"]
+    summary = frame.groupby(["method", "selection_rule"], sort=False)[metrics].agg(["mean", "std"])
+    summary.columns = [f"{m}_{stat}" for m, stat in summary.columns]
+    return summary.reset_index()
+
+
+def rq2_realized_backtest(
+    bars_path: Path | None = None,
+    *,
+    portfolio_value: float = 5.0e8,
+    rebalance_every: int = 42,
+    methods: tuple[str, ...] | None = None,
+    symbols: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """RQ2 on realized data: walk-forward net performance of each method.
+
+    Every method sees only bars up to each rebalance date and is scored on the returns that
+    followed, paying the modelled impact cost on the trade it actually made (see
+    evaluation/portfolio_backtest.py for what "realized cost" does and does not mean).
+
+    `portfolio_value` matters: on mega-cap ETFs a retail-sized book trades at a fraction of a
+    percent of ADV and every method costs ~nothing, which would make the comparison vacuous.
+    The default is institution-sized so liquidity actually binds on the thinner names; run it
+    at several sizes before drawing a conclusion.
+    """
+    from evaluation.portfolio_backtest import METHODS as ALL_METHODS
+    from evaluation.portfolio_backtest import BacktestSpec, run_portfolio_backtest, summarize
+
+    path = bars_path or (RESULTS_DIR.parent / "hybrid_training" / "bars.parquet")
+    bars = pd.read_parquet(path)
+    if symbols:
+        bars = bars[bars["symbol"].isin(symbols)]
+    # No volume means no ADV and so no liquidity cost to evaluate (FX bars have none).
+    has_volume = bars.groupby("symbol")["volume"].apply(lambda v: bool((v > 0).any()))
+    dropped = sorted(has_volume[~has_volume].index)
+    if dropped:
+        logger.info("RQ2 backtest: dropping symbols with no volume: %s", ", ".join(dropped))
+        bars = bars[~bars["symbol"].isin(dropped)]
+    spec = BacktestSpec(
+        portfolio_value=portfolio_value, rebalance_every=rebalance_every,
+        methods=methods or ALL_METHODS,
+    )
+    result = run_portfolio_backtest(bars, spec)
+    summary = summarize(result)
+    summary.insert(0, "portfolio_value", portfolio_value)
+    return summary
 
 
 def load_real_features(*, include_sentiment: bool = False) -> "pd.DataFrame":
@@ -271,6 +338,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate RQ1-RQ4 comparison tables.")
     parser.add_argument("--rq", nargs="*", default=["3", "4"], choices=["1", "2", "3", "4"])
     parser.add_argument("--all", action="store_true")
+    parser.add_argument("--rq2-backtest", action="store_true",
+                        help="also run the slow walk-forward backtest for RQ2 (real bars)")
+    parser.add_argument("--portfolio-value", type=float, default=5.0e8,
+                        help="book size for the RQ2 backtest, in the bars' currency")
     args = parser.parse_args()
 
     selected = {"1", "2", "3", "4"} if args.all else set(args.rq)
@@ -284,8 +355,13 @@ def main() -> None:
     if "2" in selected:
         table = rq2_allocation_comparison()
         table.to_csv(RESULTS_DIR / "rq2_allocation.csv", index=False)
-        print("\n=== RQ2: allocation quality (Markowitz vs MOEA/D) ===")
-        print(table[["method", "selection_rule", "expected_return", "liquidity_cost", "thin_weight"]].to_string(index=False))
+        print("\n=== RQ2 mechanism: predicted objectives, mean/std over seeds (synthetic inputs) ===")
+        print(table.to_string(index=False))
+        if args.rq2_backtest:
+            realized = rq2_realized_backtest(portfolio_value=args.portfolio_value)
+            realized.to_csv(RESULTS_DIR / "rq2_realized.csv", index=False)
+            print("\n=== RQ2 realized: walk-forward net performance on real bars ===")
+            print(realized.to_string(index=False))
 
     if "3" in selected:
         table = rq3_withdrawal_vs_naive()

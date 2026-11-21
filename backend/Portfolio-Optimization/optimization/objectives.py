@@ -42,9 +42,11 @@ def risk_cvar(weights: np.ndarray, quantile_forecasts: np.ndarray, alpha: float 
 
     `quantile_forecasts` is (n_assets, n_quantiles) or (n_scenarios, n_assets):
       * A scenario matrix is used directly -- the empirical CVaR of portfolio returns.
-      * A quantile matrix is expanded into scenarios first, since CVaR of a portfolio is not
-        the weighted sum of per-asset CVaRs (that would ignore diversification entirely and
-        systematically overstate risk).
+      * A quantile matrix is read as one scenario per quantile level. That pairs the SAME
+        level across every asset, i.e. it assumes perfect rank correlation (comonotonic),
+        where CVaR is exactly the weighted sum of per-asset CVaRs. It is therefore a
+        conservative UPPER BOUND with no diversification credit, and its tail is capped at
+        the lowest quantile supplied. Prefer a joint scenario matrix (optimization/scenarios.py).
 
     Returned POSITIVE for a loss, so minimizing it is the natural objective direction.
 
@@ -95,6 +97,11 @@ def liquidity_cost(
 
     This is the term that makes the optimizer "liquidity-aware" -- it is what a mean-variance
     baseline structurally cannot see, and therefore the source of the RQ2 advantage.
+
+    NOTE: this is the AVERAGE cost per traded dollar. It is not a safe thing to minimize:
+    adding a large trade in a liquid name dilutes the average without touching the illiquid
+    trade, so an optimizer is rewarded for padding. Optimizers use `liquidity_cost_total`.
+    This function is kept for reporting a per-dollar slippage figure.
     """
     trade_sizes = np.abs(np.asarray(trade_sizes, dtype=float))
     adv = np.asarray(avg_daily_volume, dtype=float)
@@ -121,6 +128,43 @@ def liquidity_cost(
         return 0.0
 
     cost = float(np.dot(per_asset, trade_sizes) / total_notional)
+    return cost if np.isfinite(cost) else float(1e6)
+
+
+def liquidity_cost_total(
+    trade_sizes: np.ndarray,
+    avg_daily_volume: np.ndarray,
+    volatility: np.ndarray | None = None,
+) -> float:
+    """Total expected slippage, in currency units, of executing `trade_sizes`:
+
+        sum_i  IMPACT_COEFFICIENT * sigma_i * (|Q_i| / ADV_i) ** 0.5 * |Q_i|
+
+    Total rather than per-dollar average, so extra trading can never lower it. It grows as
+    |Q| ** 1.5 and is convex, which is also what makes an exact convex reference solve
+    possible (see optimization/convex_reference.py).
+
+    Zero ADV with a non-zero trade returns the same 1e6 sentinel as `liquidity_cost`.
+    """
+    trade_sizes = np.abs(np.asarray(trade_sizes, dtype=float))
+    adv = np.asarray(avg_daily_volume, dtype=float)
+    if trade_sizes.shape != adv.shape:
+        raise ValueError(f"shape mismatch: trades {trade_sizes.shape} vs ADV {adv.shape}")
+
+    sigma = (
+        np.full_like(trade_sizes, DEFAULT_DAILY_VOLATILITY)
+        if volatility is None
+        else np.asarray(volatility, dtype=float)
+    )
+    traded = trade_sizes > 0
+    if not traded.any():
+        return 0.0
+    if np.any(traded & ~(adv > 0)):
+        return float(1e6)
+
+    safe_adv = np.where(adv > 0, adv, 1.0)
+    per_asset = IMPACT_COEFFICIENT * sigma * np.power(trade_sizes / safe_adv, IMPACT_EXPONENT) * trade_sizes
+    cost = float(np.where(traded, per_asset, 0.0).sum())
     return cost if np.isfinite(cost) else float(1e6)
 
 
