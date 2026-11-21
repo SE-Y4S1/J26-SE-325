@@ -156,10 +156,44 @@ def plan_to_dict(plan) -> dict[str, Any]:  # noqa: ANN001 - WithdrawalPlan
     }
 
 
+def participation_warnings(
+    symbols,
+    current_weights,
+    target_weights,
+    total_value: float,
+    avg_daily_volume,
+    threshold: float = 0.10,
+) -> list[str]:
+    """Holdings whose recommended trade is a large share of their average daily volume.
+
+    The optimizer already prices market impact, but a number in a cost column is easy to miss
+    and the recommendation can still ask for a trade that cannot be done in a day. This names
+    the holding and the share, so the caller can show it next to the weights. A trade under
+    0.01% of the book is ignored; a trade in a name with no volume data is reported because
+    its cost cannot be estimated at all.
+    """
+    import numpy as np
+
+    trade = np.abs(np.asarray(target_weights, dtype=float) - np.asarray(current_weights, dtype=float)) * total_value
+    adv = np.asarray(avg_daily_volume, dtype=float)
+    found = []
+    for symbol, amount, volume in zip(symbols, trade, adv, strict=True):
+        if amount <= total_value * 1e-4:
+            continue
+        if volume <= 0:
+            found.append((float("inf"), f"{symbol}: the recommendation trades {amount:,.0f} but there is no "
+                                        "volume data for it, so its cost cannot be estimated."))
+        elif amount / volume > threshold:
+            share = amount / volume
+            found.append((share, f"{symbol}: the recommended trade is {share:.0%} of its average daily volume; "
+                                 "expect slippage and plan to spread it over several days."))
+    return [message for _, message in sorted(found, key=lambda item: -item[0])]
+
+
 def run_moead_rebalance(
     portfolio_state: dict[str, Any],
     risk_preference: float = 0.5,
-    selection_rule: str = "knee",
+    selection_rule: str = "scalarized",
     max_weight: float = 0.25,
     history_returns: dict[str, list[float]] | None = None,
 ) -> dict[str, Any]:
@@ -235,6 +269,8 @@ def run_moead_rebalance(
         rule=SelectionRule(selection_rule),
         preference_weights=(risk_preference, 1.0 - risk_preference, 0.5),
     )
+
+    warnings += participation_warnings(symbols, current_weights, chosen.weights, float(total), adv)
 
     return {
         "recommended_weights": {s: round(float(w), 6) for s, w in zip(symbols, chosen.weights, strict=True)},

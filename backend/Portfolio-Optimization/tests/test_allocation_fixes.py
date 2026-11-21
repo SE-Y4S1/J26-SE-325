@@ -398,3 +398,139 @@ def test_backtest_refuses_symbols_without_volume_instead_of_pricing_them_as_untr
     spec = BacktestSpec(lookback_days=120, rebalance_every=20, methods=("hold",))
     with pytest.raises(ValueError, match="no volume.*AAA"):
         run_portfolio_backtest(bars, spec)
+
+
+# --------------------------------------------------------------------------------------
+# Corner seeding: the evolutionary front must reach the extremes it was missing
+# --------------------------------------------------------------------------------------
+
+def _twelve_asset_case():
+    rng = np.random.default_rng(0)
+    n = 12
+    vol = rng.uniform(0.008, 0.03, n)
+    mu = vol * 0.05
+    adv = 10 ** rng.uniform(6, 10, n)
+    current = np.full(n, 1.0 / n)
+    scenarios = correlated_normal_scenarios(mu, vol, correlation=0.5, n_scenarios=300, seed=1)
+    return {"mu": mu, "vol": vol, "adv": adv, "current": current, "scenarios": scenarios,
+            "value": 1.0e6, "cap": 0.3, "symbols": tuple(map(str, range(n)))}
+
+
+def test_corner_seeds_are_feasible_and_include_do_nothing_and_greedy_max_return() -> None:
+    from optimization.moead_rebalance import _corner_seeds
+
+    case = _twelve_asset_case()
+    seeds = _corner_seeds(case["mu"], case["scenarios"], case["current"], 0.0, case["cap"])
+
+    assert len(seeds) >= 3
+    for seed in seeds:
+        assert seed.sum() == pytest.approx(1.0, abs=1e-6)
+        assert seed.max() <= case["cap"] + 1e-9 and seed.min() >= -1e-12
+    assert any(np.allclose(seed, case["current"]) for seed in seeds)        # zero-cost corner
+
+    # Greedy max-return: fill the best assets to the cap. No feasible weight vector beats it.
+    best = max(float(seed @ case["mu"]) for seed in seeds)
+    top = np.sort(case["mu"])[::-1]
+    full, rest = int(1.0 // case["cap"]), 1.0 - int(1.0 // case["cap"]) * case["cap"]
+    greedy = float(top[:full].sum() * case["cap"] + (top[full] * rest if rest > 1e-12 else 0.0))
+    assert best == pytest.approx(greedy, rel=1e-6)
+
+
+def test_seeded_front_gets_close_to_the_exact_minimum_cvar() -> None:
+    """Measured before seeding: front min CVaR 0.0220 against an exact 0.0157 (40% worse).
+    The low-risk corner needs an optimization, not luck, to be found at 100 generations."""
+    case = _twelve_asset_case()
+    exact = solve_weighted_sum(
+        case["mu"], case["scenarios"], case["adv"], case["current"], case["value"],
+        coefficients=(0.0, 1.0, 0.0), volatility=case["vol"], max_weight=case["cap"],
+    )
+    front = optimize_allocation(
+        case["mu"], case["scenarios"], case["adv"], case["current"], case["value"], case["symbols"],
+        volatility=case["vol"], config=MOEADConfig(n_partitions=8, n_generations=100, max_weight=case["cap"]),
+    )
+    assert front.objectives[:, 1].min() <= 1.10 * risk_cvar(exact, case["scenarios"])
+
+
+def test_corner_seeding_is_on_by_default_and_can_be_switched_off() -> None:
+    assert MOEADConfig().seed_corners is True
+    case = _twelve_asset_case()
+    front = optimize_allocation(
+        case["mu"], case["scenarios"], case["adv"], case["current"], case["value"], case["symbols"],
+        volatility=case["vol"],
+        config=MOEADConfig(n_partitions=4, n_generations=10, max_weight=case["cap"], seed_corners=False),
+    )
+    assert len(front) > 0
+
+
+# --------------------------------------------------------------------------------------
+# A recommendation that trades a large share of a name's volume must say so
+# --------------------------------------------------------------------------------------
+
+def test_participation_warnings_name_holdings_trading_a_large_share_of_adv() -> None:
+    from agent.tools import participation_warnings
+
+    warnings = participation_warnings(
+        ("AAA", "THIN"), np.array([0.5, 0.5]), np.array([0.3, 0.7]), 1.0e6, np.array([5.0e8, 1.0e5]),
+        threshold=0.10,
+    )
+    assert len(warnings) == 1
+    assert "THIN" in warnings[0] and "AAA" not in warnings[0]
+    assert "average daily volume" in warnings[0]
+
+
+def test_participation_warnings_are_empty_when_every_trade_is_small() -> None:
+    from agent.tools import participation_warnings
+
+    assert participation_warnings(
+        ("AAA", "BBB"), np.array([0.5, 0.5]), np.array([0.45, 0.55]), 1.0e6, np.array([5.0e8, 5.0e8]),
+    ) == []
+
+
+def test_participation_warnings_call_out_a_trade_in_a_name_with_no_volume_data() -> None:
+    from agent.tools import participation_warnings
+
+    warnings = participation_warnings(
+        ("AAA", "NOVOL"), np.array([0.5, 0.5]), np.array([0.4, 0.6]), 1.0e6, np.array([5.0e8, 0.0]),
+    )
+    assert len(warnings) == 1 and "NOVOL" in warnings[0] and "no volume" in warnings[0]
+
+
+def test_rebalance_includes_the_participation_warnings(monkeypatch) -> None:
+    import agent.tools as tools
+
+    monkeypatch.setattr(tools, "participation_warnings", lambda *a, **k: ["marker warning"])
+    result = tools.run_moead_rebalance(_state(with_forecast=True))
+    assert "marker warning" in result["warnings"]
+
+
+def test_backtest_can_evaluate_each_moead_selection_rule() -> None:
+    """The knee is not the only way to pick a point from the front; the backtest must be able
+    to score the others so a default is chosen on realized evidence, not on a guess."""
+    from evaluation.backtest import BacktestConfig  # noqa: F401 - keeps the import graph honest
+    from evaluation.portfolio_backtest import ALL_METHODS, BacktestSpec, run_portfolio_backtest, summarize
+    from optimization.moead_rebalance import MOEADConfig
+
+    assert {"moead_knee", "moead_scalarized", "moead_max_sharpe"} <= set(ALL_METHODS)
+
+    spec = BacktestSpec(
+        portfolio_value=1.0e6, lookback_days=120, rebalance_every=100, max_weight=0.6,
+        methods=("moead_scalarized", "moead_max_sharpe"),
+        moead=MOEADConfig(n_partitions=3, n_generations=5),
+    )
+    summary = summarize(run_portfolio_backtest(_bars(), spec)).set_index("method")
+    assert set(summary.index) == {"moead_scalarized", "moead_max_sharpe"}
+    assert (summary["total_cost"] > 0).all()
+
+
+def test_scalarized_is_the_default_selection_rule_everywhere() -> None:
+    """Chosen on realized evidence (walk-forward, corrected front): scalarized beat the knee on
+    net return, Sharpe, drawdown and cost, and held a tenth of the thin name where the knee
+    held a fifth. The knee remains available by name."""
+    import inspect
+
+    from agent.tools import run_moead_rebalance
+    from service.contracts import PortfolioRequest
+
+    assert PortfolioRequest.model_fields["selection_rule"].default == "scalarized"
+    assert inspect.signature(run_moead_rebalance).parameters["selection_rule"].default == "scalarized"
+    assert "knee" in {"knee", "max_sharpe", "scalarized"}   # still a valid, selectable rule

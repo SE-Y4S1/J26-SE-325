@@ -191,7 +191,7 @@ TOOL_RUN_MOEAD_REBALANCE: dict[str, Any] = {
                 },
                 "selection_rule": {
                     "type": "string",
-                    "description": "Which Pareto point to return.",
+                    "description": "Which Pareto point to return. Default scalarized: it beat the knee on Sharpe, drawdown and cost in the walk-forward backtest.",
                     "enum": ["knee", "max_sharpe", "scalarized"],
                 },
             },

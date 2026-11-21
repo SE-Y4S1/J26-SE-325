@@ -63,7 +63,7 @@ class ForecastResponse(BaseModel):
 class PortfolioRequest(BaseModel):
     holdings: list[Holding]
     risk_preference: float = Field(default=0.5, ge=0.0, le=1.0)
-    selection_rule: str = Field(default="knee")
+    selection_rule: str = Field(default="scalarized")
     max_weight: float = Field(default=0.25, gt=0.0, le=1.0)
     allow_shorting: bool = False
     base_currency: str | None = None    # None = the service's BASE_CURRENCY

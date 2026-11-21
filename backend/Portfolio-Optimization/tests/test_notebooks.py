@@ -122,3 +122,17 @@ def test_laya_notebook_bootstraps_by_date() -> None:
     assert "paired_block_bootstrap" in code
     assert "rng.choice(d" not in code, "resampling rows that share a date understates the interval"
     assert 'groups=frame["date"]' in code
+
+
+def test_laya_notebook_defaults_to_a_real_run_not_the_smoke_preset() -> None:
+    code = _code("colab_laya_decision.ipynb")
+    assert re.search(r'^RUN_SIZE\s*=\s*"pp1"', code, re.M), (
+        'Run-all on "smoke" produced numbers the notebook itself labels "not a result"'
+    )
+    assert "smoke" in code, "the smoke preset must still exist for a pipeline check"
+
+
+def test_finetune_records_library_versions_with_the_adapters() -> None:
+    code = _code("colab_finetune.ipynb")
+    assert "library_versions" in code
+    assert "'versions'" in code, "adapters_meta.json must carry the library versions the run used"

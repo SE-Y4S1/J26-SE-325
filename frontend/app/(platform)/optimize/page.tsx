@@ -11,6 +11,7 @@
 import { Suspense, useState } from "react";
 
 import { ExecutionPanel } from "@/components/ExecutionPanel";
+import { OptimizeNotices } from "@/components/OptimizeNotices";
 import { Button, Card, Field, Notice, Spinner, Stat, percent } from "@/components/ui";
 import { optimizeAllocation, type SelectionRule } from "@/lib/api/portfolio";
 import type { OptimizeResponse } from "@/lib/api/types";
@@ -21,7 +22,7 @@ const RULES: Array<{ value: SelectionRule; label: string; blurb: string }> = [
     value: "knee",
     label: "Knee point",
     blurb:
-      "Maximum trade-off curvature — where giving up more return stops buying a proportionate reduction in risk. Parameter-free, so no preference weights have to be justified.",
+      "Maximum trade-off curvature — where giving up more return stops buying a proportionate reduction in risk. Parameter-free, but in the walk-forward backtest it traded more, cost about twice as much and returned less than Scalarized, so it is not the default.",
   },
   {
     value: "max_sharpe",
@@ -33,14 +34,14 @@ const RULES: Array<{ value: SelectionRule; label: string; blurb: string }> = [
     value: "scalarized",
     label: "Scalarized",
     blurb:
-      "Weighted sum under explicit preferences. Maps to a real risk-profile slider, but the weights are an input someone must defend.",
+      "Default. Weighted sum under explicit preferences, mapped to the risk slider. It had the best Sharpe, drawdown and cost of the three rules in the walk-forward backtest, though the weights are an input someone must defend.",
   },
 ];
 
 function OptimizeScreen() {
   const { portfolio, loading, error, reload } = usePortfolio();
 
-  const [rule, setRule] = useState<SelectionRule>("knee");
+  const [rule, setRule] = useState<SelectionRule>("scalarized");
   const [riskPreference, setRiskPreference] = useState(0.5);
   const [maxWeight, setMaxWeight] = useState(0.25);
 
@@ -151,6 +152,8 @@ function OptimizeScreen() {
             />
             <Stat label="Pareto front" value={`${result.pareto_front_size} pts`} />
           </div>
+
+          <OptimizeNotices warnings={result.warnings} scenarioSource={result.scenario_source} />
 
           <Card title="Recommended weights" subtitle={result.selection_rationale}>
             <div className="space-y-2">

@@ -100,3 +100,21 @@ def assert_template_keeps_tool_turns(render: Callable[[list[dict[str, str]]], st
             f"against {expected} of tool output. Pick a base model whose template supports the "
             "tool role, or render tool results into the user turn before training."
         )
+
+
+def library_versions(names: list[str]) -> dict[str, str | None]:
+    """Installed version of each distribution, or None when it is not installed.
+
+    Written into adapters_meta.json and printed before the SFT, so a run on Colab -- where the
+    ML stack floats with the runtime image -- can be reproduced or diagnosed afterwards without
+    guessing which transformers/trl pairing it used.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    found: dict[str, str | None] = {}
+    for name in names:
+        try:
+            found[name] = version(name)
+        except PackageNotFoundError:
+            found[name] = None
+    return found

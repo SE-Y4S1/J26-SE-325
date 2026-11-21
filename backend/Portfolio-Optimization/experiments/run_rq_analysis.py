@@ -211,7 +211,7 @@ def rq2_realized_backtest(
     The default is institution-sized so liquidity actually binds on the thinner names; run it
     at several sizes before drawing a conclusion.
     """
-    from evaluation.portfolio_backtest import METHODS as ALL_METHODS
+    from evaluation.portfolio_backtest import METHODS as DEFAULT_METHODS
     from evaluation.portfolio_backtest import BacktestSpec, run_portfolio_backtest, summarize
 
     path = bars_path or (RESULTS_DIR.parent / "hybrid_training" / "bars.parquet")
@@ -226,7 +226,7 @@ def rq2_realized_backtest(
         bars = bars[~bars["symbol"].isin(dropped)]
     spec = BacktestSpec(
         portfolio_value=portfolio_value, rebalance_every=rebalance_every,
-        methods=methods or ALL_METHODS,
+        methods=methods or DEFAULT_METHODS,
     )
     result = run_portfolio_backtest(bars, spec)
     summary = summarize(result)
@@ -340,6 +340,8 @@ def main() -> None:
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--rq2-backtest", action="store_true",
                         help="also run the slow walk-forward backtest for RQ2 (real bars)")
+    parser.add_argument("--rq2-methods", nargs="*", default=None,
+                        help="backtest only these methods (see evaluation.portfolio_backtest.ALL_METHODS)")
     parser.add_argument("--portfolio-value", type=float, default=5.0e8,
                         help="book size for the RQ2 backtest, in the bars' currency")
     args = parser.parse_args()
@@ -358,7 +360,10 @@ def main() -> None:
         print("\n=== RQ2 mechanism: predicted objectives, mean/std over seeds (synthetic inputs) ===")
         print(table.to_string(index=False))
         if args.rq2_backtest:
-            realized = rq2_realized_backtest(portfolio_value=args.portfolio_value)
+            realized = rq2_realized_backtest(
+                portfolio_value=args.portfolio_value,
+                methods=tuple(args.rq2_methods) if args.rq2_methods else None,
+            )
             realized.to_csv(RESULTS_DIR / "rq2_realized.csv", index=False)
             print("\n=== RQ2 realized: walk-forward net performance on real bars ===")
             print(realized.to_string(index=False))

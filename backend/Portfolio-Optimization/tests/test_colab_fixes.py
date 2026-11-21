@@ -284,3 +284,11 @@ def test_template_check_passes_when_tool_text_survives() -> None:
     from agent.sft import assert_template_keeps_tool_turns
 
     assert_template_keeps_tool_turns(lambda messages: "\n".join(m["content"] for m in messages), _trajectory())
+
+
+def test_library_versions_reports_installed_packages_and_none_for_missing_ones() -> None:
+    from agent.sft import library_versions
+
+    versions = library_versions(["numpy", "definitely-not-an-installed-package"])
+    assert isinstance(versions["numpy"], str) and versions["numpy"]
+    assert versions["definitely-not-an-installed-package"] is None

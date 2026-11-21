@@ -40,6 +40,12 @@ class MOEADConfig:
     max_weight: float = 0.25    # per-asset cap; prevents degenerate single-name solutions
     min_weight: float = 0.0     # no shorting by default
     allow_shorting: bool = False
+    # Add the exact corner portfolios (do nothing, equal weight, greedy max-return, min-variance,
+    # min-CVaR) to the final front as an elitist archive. At 100 generations the evolved front
+    # otherwise stops well short of the low-risk corner (measured: min CVaR 0.0220 against an
+    # exact 0.0157), and PBI decomposition would discard them again if used as a starting
+    # population (see _merge_corner_solutions).
+    seed_corners: bool = True
 
 
 @dataclass(frozen=True)
@@ -126,6 +132,122 @@ def _objective_scales(
     return np.where(span > 1e-15, span, 1.0)
 
 
+def _min_cvar_weights(returns: np.ndarray, max_w: float, alpha: float = 0.95) -> np.ndarray | None:
+    """Exact minimum-CVaR long-only weights: Rockafellar-Uryasev as a linear program.
+
+    With no trading-cost term the CVaR corner of the front is a pure LP, which HiGHS solves in
+    milliseconds even at 500 scenarios; the cost-aware version needs the ~300-variable
+    nonlinear solve in convex_reference.py, which is too slow for the interactive endpoint.
+    """
+    from scipy.optimize import linprog
+    from scipy.sparse import bmat, csr_matrix, identity
+
+    n_scen, n = returns.shape
+    tail = 1.0 / ((1.0 - alpha) * n_scen)
+    cost = np.concatenate([np.zeros(n), [1.0], np.full(n_scen, tail)])        # [w, t, u]
+    # u_s + r_s.w + t >= 0   <=>   -r_s.w - t - u_s <= 0
+    a_ub = bmat([[csr_matrix(-returns), csr_matrix(-np.ones((n_scen, 1))), -identity(n_scen)]], format="csr")
+    a_eq = csr_matrix(np.concatenate([np.ones(n), np.zeros(1 + n_scen)])[None, :])
+    result = linprog(
+        cost, A_ub=a_ub, b_ub=np.zeros(n_scen), A_eq=a_eq, b_eq=[1.0],
+        bounds=[(0.0, max_w)] * n + [(None, None)] + [(0.0, None)] * n_scen, method="highs",
+    )
+    if not result.success:
+        return None
+    weights = np.clip(result.x[:n], 0.0, max_w)
+    return weights / weights.sum()
+
+
+def _corner_seeds(
+    mu: np.ndarray,
+    scenarios: np.ndarray,
+    current: np.ndarray,
+    min_w: float,
+    max_w: float,
+) -> list[np.ndarray]:
+    """The corner portfolios alone (see _corner_seeds_tagged)."""
+    return [seed for seed, _ in _corner_seeds_tagged(mu, scenarios, current, min_w, max_w)]
+
+
+def _corner_seeds_tagged(
+    mu: np.ndarray,
+    scenarios: np.ndarray,
+    current: np.ndarray,
+    min_w: float,
+    max_w: float,
+) -> list[tuple[np.ndarray, int | None]]:
+    """Feasible portfolios at the front's corners, kept as an elitist archive.
+
+    * the current book (zero trading cost: the low-cost corner)
+    * equal weights
+    * greedy max-return: fill the best-forecast assets to the cap (the high-return corner;
+      no feasible vector earns more)
+    * minimum variance on the scenarios
+    * exact minimum CVaR on the scenarios (an LP; the low-risk corner itself)
+    """
+    from scipy.optimize import minimize
+
+    n = mu.size
+    # (portfolio, objective whose corner it is): 0 return, 1 CVaR, 2 cost; None = no corner.
+    seeds: list[tuple[np.ndarray, int | None]] = [
+        (_normalize(current, min_w, max_w), 2), (np.full(n, 1.0 / n), None),
+    ]
+
+    greedy = np.zeros(n)
+    remaining = 1.0
+    for index in np.argsort(-mu):
+        take = min(max_w, remaining)
+        greedy[index] = take
+        remaining -= take
+        if remaining <= 1e-12:
+            break
+    seeds.append((_normalize(greedy, min_w, max_w), 0))
+
+    returns = np.asarray(scenarios, dtype=float)
+    if returns.shape[1] != n and returns.shape[0] == n:
+        returns = returns.T
+    if returns.shape[1] == n and returns.shape[0] > n:
+        cov = np.cov(returns, rowvar=False)
+        result = minimize(
+            lambda w: float(w @ cov @ w), np.full(n, 1.0 / n), jac=lambda w: 2.0 * cov @ w,
+            method="SLSQP", bounds=[(0.0, max_w)] * n,
+            constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0, "jac": lambda w: np.ones(n)}],
+            options={"maxiter": 200, "ftol": 1e-12},
+        )
+        if result.success and np.isfinite(result.x).all():
+            seeds.append((_normalize(result.x, min_w, max_w), None))
+
+        exact = _min_cvar_weights(returns, max_w)
+        if exact is not None and np.isfinite(exact).all():
+            seeds.append((_normalize(exact, min_w, max_w), 1))
+
+    return seeds
+
+
+def _merge_corner_solutions(weights, objectives, corners, raw_objectives):
+    """Add the exact corner portfolios to a front and keep only the non-dominated rows.
+
+    Seeding the starting population does not work here: for three objectives pymoo's MOEA/D
+    decomposes with PBI, which prefers balanced points and replaces an extreme one within a
+    generation or two (measured: the exact min-CVaR seed was present after generation 1 and
+    gone after generation 2). So the corners are kept as an elitist archive instead. They are
+    real Pareto-optimal points, and including them gives the selection rules the front's true
+    extent to normalize against.
+    """
+    from optimization.pareto_selection import is_non_dominated
+
+    corner_w = np.vstack(corners)
+    corner_f = np.vstack([raw_objectives(w) for w in corner_w])
+    all_w = np.vstack([weights, corner_w])
+    all_f = np.vstack([objectives, corner_f])
+
+    _, unique = np.unique(np.round(all_f, 12), axis=0, return_index=True)
+    unique = np.sort(unique)
+    all_w, all_f = all_w[unique], all_f[unique]
+    keep = is_non_dominated(all_f)
+    return all_w[keep], all_f[keep]
+
+
 def optimize_allocation(
     expected_returns: np.ndarray,
     quantile_forecasts: np.ndarray,
@@ -207,6 +329,11 @@ def optimize_allocation(
     # Return the PROJECTED weights, not the raw genomes -- the caller must receive weights
     # that actually satisfy the constraints they were promised.
     weights = np.vstack([_normalize(row, min_w, max_w) for row in raw])
+
+    if config.seed_corners and min_w >= 0:
+        weights, objectives = _merge_corner_solutions(
+            weights, objectives, _corner_seeds(mu, quantiles, current, min_w, max_w), raw_objectives
+        )
 
     logger.info("MOEA/D produced %d solutions over %d generations", len(weights), config.n_generations)
 

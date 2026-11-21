@@ -1739,7 +1739,7 @@
           "selection_rule": {
             "type": "string",
             "title": "Selection Rule",
-            "default": "knee"
+            "default": "scalarized"
           },
           "max_weight": {
             "type": "number",
@@ -1831,6 +1831,24 @@
               }
             ],
             "title": "Currency"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "scenario_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scenario Source"
           }
         },
         "type": "object",

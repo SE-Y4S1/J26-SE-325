@@ -582,7 +582,7 @@ export interface components {
             risk_preference: number;
             /**
              * Selection Rule
-             * @default knee
+             * @default scalarized
              */
             selection_rule: string;
             /**
@@ -629,6 +629,10 @@ export interface components {
             currency?: {
                 [key: string]: unknown;
             } | null;
+            /** Warnings */
+            warnings?: string[];
+            /** Scenario Source */
+            scenario_source?: string | null;
         };
         /** QuoteRequest */
         QuoteRequest: {

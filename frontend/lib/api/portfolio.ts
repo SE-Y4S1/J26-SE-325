@@ -78,7 +78,7 @@ export function optimizeAllocation(params: OptimizeParams): Promise<OptimizeResp
     body: {
       holdings: params.holdings,
       risk_preference: params.riskPreference ?? 0.5,
-      selection_rule: params.selectionRule ?? "knee",
+      selection_rule: params.selectionRule ?? "scalarized",
       max_weight: params.maxWeight ?? 0.25,
       allow_shorting: params.allowShorting ?? false,
       base_currency: params.baseCurrency ?? null,

@@ -371,21 +371,21 @@ mean over 5 seeds (`run_rq_analysis.py --rq 2`). Cost is total slippage as a fra
 |---|---|---|---|---|
 | Markowitz, cost-blind | 0.000699 | 0.0226 | 1.5e-4 | 0.098 |
 | **Markowitz, cost-aware** | 0.000694 | 0.0226 | **6e-6** | 0.100 |
-| MOEA/D (knee) | 0.000882 | 0.0308 | 1.1e-3 | 0.277 |
-| MOEA/D (return/CVaR) | 0.000731 | 0.0236 | 2.0e-4 | 0.114 |
-| MOEA/D (scalarized) | 0.000724 | 0.0236 | 1.7e-5 | 0.099 |
+| MOEA/D (knee) | 0.000853 | 0.0287 | 4.6e-4 | 0.200 |
+| MOEA/D (return/CVaR) | 0.000719 | 0.0231 | 1.9e-4 | 0.114 |
+| MOEA/D (scalarized, the default) | 0.000724 | 0.0236 | 1.7e-5 | 0.099 |
 
 Against the cost-BLIND baseline, MOEA/D (scalarized) is ~9x cheaper at slightly higher
 return. Against a Markowitz that is told what trading costs, that advantage is gone: the
 cost-aware baseline is cheaper than every MOEA/D rule at the same return. The mechanism is
 "price the trade", which any cost-aware method gets, not something specific to MOEA/D.
-The knee rule now selects a high-return, high-risk, high-cost point holding 28% of the thin
-name; see the note on the knee below.
+The knee rule selects a higher-return, higher-risk, higher-cost point holding 20% of the thin
+name (28% before the corner archive below); see the note on the default rule.
 
 *Realized check* -- walk-forward on 22 real equity/ETF series (FX dropped: no volume), 30
 rebalances every 42 sessions, book of 5e8 so liquidity binds on the thinner names, every
 method seeing only bars up to each date and paying the modelled impact cost on the trade it
-made (`run_rq_analysis.py --rq 2 --rq2-backtest`):
+made (`run_rq_analysis.py --rq 2 --rq2-backtest`; `--rq2-methods moead_scalarized moead_max_sharpe` scores specific methods, see `evaluation.portfolio_backtest.ALL_METHODS`):
 
 | Method | Net return | Sharpe | Sortino | Max drawdown | Total cost | Turnover |
 |---|---|---|---|---|---|---|
@@ -393,14 +393,22 @@ made (`run_rq_analysis.py --rq 2 --rq2-backtest`):
 | equal-weight, rebalanced | 140.8% | 1.20 | 1.76 | -22.4% | 0.04% | 1.1 |
 | Markowitz, cost-blind | 67.2% | 0.85 | 1.21 | -16.0% | 1.14% | 7.8 |
 | Markowitz, cost-aware | 75.8% | 1.10 | 1.61 | -17.8% | 0.15% | 2.1 |
-| **MOEA/D (knee)** | 154.1% | **1.39** | **2.06** | -16.8% | 0.96% | 8.7 |
+| MOEA/D (knee) | 93.8% | 1.00 | 1.45 | -19.5% | 0.61% | 4.9 |
+| **MOEA/D (scalarized, the default)** | 102.9% | 1.06 | 1.53 | **-16.6%** | 0.29% | 3.1 |
+| MOEA/D (return/CVaR) | 70.5% | 0.82 | 1.18 | -16.9% | 1.61% | 9.6 |
 
-MOEA/D has the best Sharpe and Sortino and beats both Markowitz variants on net return, but
-it pays about 6x the cost of the cost-aware baseline, and plain buy-and-hold has the highest
-net return. Treat this as suggestive, not a result:
+**No optimizer beat plain buy-and-hold in this sample.** The best MOEA/D rule (scalarized)
+beats the cost-blind Markowitz and the knee, roughly matches cost-aware Markowitz on Sharpe
+(1.06 vs 1.10) with a higher net return (103% vs 76%) at about twice the cost, and trails
+buy-and-hold and rebalanced equal weight (Sharpe 1.19-1.20). A first version of this table
+showed the knee at Sharpe 1.39, the best of all; that was withdrawn. It disappeared (to 1.00)
+when the front gained its true corners, which says the knee's edge was an artifact of solver
+detail, not a property of the method -- and that one path is too fragile to rank methods on.
 
-* one path, one period (a strong equity bull market), no confidence interval -- a Sharpe gap
-  of 1.39 vs 1.19 is within what one path can produce by chance
+Treat the table as a sanity check, not a result:
+
+* one path, one period (a strong equity bull market, where doing nothing wins), no confidence
+  interval -- gaps of a tenth of a Sharpe point are within what one path produces by chance
 * expected returns are a trailing mean shrunk halfway to the cross-sectional mean, a
   forecast-free stand-in; the forecaster is not in this loop, and trailing-mean Markowitz is
   known to be poor, so the baselines may be handicapped
@@ -408,24 +416,35 @@ net return. Treat this as suggestive, not a result:
   tests the thin Colombo-exchange names the component is meant for
 * cost is the same square-root impact model for every method with an uncalibrated 0.30
   coefficient. The comparison is even-handed; the absolute level is an assumption
-* the synthetic check and the realized check disagree about MOEA/D against the cost-aware
-  baseline, which itself says the conclusion depends on the inputs
+* the synthetic and realized checks disagree about MOEA/D against the cost-aware baseline,
+  which itself says the conclusion depends on the inputs
 
 **Solver status.** The allocation problem is convex under total-slippage cost, so
 `optimization/convex_reference.py` solves it exactly (Rockafellar-Uryasev CVaR + SLSQP) as a
 check. Objectives are now rescaled before MOEA/D (they differ by orders of magnitude and
 Tchebycheff decomposition does not normalize): on a 12-asset case that took front hypervolume
-from 0.18 to 0.52 of a shared box. At 8 partitions x 100 generations the front still stops
-short of the exact min-CVaR extreme (CVaR 0.0220 vs exact 0.0157), so the corners are
-under-converged; a denser or longer run, or seeding with exact solves, would close that.
+from 0.18 to 0.52 of a shared box. At 8 partitions x 100 generations the evolved front still
+stopped short of the exact min-CVaR extreme (CVaR 0.0220 vs exact 0.0157). Seeding the
+starting population did not fix it: for three objectives pymoo decomposes with PBI, which
+prefers balanced points, and the exact corner seed was present after generation 1 and gone after
+generation 2. The corners are therefore kept as an elitist archive instead
+(`MOEADConfig.seed_corners`, on by default): the do-nothing book, equal weights, the greedy
+max-return portfolio, minimum variance and the exact minimum-CVaR portfolio (an LP, ~1 s at 26
+assets x 500 scenarios) are merged into the final front and dominated rows dropped. They are
+real Pareto-optimal points, and they give the selection rules the front's true extent to
+normalize against, which moved the knee (see below) and the realized numbers above.
 
-**Knee rule.** `knee_point` used a 2-D chord on a 3-objective front and picked an arbitrary
-corner (reproduced on a constructed front). It now measures distance from the hyperplane
-through the extreme points. That is the correct construction, but it moves the default: the
-knee now sits at a high-return, high-cost compromise. Whether `knee` should remain the API
-default for a liquidity-aware product, versus `scalarized`, is a product decision left open.
-The `max_sharpe` rule key is return/CVaR, not Sharpe (renamed in docs only, to keep the API
-stable).
+**Knee rule and the default.** `knee_point` used a 2-D chord on a 3-objective front and picked an
+arbitrary corner (reproduced on a constructed front). It now measures distance from the
+hyperplane through the front's extreme points, the correct construction. With that, and with
+the true corners in the front, the knee is a high-return, higher-cost compromise: 20% in the
+thin name in the synthetic check, and in the walk-forward it traded about 60% more than
+scalarized, paid about twice the cost and returned less (94% vs 103% net, Sharpe 1.00 vs 1.06).
+The API, the agent tool and the Optimize page therefore default to **`scalarized`**; `knee`
+remains selectable. This is one path and a sensitivity result, not proof that scalarized is
+best, but it is the rule that held up on the realized check and, in the synthetic one, left
+the thin name near its starting weight. The `max_sharpe` rule key is return/CVaR, not Sharpe, and was the worst
+realized (Sharpe 0.82, cost 1.6%); it is kept for the sensitivity analysis only.
 
 **RQ4 — an open problem, stated honestly.** The fuzzy GA has the *best* unstressed cost
 (1.96 vs 2.22) but degrades faster than most-liquid-first (degradation ratio 10.1 vs 4.5;
@@ -574,6 +593,19 @@ proposal-named method and is preferred whenever its weights are present.
 
 ## Known risks
 
+- **The registered `hybrid_h5` head is a small run.** It was trained on the 26-symbol US
+  universe only (holdout classes equity and ETF, 220 rows), not the CSE + Binance + US coverage
+  `colab_hybrid_heads.ipynb` describes, and no `hybrid_h21` exists. Its pinball improvement over
+  the base (0.0094 vs 0.0112) rests on that one small holdout. Only a notebook run on Colab fixes
+  this; nothing edited locally can. Until then, treat `/forecast` outputs as preliminary.
+- **The registered `laya_decision` head is weak** (accuracy 12-34% on urgency, risk tolerance,
+  action, trend, valuation). `LAYA_ENABLED=0` makes planning use the fuzzy rules alone
+  (`decision/engine.py`); keep it off until a retrained head beats its base rate in RQ5.
+- **Colab's ML stack floats with the runtime image.** Only `laya` is pinned (its API was checked
+  locally). `adapters_meta.json` and the SFT cell record the versions of torch, transformers,
+  peft, trl and bitsandbytes that a run actually used (`agent/sft.py::library_versions`), so a
+  run can be reproduced or diagnosed afterwards; the `SFT_SMOKE` pass is the guard against a bad
+  pairing before the real run.
 - **`scikit-fuzzy` is dormant** (no release since Aug 2024, declares no numpy upper bound).
   Pure-Python, so no ABI risk, but numpy-2 runtime behaviour is unverified upstream.
   `tests/test_env.py` evaluates a real Mamdani control system to catch this. It is a
@@ -647,7 +679,7 @@ proposal-named method and is preferred whenever its weights are present.
 
 ## Status
 
-All eight phases are complete. **707 tests passing, 5 skipped** (full suite, 2026-11-21),
+All eight phases are complete. **719 tests passing, 5 skipped** (full suite, 2026-11-21),
 zero unimplemented functions.
 
 | Phase | Scope | State |
@@ -707,8 +739,11 @@ moves are not folded in.
 **Holdings with no forecast.** They count as zero expected return and are named in `warnings`.
 With no forecasts at all the return objective is constant, so the result minimizes CVaR and
 trading cost only and `expected_return` is 0 by assumption -- the response says so rather than
-presenting it as a return-seeking plan. `warnings` and `scenario_source` are additive fields;
-the generated OpenAPI/TS client under `frontend/lib/api/generated/` has not been regenerated.
+presenting it as a return-seeking plan. A recommended trade that is more than 10% of a name's
+average daily volume (or any trade in a name with no volume data) is named in `warnings` too.
+`warnings` and `scenario_source` are additive fields; the generated OpenAPI/TS client under
+`frontend/lib/api/generated/` is regenerated to include them, and the Optimize page renders
+them (`frontend/components/OptimizeNotices.tsx`).
 
 ## Market data and per-stock sentiment
 

@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 TRADING_DAYS = 252
 ADV_WINDOW = 20
 METHODS = ("hold", "equal_weight", "markowitz", "markowitz_cost_aware", "moead_knee")
+# Every selection rule MOEA/D can be scored with; the default run only reports the knee.
+MOEAD_RULES = {
+    "moead_knee": SelectionRule.KNEE,
+    "moead_scalarized": SelectionRule.SCALARIZED,
+    "moead_max_sharpe": SelectionRule.MAX_SHARPE,
+}
+ALL_METHODS = METHODS + tuple(m for m in MOEAD_RULES if m not in METHODS)
 
 
 @dataclass(frozen=True)
@@ -92,13 +99,13 @@ def _target_weights(
         return cost_aware_mean_variance(
             mu, cov, current, adv, spec.portfolio_value, volatility=vol, max_weight=cap
         ).weights
-    if method == "moead_knee":
+    if method in MOEAD_RULES:
         config = MOEADConfig(**{**spec.moead.__dict__, "max_weight": cap, "seed": spec.seed})
         front = optimize_allocation(
             mu, scenarios, adv, current, spec.portfolio_value, symbols, volatility=vol, config=config
         )
-        return select(front.objectives, front.weights, rule=SelectionRule.KNEE).weights
-    raise ValueError(f"unknown method {method!r}; choose from {METHODS}")
+        return select(front.objectives, front.weights, rule=MOEAD_RULES[method]).weights
+    raise ValueError(f"unknown method {method!r}; choose from {ALL_METHODS}")
 
 
 def run_portfolio_backtest(bars: pd.DataFrame, spec: BacktestSpec | None = None) -> BacktestResult:
