@@ -764,7 +764,7 @@ proposal-named method and is preferred whenever its weights are present.
 
 ## Status
 
-All eight phases are complete. **833 tests passing, 5 skipped** (full suite, 2026-11-22),
+All eight phases are complete. **838 tests passing, 5 skipped** (full suite, 2026-11-23),
 zero unimplemented functions.
 
 | Phase | Scope | State |

@@ -355,3 +355,71 @@ def test_the_default_check_reports_no_problem_when_the_download_works(monkeypatc
 
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo_id, filename, **kw: "/cache/config.json")
     assert repo_access_problem("Qwen/Qwen2.5-3B-Instruct") is None
+
+
+# --------------------------------------------------------------------------------------
+# Mixed precision needs float32 trainable weights
+# --------------------------------------------------------------------------------------
+
+def _model_with_bf16_adapter():
+    torch = pytest.importorskip("torch")
+
+    class _Model(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.base = torch.nn.Linear(4, 4).to(torch.bfloat16)          # frozen, like a quantized base
+            self.lora = torch.nn.Linear(4, 4).to(torch.bfloat16)          # trainable adapter, in bf16
+            for p in self.base.parameters():
+                p.requires_grad_(False)
+
+    return _Model()
+
+
+def test_bf16_trainable_weights_are_cast_to_float32_and_frozen_ones_are_left_alone() -> None:
+    import torch
+
+    from agent.sft import ensure_fp32_trainable
+
+    model = _model_with_bf16_adapter()
+    cast = ensure_fp32_trainable(model)
+
+    assert cast == 2                                               # lora weight + bias
+    assert all(p.dtype == torch.float32 for p in model.lora.parameters())
+    assert all(p.dtype == torch.bfloat16 for p in model.base.parameters())    # frozen weights untouched
+    assert all(p.requires_grad for p in model.lora.parameters())
+
+
+def test_the_cast_is_a_no_op_when_the_trainable_weights_are_already_float32() -> None:
+    import torch
+
+    from agent.sft import ensure_fp32_trainable
+
+    model = _model_with_bf16_adapter()
+    model.lora.to(torch.float32)
+    assert ensure_fp32_trainable(model) == 0
+
+
+def test_a_cast_model_can_still_train_a_step() -> None:
+    """The cast must leave the parameters usable by an optimizer: same objects, grads flow."""
+    import torch
+
+    from agent.sft import ensure_fp32_trainable
+
+    model = _model_with_bf16_adapter()
+    ensure_fp32_trainable(model)
+    optimizer = torch.optim.SGD([p for p in model.parameters() if p.requires_grad], lr=0.1)
+
+    before = model.lora.weight.detach().clone()
+    loss = model.lora(torch.ones(2, 4)).sum()
+    loss.backward()
+    assert model.lora.weight.grad.dtype == torch.float32
+    optimizer.step()
+    assert not torch.equal(before, model.lora.weight.detach())
+
+
+def test_parameter_dtypes_separates_trainable_from_frozen() -> None:
+    from agent.sft import parameter_dtypes
+
+    summary = parameter_dtypes(_model_with_bf16_adapter())
+    assert summary["trainable"] == {"torch.bfloat16": 2}
+    assert summary["frozen"] == {"torch.bfloat16": 2}

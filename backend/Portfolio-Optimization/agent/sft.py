@@ -161,3 +161,35 @@ def resolve_base_model(
         skipped[repo_id] = problem
     detail = "; ".join(f"{repo}: {reason}" for repo, reason in skipped.items())
     raise RuntimeError(f"no SFT base model is reachable from this account ({detail})")
+
+
+def ensure_fp32_trainable(model) -> int:  # noqa: ANN001 - torch.nn.Module
+    """Cast every TRAINABLE parameter to float32; return how many tensors changed.
+
+    fp16 mixed precision keeps the weights being trained in float32 ("master weights") and runs
+    the forward pass in fp16 under autocast; the GradScaler then unscales those float32
+    gradients. LoRA adapters can arrive in bfloat16 -- Qwen's config declares bf16, and a
+    quantized base hands its dtype to the layers wrapped around it -- and the scaler cannot
+    unscale bf16 gradients: `"_amp_foreach_non_finite_check_and_unscale_cuda" not implemented
+    for 'BFloat16'`. The adapter is a few tens of millions of parameters, so float32 costs
+    almost nothing. Frozen weights (the 4-bit base, embeddings) are left exactly as loaded.
+    """
+    import torch
+
+    changed = 0
+    for parameter in model.parameters():
+        if parameter.requires_grad and parameter.dtype != torch.float32:
+            parameter.data = parameter.data.to(torch.float32)
+            changed += 1
+    return changed
+
+
+def parameter_dtypes(model) -> dict[str, dict[str, int]]:  # noqa: ANN001 - torch.nn.Module
+    """{"trainable": {dtype: tensor count}, "frozen": {...}}: printed before training so a dtype
+    problem names itself instead of surfacing as a kernel error three layers down."""
+    from collections import Counter
+
+    summary: dict[str, Counter] = {"trainable": Counter(), "frozen": Counter()}
+    for parameter in model.parameters():
+        summary["trainable" if parameter.requires_grad else "frozen"][str(parameter.dtype)] += 1
+    return {kind: dict(counter) for kind, counter in summary.items()}
