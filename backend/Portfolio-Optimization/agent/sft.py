@@ -118,3 +118,46 @@ def library_versions(names: list[str]) -> dict[str, str | None]:
         except PackageNotFoundError:
             found[name] = None
     return found
+
+
+def repo_access_problem(repo_id: str) -> str | None:
+    """Why this account cannot download `repo_id`, or None when it can.
+
+    Fetches only config.json, a few hundred bytes, so the check costs a second rather than the
+    multi-gigabyte download it protects. Gated repositories (Meta's Llama) answer 403 until the
+    account has accepted the licence AND been approved, which can take a while; finding that out
+    after the notebook has installed everything and loaded a dataset is what this avoids.
+    """
+    import huggingface_hub
+    from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+
+    try:
+        huggingface_hub.hf_hub_download(repo_id, "config.json")
+    except GatedRepoError:
+        return (f"gated: accept the licence at https://huggingface.co/{repo_id}, wait for approval, "
+                "and log in with that account")
+    except RepositoryNotFoundError:
+        return "not found, or private to another account"
+    except Exception as exc:  # noqa: BLE001 - any other failure is still a reason not to start training on it
+        return f"{type(exc).__name__}: {str(exc)[:120]}"
+    return None
+
+
+def resolve_base_model(
+    candidates: list[str],
+    check: Callable[[str], str | None] = repo_access_problem,
+) -> tuple[str, dict[str, str]]:
+    """The first candidate this account can download, plus {skipped candidate: reason}.
+
+    Order is preference: put the model you want first (Llama, which the TAF names) and an ungated
+    one after it (Qwen2.5, which the existing agent adapter was trained on). Raises, listing every
+    reason, when none is reachable.
+    """
+    skipped: dict[str, str] = {}
+    for repo_id in candidates:
+        problem = check(repo_id)
+        if problem is None:
+            return repo_id, skipped
+        skipped[repo_id] = problem
+    detail = "; ".join(f"{repo}: {reason}" for repo, reason in skipped.items())
+    raise RuntimeError(f"no SFT base model is reachable from this account ({detail})")

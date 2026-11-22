@@ -181,3 +181,11 @@ def test_finetune_scores_both_timesfm_generations_like_for_like() -> None:
     assert "'hybrid_2p5'" in code, "hybrid_lora is on 2.5, so it needs a 2.5 hybrid to be compared with"
     # `timesfm` and `timesfm_lora` must share a generation, or they no longer isolate fine-tuning.
     assert "'timesfm': ('timesfm', {'generation': '2.5'})" in code
+
+
+def test_finetune_sft_falls_back_to_an_ungated_base_instead_of_crashing_on_a_gated_one() -> None:
+    code = _code("colab_finetune.ipynb")
+    assert "resolve_base_model" in code
+    assert "meta-llama/Llama-3.2-3B-Instruct" in code, "Llama stays the preferred base (the TAF names it)"
+    assert "Qwen/Qwen2.5-3B-Instruct" in code, "the ungated base the existing agent adapter was trained on"
+    assert "base_model.txt" in code, "the base actually used must be recorded next to the adapter"

@@ -292,3 +292,66 @@ def test_library_versions_reports_installed_packages_and_none_for_missing_ones()
     versions = library_versions(["numpy", "definitely-not-an-installed-package"])
     assert isinstance(versions["numpy"], str) and versions["numpy"]
     assert versions["definitely-not-an-installed-package"] is None
+
+
+# --------------------------------------------------------------------------------------
+# Choosing an SFT base model that the account can actually download
+# --------------------------------------------------------------------------------------
+
+GATED = "gated: accept the licence at https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct and log in"
+
+
+def test_the_first_accessible_candidate_wins_and_nothing_is_reported_skipped() -> None:
+    from agent.sft import resolve_base_model
+
+    model, skipped = resolve_base_model(["org/a", "org/b"], check=lambda repo: None)
+    assert model == "org/a" and skipped == {}
+
+
+def test_a_gated_candidate_is_skipped_with_its_reason_and_the_next_one_is_used() -> None:
+    from agent.sft import resolve_base_model
+
+    reasons = {"meta-llama/Llama-3.2-3B-Instruct": GATED}
+    model, skipped = resolve_base_model(
+        ["meta-llama/Llama-3.2-3B-Instruct", "Qwen/Qwen2.5-3B-Instruct"], check=lambda repo: reasons.get(repo)
+    )
+    assert model == "Qwen/Qwen2.5-3B-Instruct"
+    assert skipped == {"meta-llama/Llama-3.2-3B-Instruct": GATED}
+
+
+def test_no_accessible_candidate_is_an_error_that_lists_every_reason() -> None:
+    from agent.sft import resolve_base_model
+
+    with pytest.raises(RuntimeError) as excinfo:
+        resolve_base_model(["org/a", "org/b"], check=lambda repo: f"{repo} is gated")
+    assert "org/a is gated" in str(excinfo.value) and "org/b is gated" in str(excinfo.value)
+
+
+def test_the_default_check_names_gating_as_the_reason(monkeypatch) -> None:
+    import huggingface_hub
+    from huggingface_hub.errors import GatedRepoError
+
+    from agent.sft import repo_access_problem
+
+    import httpx
+
+    url = "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/resolve/main/config.json"
+    response = httpx.Response(403, request=httpx.Request("HEAD", url), headers={"X-Error-Code": "GatedRepo"})
+
+    def gated(repo_id, filename, **kwargs):  # noqa: ANN001, ANN003
+        raise GatedRepoError("403 gated", response=response)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", gated)
+    reason = repo_access_problem("meta-llama/Llama-3.2-3B-Instruct")
+
+    assert reason and "gated" in reason
+    assert "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct" in reason
+
+
+def test_the_default_check_reports_no_problem_when_the_download_works(monkeypatch) -> None:
+    import huggingface_hub
+
+    from agent.sft import repo_access_problem
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo_id, filename, **kw: "/cache/config.json")
+    assert repo_access_problem("Qwen/Qwen2.5-3B-Instruct") is None
