@@ -40,15 +40,20 @@ def test_cse_reports_from_an_older_extractor_are_redone_but_current_ones_are_ski
     assert "cse:AAA.N0000:3" not in checkpoint.done
 
 
-def test_failed_cse_reports_are_retried_after_an_extractor_upgrade_only(tmp_path) -> None:
+def test_a_failed_report_is_always_retried_never_counted_as_done(tmp_path) -> None:
+    """An error row means no record was produced. Counting it as done meant a transient download
+    failure was never retried, and left the report with whatever an older extractor had made of it
+    (the 22 Nov backfill still held 237 version-1 CSE records, which this may explain)."""
     v = extract.EXTRACTOR_VERSION
     checkpoint = _checkpoint(tmp_path, [
         {"key": "cse:AAA.N0000:old-error", "error": "ValueError: boom"},
-        {"key": "cse:AAA.N0000:new-error", "error": "ValueError: boom", "extractor_version": v},
+        {"key": "cse:AAA.N0000:new-error", "error": "TimeoutError: slow", "extractor_version": v},
+        {"key": "cse:AAA.N0000:fine", "record": {"usable": True}, "extractor_version": v},
     ])
 
-    assert "cse:AAA.N0000:old-error" not in checkpoint.done          # a better extractor may now cope
-    assert "cse:AAA.N0000:new-error" in checkpoint.done              # same extractor: would fail again
+    assert "cse:AAA.N0000:old-error" not in checkpoint.done
+    assert "cse:AAA.N0000:new-error" not in checkpoint.done
+    assert "cse:AAA.N0000:fine" in checkpoint.done
 
 
 def test_us_filings_are_unaffected_by_the_pdf_extractor_version(tmp_path) -> None:

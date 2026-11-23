@@ -431,7 +431,9 @@ def test_checkpoint_resumes_and_skips_torn_lines(tmp_path) -> None:
     with checkpoint.path.open("a", encoding="utf-8") as handle:
         handle.write('{"key": "cse:A:3", "rec')                # disconnect mid-write
     resumed = Checkpoint(tmp_path)
-    assert resumed.done == {"cse:A:1", "cse:A:2"}
+    # A failed report ("cse:A:2") is NOT done: it is retried on the next run. Counting it as done left
+    # transient download failures permanently unfixed. The torn line ("cse:A:3") is skipped as before.
+    assert resumed.done == {"cse:A:1"}
     assert [r["report_id"] for r in resumed.rows()] == ["1"]
 
 

@@ -196,3 +196,47 @@ def test_finetune_sft_casts_trainable_weights_to_float32_before_training() -> No
     code = _code("colab_finetune.ipynb")
     assert "ensure_fp32_trainable" in code and "parameter_dtypes" in code
     assert code.index("ensure_fp32_trainable") < code.index("trainer.train()")
+
+
+def test_finetune_sft_does_not_block_on_a_browser_login_unless_asked() -> None:
+    """notebook_login() waits for a browser approval; Qwen needs no token, so the default run must not."""
+    code = _code("colab_finetune.ipynb")
+    assert "HF_LOGIN = False" in code
+    assert "if HF_LOGIN:" in code
+    call = "    notebook_login()"                      # the indented call, not the comment that names it
+    assert code.index("if HF_LOGIN:") < code.index(call) < code.index("resolve_base_model(BASE_MODELS)")
+
+
+# --------------------------------------------------------------------------------------
+# CSE training coverage: a smoke run's cache must never feed a full run
+# --------------------------------------------------------------------------------------
+
+def test_hybrid_heads_notebook_writes_to_a_fresh_directory_and_splits_per_class() -> None:
+    code = _code("colab_hybrid_heads.ipynb")
+    assert "j26_hybrid_v2" in code, "j26_hybrid holds caches built by a Laya smoke run (20 CSE names)"
+    assert '"--split", "per-class"' in code
+
+
+def test_pp1_notebook_splits_per_class() -> None:
+    assert '"--split", "per-class"' in _code("colab_pp1.ipynb")
+
+
+def test_laya_notebook_fetches_its_own_bars_instead_of_sharing_the_heads_cache() -> None:
+    """Both notebooks used to share j26_hybrid/bars.parquet; whichever ran first fixed the CSE
+    universe for the other. A Laya smoke run (20 CSE names) therefore capped the full head run."""
+    code = _code("colab_laya_decision.ipynb")
+    assert "collect_bars(HYBRID_DIR" not in code
+    assert "LAYA_BARS_DIR" in code
+    live = "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("#"))   # comments may name it
+    assert "j26_hybrid" not in live
+
+
+def test_laya_notebook_states_the_real_size_of_the_head() -> None:
+    assert "a few MB" not in _markdown("colab_laya_decision.ipynb")
+
+
+def test_finetune_rescores_rq1_on_identical_rows_from_the_saved_fold_predictions() -> None:
+    code = _code("colab_finetune.ipynb")
+    assert "aligned_metrics" in code
+    assert "rq1_forecast_aligned_" in code
+    assert "_folds_" in code, "the rescoring reads the per-fold predictions already on Drive"

@@ -552,6 +552,50 @@ synthetic pages and the real JKH and COMB fixtures still pass, but the true effe
 Part D re-run against the PDFs. Part D is resumable, which would have skipped every report already done; so
 records are now stamped `extractor_version` (2) and a report extracted by an older extractor is redone.
 
+## Colab results so far (22-23 Nov 2026), and what was wrong with them
+
+**Part D (fundamentals).** CSE usable rate **33.7% -> 67.1%** (usable records 2,564 of 7,602 -> 5,489 of 8,180);
+2,384 reports became usable and 11 stopped being so. The extractor fixes work on the real PDFs. Still
+unusable: 2,691, mostly "reporting period not detected" (997) and "no income statement page" (488).
+237 records were still extractor-version 1 (a failed re-extraction); failed reports are now retried on
+every run instead of counted as done.
+
+**Hybrid heads over TimesFM 3.0 -- the CSE rows are not valid.** Two defects, both fixed, rerun needed:
+1. *Only 20 CSE names trained, not ~270.* 271 of 279 CSE securities have >= 200 sessions (median 243), so
+   the filter was not the cause. The full run logged no CSE collection line at all: it reused a
+   `j26_hybrid/bars.parquet` that the Laya notebook's **smoke** preset (`cse_limit=20`) had written.
+   The two notebooks shared one cache, so whichever ran first fixed the universe for the other. Laya now
+   fetches its own bars, the heads notebook writes to `j26_hybrid_v2`, and the trainer records its
+   settings in the output folder and refuses one built under different settings (`check_cache`).
+2. *No CSE row was ever in training.* The split was one global cutoff (2025-08-17); CSE bars only cover
+   the last year, which starts after it. So every CSE row was holdout, the head's CSE class embedding was
+   never trained, and it scored 21.7% worse than its base on CSE at h5 (-1.7% at h21). The split is now per
+   asset class (`--split per-class`, default); the one cost, a small cross-market leak, is documented in
+   `split_cutoffs`.
+
+The non-CSE rows of that run stand (pinball improvement of the hybrid over its TimesFM 3.0 base):
+h5: equity +11.9%, ETF +13.9%, crypto -0.2%; h21: equity +27.1%, ETF +27.0%, crypto +12.1%. Holdout rows
+are small for equity (304) and ETF (114). Do not install `hybrid_heads.zip` from that run.
+
+**RQ1 (finetune notebook, 11 folds from 2020-01-29, h5).** Pinball loss: hybrid over 3.0 0.01001, LSTM
+0.01005, hybrid over the 2.5 LoRA base 0.01011, hybrid over 2.5 0.01018, TimesFM 3.0 0.01036, TimesFM 2.5
+0.01047, Chronos-Bolt 0.01056, Chronos LoRA 0.01053, TimesFM 2.5 LoRA 0.01064. Reading: 3.0 beats 2.5
+(zero-shot -1.0%, hybrid -1.7%); **LoRA gave no clear gain**; the raw foundation models have the best point
+error (MAE ~7% below the LSTM) but badly overconfident intervals (p10 coverage ~0.25 for a nominal 0.10,
+p90 ~0.68 for 0.90) that the hybrid repairs (0.115 / 0.846); the hybrid only TIES the LSTM. These models were
+scored on different rows (30,008 / 15,488 / 13,310 predictions), so the gaps are indicative; the notebook now
+has a cell that rescores every model on the identical rows from the saved fold predictions
+(`evaluation/alignment.py`). Quote that table, not the original.
+
+**Laya (RQ5, pp1 run, 8,381 clean test rows).** Pooled accuracy 0.624 vs 0.588 for always guessing the
+majority class, and pooled Brier skill against the base rate **-0.036: it does not beat the base rate**.
+Three Stage 1 questions do (financial_health, momentum_exhausted, near_support, with small skills of 0.26,
+0.04 and 0.04); the four Stage 2 decision questions beat zero-shot Laya (pooled accuracy 0.376, below the 0.588 of always guessing the majority class), but not
+the base rate. Keep `LAYA_ENABLED=0`. The head is ~53 MB, not the "few MB" earlier text said.
+
+**Not done yet:** the agent SFT (`component1_adapters.zip` holds only the two LoRA adapters; run Part B with
+`SFT_SMOKE = False`).
+
 ## Notebooks
 
 | Notebook | Runs where | Purpose |
@@ -764,7 +808,7 @@ proposal-named method and is preferred whenever its weights are present.
 
 ## Status
 
-All eight phases are complete. **838 tests passing, 5 skipped** (full suite, 2026-11-23),
+All eight phases are complete. **863 tests passing, 5 skipped** (full suite, 2026-11-23),
 zero unimplemented functions.
 
 | Phase | Scope | State |

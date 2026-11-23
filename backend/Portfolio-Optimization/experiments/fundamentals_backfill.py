@@ -102,6 +102,11 @@ class Checkpoint:
                 # US filings come from EDGAR's structured data, not the PDF extractor.
                 if key.startswith("cse:") and _row_version(row) < EXTRACTOR_VERSION:
                     continue
+                # A row without a record is a failure (a download that timed out, a PDF that would
+                # not parse). It is retried on every run: counting it as done left transient failures
+                # permanently unfixed, and the report with whatever an older extractor had made of it.
+                if "record" not in row:
+                    continue
                 self.done.add(key)
 
     def add(self, key: str, row: dict[str, Any]) -> None:
